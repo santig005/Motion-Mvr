@@ -26,6 +26,10 @@
 #                   (immune to the 360<->2K skew). Raising POSTROLL to merge long pauses does NOT
 #                   lengthen the clip tail.
 #   RING_KEEP_MIN   minutes an idle segment lives in the ring before being deleted (default: 5)
+#   BATTERY_HIST            local file with recent (epoch,pct) discharge samples (default:
+#                           ~/.battery_hist_<cam>; NOT uploaded). Reset whenever charging=true.
+#   BATTERY_HIST_WINDOW_SECS regression window for the discharge-rate estimate (default: 14400 = 4h)
+#   BATTERY_FLOOR_PCT       battery % the ETA extrapolates to (default: 5)
 set -u
 ENV_FILE="${CAM_ENV:-$HOME/cam.env}"
 if [ -f "$ENV_FILE" ]; then . "$ENV_FILE"; fi
@@ -57,6 +61,9 @@ HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (upl
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
+BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
+BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
+BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
 
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
@@ -80,11 +87,61 @@ read_battery(){
   echo "$pct $chg"
 }
 
+# Battery autonomy estimate. Piggybacks on the existing heartbeat (no new wakeups). While
+# discharging, appends (epoch,pct) to a small local history file and fits a simple linear
+# regression over the recent window to get a %/h rate, extrapolated to BATTERY_FLOOR_PCT for an
+# ETA in minutes. Charging resets the history (the slope changes sign, old points are meaningless).
+# Not uploaded: it's phone-local state, not something the app needs to see directly.
+update_battery_history(){ # $1=pct  $2=charging(true/false)
+  local pct="$1" chg="$2" now
+  now=$(date +%s)
+  if [ "$chg" = "true" ]; then
+    : > "$BATTERY_HIST" 2>/dev/null
+    return
+  fi
+  echo "$now $pct" >> "$BATTERY_HIST" 2>/dev/null
+  awk -v cutoff="$((now - BATTERY_HIST_WINDOW_SECS))" '$1>=cutoff' "$BATTERY_HIST" > "$BATTERY_HIST.tmp" 2>/dev/null \
+    && mv -f "$BATTERY_HIST.tmp" "$BATTERY_HIST" 2>/dev/null
+}
+
+# Prints "pct_per_h eta_minutes" or fails (nothing printed) if there isn't enough signal yet.
+compute_battery_eta(){ # $1=current pct
+  [ -s "$BATTERY_HIST" ] || return 1
+  awk -v cur="$1" -v floor="$BATTERY_FLOOR_PCT" '
+    { n++; x[n]=$1; y[n]=$2 }
+    END {
+      if (n < 2) exit 1
+      # Running-minimum filter: drop upward blips (battery-reporting noise) while discharging,
+      # so the regression sees a monotonic-ish trend instead of jitter.
+      fm = y[1]; fn = 0
+      for (i=1; i<=n; i++) if (y[i] <= fm) { fm=y[i]; fn++; fx[fn]=x[i]; fy[fn]=y[i] }
+      if (fn < 2) exit 1
+      sx=0; sy=0
+      for (i=1; i<=fn; i++) { sx+=fx[i]; sy+=fy[i] }
+      mx=sx/fn; my=sy/fn
+      num=0; den=0
+      for (i=1; i<=fn; i++) { dx=fx[i]-mx; num+=dx*(fy[i]-my); den+=dx*dx }
+      if (den <= 0) exit 1
+      rate_h = -(num/den) * 3600          # %/h; positive while discharging
+      if (rate_h <= 0.01) exit 1          # flat/insufficient signal -> no estimate
+      eta = (cur - floor) / rate_h * 60
+      if (eta < 0) eta = 0
+      printf "%.2f %d", rate_h, eta
+    }'
+}
+
 write_status(){ # $1=recording_ok(1/0)
-  local rec now bat extra=""
+  local rec now bat pct chg eta extra=""
   [ "$1" = 1 ] && rec=true || rec=false
   now=$(date +%s)
-  if bat=$(read_battery); then extra=",\"battery\":${bat% *},\"charging\":${bat#* }"; fi
+  if bat=$(read_battery); then
+    pct=${bat% *}; chg=${bat#* }
+    extra=",\"battery\":${pct},\"charging\":${chg}"
+    update_battery_history "$pct" "$chg"
+    if eta=$(compute_battery_eta "$pct"); then
+      extra="${extra},\"discharge_pct_per_h\":${eta% *},\"eta_minutes\":${eta#* }"
+    fi
+  fi
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null

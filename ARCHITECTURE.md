@@ -92,6 +92,12 @@ every ~20 min, independent of whether there's motion), and optional `battery`/`c
 Termux:API). The app reads these and distinguishes three failure modes: **camera down** (not
 recording), **not reporting** (heartbeat stale ⇒ phone probably off/offline), and **low battery**.
 
+While discharging, the same heartbeat also fits a linear regression over a rolling ~4h window of
+`(epoch, battery%)` samples (kept in a small local file, not uploaded) to derive a discharge rate
+and extrapolate an ETA. Both are optional fields in `status.json` (`discharge_pct_per_h`,
+`eta_minutes`) so the app can show "~4h20m left" instead of just a percentage — a rough linear
+estimate, reset on every charging transition since the slope changes.
+
 ## The viewer app
 
 A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choices:
