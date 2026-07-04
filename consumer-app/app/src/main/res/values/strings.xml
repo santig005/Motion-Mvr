@@ -47,6 +47,13 @@
 
     <!-- Clip card overlay -->
     <string name="overlay_new">NEW</string>
+    <string name="overlay_offline">"💾 OFFLINE"</string>
+
+    <!-- Auto-download toggle (offline playback) -->
+    <string name="auto_download_on">ON</string>
+    <string name="auto_download_off">OFF</string>
+    <string name="auto_download_enabled_toast">Auto-download enabled (Wi-Fi only): new clips will be saved for offline playback.</string>
+    <string name="auto_download_disabled_toast">Auto-download disabled.</string>
 
     <!-- Camera health -->
     <string name="status_down_title">⚠️ %s no signal</string>

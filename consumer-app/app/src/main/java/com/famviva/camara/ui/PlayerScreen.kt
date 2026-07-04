@@ -1,5 +1,7 @@
 package com.famviva.camara.ui
 
+import android.content.Context
+import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
@@ -18,45 +20,58 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import com.famviva.camara.R
 import com.famviva.camara.data.Clip
+import java.io.File
 
 /**
- * Plays the clip by progressively streaming the binary from Drive (?alt=media) with the
- * Authorization: Bearer <token> header. It works because the NVR muxes with +faststart
- * (the moov atom sits at the front of the mp4).
+ * Plays the clip from a local file if it's already downloaded (offline, instant, no auth needed);
+ * otherwise streams the binary from Drive (?alt=media) with the Authorization: Bearer <token>
+ * header. Streaming works because the NVR muxes with +faststart (the moov atom sits at the front
+ * of the mp4), so progressive playback starts immediately.
  */
 @Composable
-fun PlayerScreen(clip: Clip, tokenProvider: suspend () -> String, onBack: () -> Unit) {
+fun PlayerScreen(clip: Clip, localFile: File?, tokenProvider: suspend () -> String, onBack: () -> Unit) {
     val context = LocalContext.current
     var token by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(clip.id) {
-        try { token = tokenProvider() } catch (e: Exception) { error = e.message }
+    LaunchedEffect(clip.id, localFile) {
+        if (localFile == null) {
+            try { token = tokenProvider() } catch (e: Exception) { error = e.message }
+        }
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         when {
+            localFile != null -> {
+                val factory = remember { DefaultDataSource.Factory(context) }
+                VideoSurface(MediaItem.fromUri(Uri.fromFile(localFile)), factory, clip.id to "local", context)
+            }
             error != null -> Text(stringResource(R.string.error_prefix, error!!), color = MaterialTheme.colorScheme.error)
             token == null -> CircularProgressIndicator()
-            else -> VideoSurface(clip, token!!, context)
+            else -> {
+                val t = token!!
+                val factory = remember(t) {
+                    DefaultHttpDataSource.Factory().setDefaultRequestProperties(mapOf("Authorization" to "Bearer $t"))
+                }
+                VideoSurface(MediaItem.fromUri(clip.streamUrl), factory, clip.id to "remote", context)
+            }
         }
     }
 }
 
 @Composable
-private fun VideoSurface(clip: Clip, token: String, context: android.content.Context) {
-    val player = remember(clip.id, token) {
+private fun VideoSurface(mediaItem: MediaItem, dataSourceFactory: DataSource.Factory, key: Any, context: Context) {
+    val player = remember(key) {
         ExoPlayer.Builder(context).build().apply {
-            val factory = DefaultHttpDataSource.Factory()
-                .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
-            val source = ProgressiveMediaSource.Factory(factory)
-                .createMediaSource(MediaItem.fromUri(clip.streamUrl))
+            val source = ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
             setMediaSource(source)
             prepare()
             playWhenReady = true

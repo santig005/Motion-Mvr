@@ -9,8 +9,11 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.famviva.camara.data.CameraHealth
 import com.famviva.camara.data.Clip
+import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
+import java.io.File
 import java.time.LocalDate
 import kotlinx.coroutines.launch
 
@@ -25,9 +28,14 @@ enum class DateFilter(@StringRes val labelRes: Int) {
 class MainViewModel(
     private val drive: DriveClient,
     private val seen: SeenStore,
+    private val offline: OfflineStore,
+    private val cache: ClipListCache,
+    private val tokenProvider: suspend () -> String,
 ) : ViewModel() {
 
-    var clips by mutableStateOf<List<Clip>>(emptyList())
+    // Seeded from the cache so Days/Clips show something immediately on a cold start, before (or
+    // even without) a successful Drive round-trip.
+    var clips by mutableStateOf<List<Clip>>(cache.load())
         private set
     var loading by mutableStateOf(false)
         private set
@@ -41,8 +49,35 @@ class MainViewModel(
         private set
     var cameraHealth by mutableStateOf<List<CameraHealth>>(emptyList())
         private set
+    var autoDownloadEnabled by mutableStateOf(offline.autoDownloadEnabled)
+        private set
 
     fun selectDateFilter(f: DateFilter) { dateFilter = f }
+
+    fun isDownloaded(clip: Clip): Boolean = offline.isDownloaded(clip)
+
+    /** Local file to play from if it's already downloaded, or null to fall back to streaming. */
+    fun localFileOrNull(clip: Clip): File? = offline.localFile(clip).takeIf { it.exists() && it.length() > 0L }
+
+    fun setAutoDownload(enabled: Boolean) {
+        offline.autoDownloadEnabled = enabled
+        autoDownloadEnabled = enabled
+        if (enabled) downloadTodaysClips()
+    }
+
+    /** Auto-download is forward-looking, not a backfill of the whole history: bounded to today's
+     *  clips (grows through the day as new ones land) and to Wi-Fi, so turning it on can't kick
+     *  off downloading weeks of footage or burn mobile data. */
+    private fun downloadTodaysClips() {
+        if (!offline.isOnUnmeteredNetwork()) return
+        val today = LocalDate.now()
+        val pending = clips.filter { it.localDate == today && !offline.isDownloaded(it) }
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            val token = runCatching { tokenProvider() }.getOrNull() ?: return@launch
+            pending.forEach { clip -> runCatching { offline.download(clip, token) } }
+        }
+    }
 
     fun isNew(clip: Clip): Boolean = clip.id !in seenIds
 
@@ -62,8 +97,10 @@ class MainViewModel(
             error = null
             try {
                 clips = drive.listClips()
+                cache.save(clips)
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
                 loadedOnce = true
+                if (autoDownloadEnabled) downloadTodaysClips()
             } catch (e: Exception) {
                 error = e.message ?: e.javaClass.simpleName
             } finally {
@@ -98,8 +135,12 @@ class MainViewModel(
     class Factory(
         private val drive: DriveClient,
         private val seen: SeenStore,
+        private val offline: OfflineStore,
+        private val cache: ClipListCache,
+        private val tokenProvider: suspend () -> String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(drive, seen) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            MainViewModel(drive, seen, offline, cache, tokenProvider) as T
     }
 }

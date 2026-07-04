@@ -93,10 +93,14 @@ import kotlinx.coroutines.launch
 fun AppNav(
     drive: com.famviva.camara.data.DriveClient,
     seenStore: com.famviva.camara.data.SeenStore,
+    offlineStore: com.famviva.camara.data.OfflineStore,
+    clipListCache: com.famviva.camara.data.ClipListCache,
     tokenProvider: suspend () -> String,
 ) {
     val nav = rememberNavController()
-    val vm: MainViewModel = viewModel(factory = MainViewModel.Factory(drive, seenStore))
+    val vm: MainViewModel = viewModel(
+        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, tokenProvider),
+    )
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
@@ -109,9 +113,27 @@ fun AppNav(
             val clip = vm.find(id)
             // Opening the player marks the clip as seen.
             LaunchedEffect(id) { vm.markSeen(id) }
-            if (clip != null) PlayerScreen(clip, tokenProvider) { nav.popBackStack() }
+            if (clip != null) PlayerScreen(clip, vm.localFileOrNull(clip), tokenProvider) { nav.popBackStack() }
             else CenteredText(stringResource(R.string.clip_not_found))
         }
+    }
+}
+
+/** Top-bar toggle for auto-downloading new clips for offline playback (Wi-Fi only). */
+@Composable
+private fun AutoDownloadToggle(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val toastText = stringResource(
+        if (enabled) R.string.auto_download_disabled_toast else R.string.auto_download_enabled_toast,
+    )
+    TextButton(onClick = {
+        onToggle(!enabled)
+        Toast.makeText(context, toastText, Toast.LENGTH_SHORT).show()
+    }) {
+        Text(
+            "📥 " + stringResource(if (enabled) R.string.auto_download_on else R.string.auto_download_off),
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
@@ -159,6 +181,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name)) },
                 actions = {
+                    AutoDownloadToggle(vm.autoDownloadEnabled, vm::setAutoDownload)
                     LanguageMenu()
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
@@ -348,6 +371,7 @@ private fun ClipsScreen(
                                 clip = clip,
                                 token = token,
                                 isNew = vm.isNew(clip),
+                                isDownloaded = vm.isDownloaded(clip),
                                 onClick = { nav.navigate("player/${clip.id}") },
                                 onLongClick = { actionClip = clip },
                             )
@@ -436,6 +460,7 @@ private fun ClipCard(
     clip: Clip,
     token: String?,
     isNew: Boolean,
+    isDownloaded: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -480,6 +505,14 @@ private fun ClipCard(
                         bg = MaterialTheme.colorScheme.primary,
                         fg = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    )
+                }
+                if (isDownloaded) {
+                    OverlayChip(
+                        text = stringResource(R.string.overlay_offline),
+                        bg = Color.Black.copy(alpha = 0.6f),
+                        fg = Color.White,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
                     )
                 }
                 clip.durationLabel?.let { dur ->

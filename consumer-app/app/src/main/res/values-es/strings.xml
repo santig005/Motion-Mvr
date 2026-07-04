@@ -47,6 +47,13 @@
 
     <!-- Overlay de la tarjeta -->
     <string name="overlay_new">NUEVO</string>
+    <string name="overlay_offline">"💾 SIN CONEXIÓN"</string>
+
+    <!-- Toggle de auto-descarga (reproducción sin conexión) -->
+    <string name="auto_download_on">ON</string>
+    <string name="auto_download_off">OFF</string>
+    <string name="auto_download_enabled_toast">Auto-descarga activada (solo Wi-Fi): los clips nuevos se guardarán para verlos sin conexión.</string>
+    <string name="auto_download_disabled_toast">Auto-descarga desactivada.</string>
 
     <!-- Salud de la cámara -->
     <string name="status_down_title">⚠️ %s sin señal</string>

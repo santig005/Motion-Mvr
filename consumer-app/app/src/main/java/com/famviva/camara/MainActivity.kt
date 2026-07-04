@@ -10,7 +10,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.famviva.camara.auth.AuthManager
+import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
 import com.famviva.camara.notify.NewClipsWorker
 import com.famviva.camara.ui.AppNav
@@ -35,6 +37,8 @@ class MainActivity : AppCompatActivity() {
             onUnauthorized = { auth.invalidate() },
         )
         val seenStore = SeenStore(applicationContext)
+        val offlineStore = OfflineStore(applicationContext)
+        val clipListCache = ClipListCache(applicationContext)
 
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
@@ -42,7 +46,13 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         setContent {
             CamaraTheme {
-                AppNav(drive = drive, seenStore = seenStore, tokenProvider = { auth.token() })
+                AppNav(
+                    drive = drive,
+                    seenStore = seenStore,
+                    offlineStore = offlineStore,
+                    clipListCache = clipListCache,
+                    tokenProvider = { auth.token() },
+                )
             }
         }
     }
