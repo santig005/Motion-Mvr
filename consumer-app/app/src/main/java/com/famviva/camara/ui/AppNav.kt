@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -104,6 +105,7 @@ fun AppNav(
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
+        composable("storage") { StorageScreen(vm, nav) }
         composable("clips/{day}") { entry ->
             val day = entry.arguments?.getString("day").orEmpty()
             ClipsScreen(vm, nav, day, tokenProvider)
@@ -181,6 +183,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name)) },
                 actions = {
+                    TextButton(onClick = { nav.navigate("storage") }) { Text("💾") }
                     AutoDownloadToggle(vm.autoDownloadEnabled, vm::setAutoDownload)
                     LanguageMenu()
                     IconButton(onClick = { vm.load() }) {
@@ -285,6 +288,120 @@ private fun DayCard(day: String, clips: List<Clip>, newCount: Int, onClick: () -
     }
 }
 
+/**
+ * Device storage used by offline (downloaded) clips, by day, with device-only deletion — never
+ * touches the Drive originals (deleting there needs a broader OAuth scope, out of scope here).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
+    val context = LocalContext.current
+    val byDay = vm.offlineSizeByDay()
+    val totalBytes = vm.offlineTotalBytes()
+    val maxBytes = (byDay.maxOfOrNull { it.second } ?: 1L).coerceAtLeast(1L)
+    var confirmDeleteAll by remember { mutableStateOf(false) }
+    var confirmDeleteDay by remember { mutableStateOf<String?>(null) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.storage_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).padding(16.dp)) {
+            Text(
+                stringResource(R.string.storage_offline_total, humanSize(totalBytes)),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                stringResource(R.string.storage_offline_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+
+            if (byDay.isEmpty()) {
+                Text(stringResource(R.string.storage_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    items(byDay, key = { it.first }) { (day, bytes) ->
+                        StorageDayRow(
+                            label = prettyDate(context, day),
+                            bytes = bytes,
+                            fraction = bytes.toFloat() / maxBytes.toFloat(),
+                            onDelete = { confirmDeleteDay = day },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { confirmDeleteAll = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.storage_delete_all))
+                }
+            }
+        }
+    }
+
+    if (confirmDeleteAll) {
+        ConfirmDialog(
+            title = stringResource(R.string.storage_delete_all_title),
+            body = stringResource(R.string.storage_delete_all_body),
+            onConfirm = { vm.deleteAllOffline(); confirmDeleteAll = false },
+            onDismiss = { confirmDeleteAll = false },
+        )
+    }
+    confirmDeleteDay?.let { day ->
+        ConfirmDialog(
+            title = stringResource(R.string.storage_delete_day_title, prettyDate(context, day)),
+            body = stringResource(R.string.storage_delete_day_body),
+            onConfirm = { vm.deleteOfflineDay(day); confirmDeleteDay = null },
+            onDismiss = { confirmDeleteDay = null },
+        )
+    }
+}
+
+/** One day's offline footprint: label, a single-hue magnitude bar (relative to the day with the
+ *  most), the size, and a delete action for that day's offline copies. */
+@Composable
+private fun StorageDayRow(label: String, bytes: Long, fraction: Float, onDelete: () -> Unit) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(humanSize(bytes), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(4.dp))
+            TextButton(onClick = onDelete) { Text("✕") }
+        }
+        Spacer(Modifier.height(4.dp))
+        Box(
+            Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(4.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Box(
+                Modifier.fillMaxWidth(fraction.coerceIn(0.02f, 1f)).fillMaxHeight()
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConfirmDialog(title: String, body: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(body) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_delete)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ClipsScreen(
@@ -386,6 +503,8 @@ private fun ClipsScreen(
         ClipActionsSheet(
             clip = clip,
             token = token,
+            isDownloaded = vm.isDownloaded(clip),
+            onRemoveOffline = { vm.deleteOfflineCopy(clip) },
             onDismiss = { actionClip = null },
         )
     }
@@ -394,7 +513,13 @@ private fun ClipsScreen(
 /** Bottom sheet with actions (share / download) for a clip; shown on long press. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ClipActionsSheet(clip: Clip, token: String?, onDismiss: () -> Unit) {
+private fun ClipActionsSheet(
+    clip: Clip,
+    token: String?,
+    isDownloaded: Boolean,
+    onRemoveOffline: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var working by remember { mutableStateOf(false) }
@@ -406,6 +531,13 @@ private fun ClipActionsSheet(clip: Clip, token: String?, onDismiss: () -> Unit) 
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
+            // Doesn't need a token: it only touches the local (device) copy, never Drive.
+            if (isDownloaded) {
+                SheetAction(stringResource(R.string.action_remove_offline)) {
+                    onRemoveOffline()
+                    onDismiss()
+                }
+            }
             if (working || token == null) {
                 Row(
                     Modifier.fillMaxWidth().padding(24.dp),

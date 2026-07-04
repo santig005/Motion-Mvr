@@ -30,6 +30,9 @@ class OfflineStore(private val context: Context) {
 
     fun delete(clip: Clip) { localFile(clip).delete() }
 
+    /** Frees all offline copies (device only — the Drive originals are untouched). */
+    fun deleteAll() { dir.listFiles()?.forEach { it.delete() } }
+
     /** True on an unmetered network (Wi-Fi) — auto-download only runs on it, so the feature can't
      *  silently burn the user's mobile data. */
     fun isOnUnmeteredNetwork(): Boolean {

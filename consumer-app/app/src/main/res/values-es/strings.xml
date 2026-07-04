@@ -40,10 +40,24 @@
     <string name="processing">Procesando…</string>
     <string name="action_share">"📤   Compartir"</string>
     <string name="action_download">"⬇️   Descargar a la galería"</string>
+    <string name="action_remove_offline">"🗑️   Quitar copia sin conexión"</string>
+    <string name="action_delete">Eliminar</string>
+    <string name="action_cancel">Cancelar</string>
     <string name="share_failed">No se pudo compartir</string>
     <string name="download_failed">No se pudo descargar</string>
     <string name="saved_to">Guardado en %s</string>
     <string name="chooser_share">Compartir clip</string>
+
+    <!-- Pantalla de almacenamiento (uso de caché sin conexión + borrado solo en el dispositivo) -->
+    <string name="storage_title">Almacenamiento</string>
+    <string name="storage_offline_total">Sin conexión: %s</string>
+    <string name="storage_offline_hint">Descargado para verlo sin conexión, solo en este teléfono. Los originales siguen en Drive.</string>
+    <string name="storage_empty">Todavía no hay clips descargados para verlos sin conexión.</string>
+    <string name="storage_delete_all">Quitar todas las copias sin conexión</string>
+    <string name="storage_delete_all_title">¿Quitar todas las copias sin conexión?</string>
+    <string name="storage_delete_all_body">Libera espacio en este teléfono. Los clips siguen en Drive: puedes verlos en streaming o volver a descargarlos cuando quieras.</string>
+    <string name="storage_delete_day_title">¿Quitar las copias sin conexión de %s?</string>
+    <string name="storage_delete_day_body">Solo se eliminan las copias locales de este teléfono. Los clips siguen en Drive.</string>
 
     <!-- Overlay de la tarjeta -->
     <string name="overlay_new">NUEVO</string>

@@ -40,10 +40,24 @@
     <string name="processing">Processing…</string>
     <string name="action_share">"📤   Share"</string>
     <string name="action_download">"⬇️   Download to gallery"</string>
+    <string name="action_remove_offline">"🗑️   Remove offline copy"</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_cancel">Cancel</string>
     <string name="share_failed">Couldn\'t share</string>
     <string name="download_failed">Couldn\'t download</string>
     <string name="saved_to">Saved to %s</string>
     <string name="chooser_share">Share clip</string>
+
+    <!-- Storage screen (offline cache usage + device-only delete) -->
+    <string name="storage_title">Storage</string>
+    <string name="storage_offline_total">Offline: %s</string>
+    <string name="storage_offline_hint">Downloaded for offline playback, on this device only. The originals stay on Drive.</string>
+    <string name="storage_empty">No clips downloaded for offline playback yet.</string>
+    <string name="storage_delete_all">Remove all offline copies</string>
+    <string name="storage_delete_all_title">Remove all offline copies?</string>
+    <string name="storage_delete_all_body">Frees up space on this phone. The clips stay on Drive — you can stream or re-download them anytime.</string>
+    <string name="storage_delete_day_title">Remove offline copies for %s?</string>
+    <string name="storage_delete_day_body">Only the local copies on this phone are removed. The clips stay on Drive.</string>
 
     <!-- Clip card overlay -->
     <string name="overlay_new">NEW</string>

@@ -52,12 +52,44 @@ class MainViewModel(
     var autoDownloadEnabled by mutableStateOf(offline.autoDownloadEnabled)
         private set
 
+    // Bumped on every download/delete so Compose recomposes reads of offline state below — the
+    // filesystem itself isn't observable, so this is the invalidation signal.
+    private var offlineVersion by mutableStateOf(0)
+
     fun selectDateFilter(f: DateFilter) { dateFilter = f }
 
-    fun isDownloaded(clip: Clip): Boolean = offline.isDownloaded(clip)
+    fun isDownloaded(clip: Clip): Boolean { offlineVersion; return offline.isDownloaded(clip) }
 
     /** Local file to play from if it's already downloaded, or null to fall back to streaming. */
     fun localFileOrNull(clip: Clip): File? = offline.localFile(clip).takeIf { it.exists() && it.length() > 0L }
+
+    fun offlineTotalBytes(): Long { offlineVersion; return offline.totalSizeBytes() }
+
+    /** Offline (downloaded) bytes per day, most recent first, days with nothing cached omitted. */
+    fun offlineSizeByDay(): List<Pair<String, Long>> {
+        offlineVersion
+        return clipsByDay()
+            .map { (day, dayClips) -> day to dayClips.filter { offline.isDownloaded(it) }.sumOf { it.sizeBytes } }
+            .filter { it.second > 0 }
+    }
+
+    /** Removes the offline (device-only) copies for that day; the Drive originals are untouched. */
+    fun deleteOfflineDay(dateKey: String) {
+        clipsOf(dateKey).forEach { if (offline.isDownloaded(it)) offline.delete(it) }
+        offlineVersion++
+    }
+
+    /** Removes a single clip's offline copy; the Drive original is untouched. */
+    fun deleteOfflineCopy(clip: Clip) {
+        offline.delete(clip)
+        offlineVersion++
+    }
+
+    /** Frees all offline copies (device only); the Drive originals are untouched. */
+    fun deleteAllOffline() {
+        offline.deleteAll()
+        offlineVersion++
+    }
 
     fun setAutoDownload(enabled: Boolean) {
         offline.autoDownloadEnabled = enabled
@@ -75,7 +107,9 @@ class MainViewModel(
         if (pending.isEmpty()) return
         viewModelScope.launch {
             val token = runCatching { tokenProvider() }.getOrNull() ?: return@launch
-            pending.forEach { clip -> runCatching { offline.download(clip, token) } }
+            pending.forEach { clip ->
+                if (runCatching { offline.download(clip, token) }.getOrDefault(false)) offlineVersion++
+            }
         }
     }
 
