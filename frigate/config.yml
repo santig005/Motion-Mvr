@@ -1,0 +1,51 @@
+# Frigate config for an RTSP IP camera.
+# The password comes from the .env file ($FRIGATE_RTSP_PASSWORD) so it isn't hard-coded.
+# Replace USER and CAMERA_IP below with your camera's RTSP user and IP address.
+
+mqtt:
+  enabled: false
+
+# Some cameras output PCM A-law audio, which mp4 can't store by copy -> transcode to AAC on record.
+ffmpeg:
+  output_args:
+    record: preset-record-generic-audio-aac
+
+cameras:
+  cam1:
+    ffmpeg:
+      inputs:
+        # main 2K stream -> recording
+        - path: rtsp://USER:{FRIGATE_RTSP_PASSWORD}@CAMERA_IP:554/live/ch0
+          roles: [record]
+        # sub 360p/720p stream -> object detection (much lighter on CPU)
+        - path: rtsp://USER:{FRIGATE_RTSP_PASSWORD}@CAMERA_IP:554/live/ch1
+          roles: [detect]
+
+    detect:
+      enabled: true
+      width: 640
+      height: 360
+
+    objects:
+      track:
+        - person
+        - cat
+        - dog
+        - car
+
+    record:
+      enabled: true
+      retain:
+        days: 3            # keep ALL footage 3 days (continuous)
+        mode: all
+      alerts:
+        retain:
+          days: 30         # keep person/car alert clips 30 days
+      detections:
+        retain:
+          days: 14         # keep other detections 14 days
+
+    snapshots:
+      enabled: true
+      retain:
+        default: 30

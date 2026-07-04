@@ -1,0 +1,30 @@
+# Frigate NVR for an RTSP IP camera.
+# Runs on a Raspberry Pi 4/5, a mini-PC (Intel N100), or any always-on Linux box.
+#
+# Setup:
+#   1. Install Docker + docker-compose on the device.
+#   2. Copy ".env.example" to ".env" next to this file and put your RTSP password in it:
+#         FRIGATE_RTSP_PASSWORD=your_camera_password
+#      (".env" is gitignored so the password never gets committed.)
+#   3. Edit config.yml with your camera IP/user.
+#   4. Run:  docker compose up -d
+#   5. Open the UI at  http://<device-ip>:5000
+#
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:stable
+    restart: unless-stopped
+    shm_size: "128mb"
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/config/config.yml:ro
+      - ./storage:/media/frigate
+      - type: tmpfs        # reduce SD-card wear: cache in RAM
+        target: /tmp/cache
+        tmpfs:
+          size: 200000000
+    ports:
+      - "5000:5000"        # web UI
+      - "8554:8554"        # internal RTSP restream
