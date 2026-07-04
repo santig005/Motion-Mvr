@@ -93,14 +93,16 @@ class DriveClient(
             .sortedByDescending { it.name }   // most recent first
     }
 
-    /** Lightweight query: names of the most recent mp4 clips (desc). For the background poll. */
-    suspend fun recentClipNames(limit: Int = 20): List<String> = withContext(Dispatchers.IO) {
+    /** Lightweight query: the most recent mp4 clips (id + name + size only, no thumbnails/metrics).
+     *  For the background poll: new-clip notifications and auto-download both just need enough to
+     *  compare names and, for downloads, build the streaming URL from the id. */
+    suspend fun recentClips(limit: Int = 20): List<Clip> = withContext(Dispatchers.IO) {
         val token = tokenProvider()
         val url = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
             .addQueryParameter("q", "name contains 'mt_' and mimeType = 'video/mp4' and trashed = false")
             .addQueryParameter("orderBy", "name desc")
             .addQueryParameter("pageSize", limit.toString())
-            .addQueryParameter("fields", "files(name)")
+            .addQueryParameter("fields", "files(id, name, size)")
             .build()
         val req = Request.Builder().url(url).header("Authorization", "Bearer $token").get().build()
         http.newCall(req).execute().use { resp ->
@@ -108,7 +110,10 @@ class DriveClient(
             if (!resp.isSuccessful) error("Drive API ${resp.code}")
             val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
                 ?: return@withContext emptyList()
-            (0 until files.length()).map { files.getJSONObject(it).getString("name") }
+            (0 until files.length()).map { i ->
+                val f = files.getJSONObject(i)
+                Clip(id = f.getString("id"), name = f.getString("name"), sizeBytes = f.optString("size", "0").toLongOrNull() ?: 0L)
+            }
         }
     }
 

@@ -22,8 +22,9 @@ object ClipActions {
     private val http = OkHttpClient()
     private const val GALLERY_DIR = "MotionNVR"
 
-    /** Dumps the binary at [url] into [out] (does not close [out]). */
-    private suspend fun streamTo(url: String, token: String, out: OutputStream): Boolean =
+    /** Dumps the binary at [url] into [out] (does not close [out]). Internal: also used by
+     *  OfflineStore to download clips for offline playback. */
+    internal suspend fun streamTo(url: String, token: String, out: OutputStream): Boolean =
         withContext(Dispatchers.IO) {
             val req = Request.Builder().url(url).header("Authorization", "Bearer $token").get().build()
             http.newCall(req).execute().use { resp ->

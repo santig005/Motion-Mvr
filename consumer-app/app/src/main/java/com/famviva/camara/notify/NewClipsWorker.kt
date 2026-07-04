@@ -11,6 +11,7 @@ import androidx.work.WorkerParameters
 import com.famviva.camara.R
 import com.famviva.camara.auth.headlessDriveToken
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.OfflineStore
 import java.util.concurrent.TimeUnit
 
 /**
@@ -23,20 +24,24 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val token = headlessDriveToken(applicationContext) ?: return Result.success()
         val drive = DriveClient(tokenProvider = { token }, onUnauthorized = {})
         val store = NotifyStore(applicationContext)
+        val offline = OfflineStore(applicationContext)
         val ctx = applicationContext
 
-        // 1) New clips
-        runCatching { drive.recentClipNames(20) }.onSuccess { names ->
-            if (names.isNotEmpty()) {
-                val newest = names.first()             // names in descending order
+        // 1) New clips (+ auto-download them, Wi-Fi only, if the user turned that on)
+        runCatching { drive.recentClips(20) }.onSuccess { recent ->
+            if (recent.isNotEmpty()) {
+                val newest = recent.first().name       // names in descending order
                 val last = store.lastNotified()
                 if (last == null) {                    // first run: set the baseline, don't announce history
                     store.setLastNotified(newest)
                 } else {
-                    val newCount = names.count { it > last }
-                    if (newCount > 0) {
-                        Notifications.notifyNewClips(ctx, newCount)
+                    val newOnes = recent.filter { it.name > last }
+                    if (newOnes.isNotEmpty()) {
+                        Notifications.notifyNewClips(ctx, newOnes.size)
                         store.setLastNotified(newest)
+                        if (offline.autoDownloadEnabled && offline.isOnUnmeteredNetwork()) {
+                            newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }
+                        }
                     }
                 }
             }
