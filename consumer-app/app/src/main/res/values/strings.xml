@@ -77,6 +77,9 @@
     <string name="overlay_new">NEW</string>
     <string name="overlay_offline">"💾 OFFLINE"</string>
 
+    <!-- Per-clip upload latency (recording finished -> visible on Drive) -->
+    <string name="latency_line">Finished %1$s · on Drive %2$s (+%3$s)</string>
+
     <!-- Auto-download toggle (offline playback) -->
     <string name="auto_download_menu_title">Auto-download (Wi-Fi)</string>
     <string name="auto_download_on">On</string>

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -99,6 +100,7 @@ import com.famviva.camara.data.DayPeriod
 import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
+import com.famviva.camara.data.uploadDelayLabel
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
@@ -1042,8 +1044,40 @@ private fun ClipCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                ClipLatencyLine(clip)
             }
         }
+    }
+}
+
+/**
+ * When recording finished vs. when the clip landed on Drive, plus the delay between them — the real
+ * end-to-end upload latency, straight from Drive's modifiedTime/createdTime (no NVR change). Shown
+ * only when both timestamps are available.
+ */
+@Composable
+private fun ClipLatencyLine(clip: Clip) {
+    val finished = clip.recordedFinishedTime ?: return
+    val delay = clip.uploadDelaySeconds
+    Spacer(Modifier.height(6.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            Icons.Filled.CloudDone,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            stringResource(
+                R.string.latency_line,
+                finished,
+                clip.uploadedTime ?: "—",
+                delay?.let { uploadDelayLabel(it) } ?: "—",
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

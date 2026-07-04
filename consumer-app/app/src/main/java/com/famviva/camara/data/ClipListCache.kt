@@ -2,6 +2,7 @@ package com.famviva.camara.data
 
 import android.content.Context
 import java.io.File
+import java.time.Instant
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -29,6 +30,8 @@ class ClipListCache(context: Context) {
                     yavgMax = if (o.has("yavgMax")) o.optDouble("yavgMax") else null,
                     framesMov = if (o.has("framesMov")) o.optInt("framesMov") else null,
                     durationSec = if (o.has("durationSec")) o.optDouble("durationSec") else null,
+                    driveModifiedTime = if (o.has("driveModifiedMs")) Instant.ofEpochMilli(o.getLong("driveModifiedMs")) else null,
+                    driveCreatedTime = if (o.has("driveCreatedMs")) Instant.ofEpochMilli(o.getLong("driveCreatedMs")) else null,
                 )
             }
         }.getOrDefault(emptyList())
@@ -48,6 +51,8 @@ class ClipListCache(context: Context) {
                     c.yavgMax?.let { put("yavgMax", it) }
                     c.framesMov?.let { put("framesMov", it) }
                     c.durationSec?.let { put("durationSec", it) }
+                    c.driveModifiedTime?.let { put("driveModifiedMs", it.toEpochMilli()) }
+                    c.driveCreatedTime?.let { put("driveCreatedMs", it.toEpochMilli()) }
                 },
             )
         }

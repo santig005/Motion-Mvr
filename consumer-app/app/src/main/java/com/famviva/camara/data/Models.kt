@@ -3,8 +3,11 @@ package com.famviva.camara.data
 import android.content.Context
 import androidx.annotation.StringRes
 import com.famviva.camara.R
+import java.time.Duration
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.time.temporal.ChronoUnit
@@ -40,6 +43,12 @@ data class Clip(
     val framesMov: Int? = null,
     /** Exact duration in seconds (from metrics.csv); more reliable than Drive's videoMediaMetadata. */
     val durationSec: Double? = null,
+    /** Drive `modifiedTime`: rclone preserves the local file mtime, so this is when the NVR finished
+     *  writing the clip (recording/processing done). Null if Drive didn't return it. */
+    val driveModifiedTime: Instant? = null,
+    /** Drive `createdTime`: server-assigned at actual upload. The gap to [driveModifiedTime] is the
+     *  real end-to-end "recording finished -> visible on Drive" latency. */
+    val driveCreatedTime: Instant? = null,
 ) {
     private val stamp: String? =
         Regex("""mt_(\d{8})_(\d{6})""").find(name)?.let { "${it.groupValues[1]}_${it.groupValues[2]}" }
@@ -96,7 +105,28 @@ data class Clip(
             val s = durationSec?.toInt() ?: durationMillis?.let { (it / 1000).toInt() } ?: return null
             return if (s < 60) "$s s" else "%d:%02d".format(s / 60, s % 60)
         }
+
+    /** "HH:MM:SS" the recording finished (local time), from Drive's modifiedTime; null if absent. */
+    val recordedFinishedTime: String? get() = driveModifiedTime?.let { localHms(it) }
+
+    /** "HH:MM:SS" the clip became visible on Drive (local time), from createdTime; null if absent. */
+    val uploadedTime: String? get() = driveCreatedTime?.let { localHms(it) }
+
+    /** Seconds between "recording finished" and "uploaded to Drive"; null if either is missing. */
+    val uploadDelaySeconds: Long?
+        get() = if (driveModifiedTime != null && driveCreatedTime != null)
+            Duration.between(driveModifiedTime, driveCreatedTime).seconds.coerceAtLeast(0)
+        else null
 }
+
+private fun localHms(i: Instant): String {
+    val t = LocalDateTime.ofInstant(i, ZoneId.systemDefault())
+    return "%02d:%02d:%02d".format(t.hour, t.minute, t.second)
+}
+
+/** "34s" if under a minute, else "m:ss" — for the recording->Drive upload delay. */
+fun uploadDelayLabel(seconds: Long): String =
+    if (seconds < 60) "${seconds}s" else "%d:%02d".format(seconds / 60, seconds % 60)
 
 /** Metrics of a clip read from the NVR's metrics.csv. */
 data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?)

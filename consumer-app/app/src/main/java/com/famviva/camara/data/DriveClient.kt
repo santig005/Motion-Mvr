@@ -4,6 +4,7 @@ import com.famviva.camara.auth.UnauthorizedException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import java.time.Instant
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -38,7 +39,7 @@ class DriveClient(
                 .addQueryParameter("pageSize", "1000")
                 .addQueryParameter(
                     "fields",
-                    "nextPageToken, files(id, name, size, mimeType, thumbnailLink, videoMediaMetadata(durationMillis))",
+                    "nextPageToken, files(id, name, size, mimeType, thumbnailLink, createdTime, modifiedTime, videoMediaMetadata(durationMillis))",
                 )
                 .addQueryParameter("spaces", "drive")
             pageToken?.let { urlBuilder.addQueryParameter("pageToken", it) }
@@ -63,12 +64,21 @@ class DriveClient(
                         } else if (f.optString("mimeType") == "video/mp4") {
                             val durMs = f.optJSONObject("videoMediaMetadata")
                                 ?.optString("durationMillis")?.toLongOrNull()
+                            // modifiedTime == the local file mtime rclone preserved (= recording
+                            // finished); createdTime == server-assigned upload time. The gap is the
+                            // real "recording done -> visible on Drive" latency. See project memory.
+                            val modified = f.optString("modifiedTime").ifBlank { null }
+                                ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+                            val created = f.optString("createdTime").ifBlank { null }
+                                ?.let { runCatching { Instant.parse(it) }.getOrNull() }
                             clips += Clip(
                                 id = f.getString("id"),
                                 name = name,
                                 sizeBytes = f.optString("size", "0").toLongOrNull() ?: 0L,
                                 durationMillis = durMs,
                                 thumbnailLink = f.optString("thumbnailLink").ifBlank { null },
+                                driveModifiedTime = modified,
+                                driveCreatedTime = created,
                             )
                         }
                     }

@@ -77,6 +77,9 @@
     <string name="overlay_new">NUEVO</string>
     <string name="overlay_offline">"💾 SIN CONEXIÓN"</string>
 
+    <!-- Latencia de subida por clip (fin de grabación -> visible en Drive) -->
+    <string name="latency_line">Fin %1$s · en Drive %2$s (+%3$s)</string>
+
     <!-- Toggle de auto-descarga (reproducción sin conexión) -->
     <string name="auto_download_menu_title">Auto-descarga (Wi-Fi)</string>
     <string name="auto_download_on">Activada</string>
