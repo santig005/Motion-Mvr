@@ -99,6 +99,8 @@ import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DayPeriod
 import com.famviva.camara.data.epochLabel
+import com.famviva.camara.data.estimateBatteryEtaMinutes
+import com.famviva.camara.data.formatEta
 import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
@@ -132,7 +134,7 @@ fun AppNav(
             val section = entry.arguments?.getString("section")
                 ?.let { runCatching { StorageSection.valueOf(it) }.getOrNull() } ?: StorageSection.LOCAL
             val day = entry.arguments?.getString("day").orEmpty()
-            StorageDayScreen(vm, nav, section, day)
+            StorageDayScreen(vm, nav, section, day, tokenProvider)
         }
         composable("clips/{day}") { entry ->
             val day = entry.arguments?.getString("day").orEmpty()
@@ -632,14 +634,24 @@ private fun StorageLegendRow(
     }
 }
 
-/** A single day's clips (from one storage section), sortable by size or by time; tap plays. */
+/** A single day's clips (from one storage section), sortable by size or by time; tap plays. In the
+ *  On-device section each row can also be deleted individually (local copy only). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StorageDayScreen(vm: MainViewModel, nav: NavHostController, section: StorageSection, day: String) {
+private fun StorageDayScreen(
+    vm: MainViewModel,
+    nav: NavHostController,
+    section: StorageSection,
+    day: String,
+    tokenProvider: suspend () -> String,
+) {
     val context = LocalContext.current
     var sortBySize by rememberSaveable { mutableStateOf(true) }
+    var token by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { token = runCatching { tokenProvider() }.getOrNull() }
 
-    val base = if (section == StorageSection.LOCAL) vm.clipsOf(day).filter { vm.isDownloaded(it) } else vm.clipsOf(day)
+    val isLocal = section == StorageSection.LOCAL
+    val base = if (isLocal) vm.clipsOf(day).filter { vm.isDownloaded(it) } else vm.clipsOf(day)
     val clips = if (sortBySize) base.sortedByDescending { it.sizeBytes } else base.sortedByDescending { it.name }
 
     Scaffold(
@@ -680,8 +692,11 @@ private fun StorageDayScreen(vm: MainViewModel, nav: NavHostController, section:
                     items(clips, key = { it.id }) { clip ->
                         StorageClipRow(
                             clip = clip,
+                            token = token,
                             downloaded = vm.isDownloaded(clip),
                             onClick = { nav.navigate("player/${clip.id}") },
+                            // Local section: remove just this clip's device copy (Drive untouched).
+                            onDelete = if (isLocal) ({ vm.deleteOfflineCopy(clip) }) else null,
                         )
                     }
                 }
@@ -690,13 +705,46 @@ private fun StorageDayScreen(vm: MainViewModel, nav: NavHostController, section:
     }
 }
 
-/** Compact clip row for the storage day detail: time, period, intensity, size, offline marker. */
+/** Compact clip row for the storage day detail: thumbnail, time, period, intensity, size, offline
+ *  marker, and (for the on-device section) a per-clip delete. */
 @Composable
-private fun StorageClipRow(clip: Clip, downloaded: Boolean, onClick: () -> Unit) {
+private fun StorageClipRow(
+    clip: Clip,
+    token: String?,
+    downloaded: Boolean,
+    onClick: () -> Unit,
+    onDelete: (() -> Unit)?,
+) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 4.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Box(
+            Modifier.width(64.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Videocam,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                modifier = Modifier.size(20.dp),
+            )
+            val thumb = clip.thumbUrl
+            if (thumb != null && token != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(thumb)
+                        .addHeader("Authorization", "Bearer $token")
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(clip.time, style = MaterialTheme.typography.titleSmall)
             clip.period?.let {
@@ -722,6 +770,16 @@ private fun StorageClipRow(clip: Clip, downloaded: Boolean, onClick: () -> Unit)
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (onDelete != null) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = stringResource(R.string.action_delete),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
     }
 }
 
@@ -1245,7 +1303,10 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
     val health = vm.cameraHealth.firstOrNull { it.camera == camera }
     val nowPct = samples.lastOrNull()?.battery ?: health?.battery
     val charging = samples.lastOrNull()?.charging ?: (health?.charging == true)
-    val eta = health?.etaLabel(context)
+    // Prefer the NVR's own ETA; fall back to an app-side estimate from the collected history so an
+    // estimate appears even before the NVR's rolling regression is ready.
+    val etaMin = health?.etaMinutes ?: estimateBatteryEtaMinutes(samples)
+    val eta = etaMin?.let { formatEta(context, it) }
 
     Scaffold(
         topBar = {

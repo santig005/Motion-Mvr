@@ -43,11 +43,12 @@ data class Clip(
     val framesMov: Int? = null,
     /** Exact duration in seconds (from metrics.csv); more reliable than Drive's videoMediaMetadata. */
     val durationSec: Double? = null,
-    /** Drive `modifiedTime`: rclone preserves the local file mtime, so this is when the NVR finished
-     *  writing the clip (recording/processing done). Null if Drive didn't return it. */
+    /** Drive `modifiedTime` = the local file mtime rclone preserved = when the *file* finished being
+     *  written (after postroll + muxing). NOT used for the "recording ended" display (that comes from
+     *  the filename + duration instead); kept only as raw metadata. */
     val driveModifiedTime: Instant? = null,
-    /** Drive `createdTime`: server-assigned at actual upload. The gap to [driveModifiedTime] is the
-     *  real end-to-end "recording finished -> visible on Drive" latency. */
+    /** Drive `createdTime`: server-assigned at actual upload — when the clip became visible on Drive.
+     *  The gap to [recordedEndDateTime] is the real end-to-end upload latency ([uploadDelaySeconds]). */
     val driveCreatedTime: Instant? = null,
 ) {
     private val stamp: String? =
@@ -106,17 +107,36 @@ data class Clip(
             return if (s < 60) "$s s" else "%d:%02d".format(s / 60, s % 60)
         }
 
-    /** "HH:MM:SS" the recording finished (local time), from Drive's modifiedTime; null if absent. */
-    val recordedFinishedTime: String? get() = driveModifiedTime?.let { localHms(it) }
+    /** Clip length in whole seconds (metrics.csv first, else Drive's videoMediaMetadata). */
+    val durationSeconds: Long? get() = durationSec?.toLong() ?: durationMillis?.let { it / 1000 }
+
+    /**
+     * When the recorded content actually ends = clip start (from the filename) + duration. This is
+     * what you see in the player. We deliberately do NOT use Drive's modifiedTime for this: that's
+     * when the *file* finished being written (after postroll + muxing), tens of seconds later.
+     */
+    val recordedEndDateTime: LocalDateTime?
+        get() {
+            val start = localDateTime ?: return null
+            val dur = durationSeconds ?: return null
+            return start.plusSeconds(dur)
+        }
+
+    /** "HH:MM:SS" the recorded content ends (local time); null if start/duration unknown. */
+    val recordedFinishedTime: String? get() = recordedEndDateTime?.let { "%02d:%02d:%02d".format(it.hour, it.minute, it.second) }
 
     /** "HH:MM:SS" the clip became visible on Drive (local time), from createdTime; null if absent. */
     val uploadedTime: String? get() = driveCreatedTime?.let { localHms(it) }
 
-    /** Seconds between "recording finished" and "uploaded to Drive"; null if either is missing. */
+    /** Seconds from "content ended" to "visible on Drive" — the real end-to-end latency the user
+     *  cares about (covers postroll, muxing, the sync cadence and transfer). Null if unknown. */
     val uploadDelaySeconds: Long?
-        get() = if (driveModifiedTime != null && driveCreatedTime != null)
-            Duration.between(driveModifiedTime, driveCreatedTime).seconds.coerceAtLeast(0)
-        else null
+        get() {
+            val end = recordedEndDateTime ?: return null
+            val created = driveCreatedTime ?: return null
+            val endInstant = end.atZone(ZoneId.systemDefault()).toInstant()
+            return Duration.between(endInstant, created).seconds.coerceAtLeast(0)
+        }
 }
 
 private fun localHms(i: Instant): String {
@@ -127,6 +147,35 @@ private fun localHms(i: Instant): String {
 /** "34s" if under a minute, else "m:ss" — for the recording->Drive upload delay. */
 fun uploadDelayLabel(seconds: Long): String =
     if (seconds < 60) "${seconds}s" else "%d:%02d".format(seconds / 60, seconds % 60)
+
+/** "4h 20m" / "35m" from a minute count. */
+fun formatEta(context: Context, minutes: Int): String {
+    val h = minutes / 60
+    val m = minutes % 60
+    return if (h > 0) context.getString(R.string.battery_eta_hm, h, m)
+    else context.getString(R.string.battery_eta_m, m)
+}
+
+/**
+ * App-side battery ETA (minutes until ~5%) fit over the most recent *discharging* streak in the
+ * local history. A robust fallback for when the NVR hasn't reported eta_minutes yet — e.g. right
+ * after a charge, when its own rolling window has been reset. Null if not currently discharging or
+ * there isn't enough of a downward trend to fit.
+ */
+fun estimateBatteryEtaMinutes(samples: List<BatterySample>): Int? {
+    val streak = samples.takeLastWhile { !it.charging }
+    if (streak.size < 2) return null
+    val first = streak.first()
+    val last = streak.last()
+    val hours = (last.epochSec - first.epochSec) / 3600.0
+    if (hours <= 0.0) return null
+    val drop = (first.battery - last.battery).toDouble()
+    if (drop <= 0.0) return null                       // flat or charging — no meaningful ETA
+    val ratePerHour = drop / hours
+    val remaining = (last.battery - 5).coerceAtLeast(0)
+    if (remaining <= 0) return 0
+    return ((remaining / ratePerHour) * 60.0).toInt()
+}
 
 /** Metrics of a clip read from the NVR's metrics.csv. */
 data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?)
@@ -158,13 +207,7 @@ data class CameraHealth(
     fun etaCritical(thresholdMinutes: Int = 120): Boolean = etaMinutes != null && etaMinutes!! < thresholdMinutes
 
     /** "4h 20m" / "35m" duration label from [etaMinutes], or null if there's no estimate yet. */
-    fun etaLabel(context: Context): String? {
-        val m = etaMinutes ?: return null
-        val h = m / 60
-        val mm = m % 60
-        return if (h > 0) context.getString(R.string.battery_eta_hm, h, mm)
-        else context.getString(R.string.battery_eta_m, mm)
-    }
+    fun etaLabel(context: Context): String? = etaMinutes?.let { formatEta(context, it) }
 
     /** "5 min ago" / "2 h ago" since the last report. */
     fun sinceLabel(context: Context, nowSec: Long): String {
