@@ -29,10 +29,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
@@ -65,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -88,6 +94,7 @@ import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
 import com.famviva.camara.media.ClipActions
+import com.famviva.camara.ui.theme.status
 import java.util.Locale
 import kotlinx.coroutines.launch
 
@@ -129,13 +136,14 @@ private fun AutoDownloadToggle(enabled: Boolean, onToggle: (Boolean) -> Unit) {
     val toastText = stringResource(
         if (enabled) R.string.auto_download_disabled_toast else R.string.auto_download_enabled_toast,
     )
-    TextButton(onClick = {
+    IconButton(onClick = {
         onToggle(!enabled)
         Toast.makeText(context, toastText, Toast.LENGTH_SHORT).show()
     }) {
-        Text(
-            "📥 " + stringResource(if (enabled) R.string.auto_download_on else R.string.auto_download_off),
-            fontWeight = FontWeight.SemiBold,
+        Icon(
+            if (enabled) Icons.Filled.DownloadDone else Icons.Filled.Download,
+            contentDescription = stringResource(if (enabled) R.string.auto_download_on else R.string.auto_download_off),
+            tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -184,8 +192,10 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name)) },
                 actions = {
-                    TextButton(onClick = { nav.navigate("storage") }) { Text("💾") }
                     AutoDownloadToggle(vm.autoDownloadEnabled, vm::setAutoDownload)
+                    IconButton(onClick = { nav.navigate("storage") }) {
+                        Icon(Icons.Filled.Storage, contentDescription = stringResource(R.string.storage_title))
+                    }
                     LanguageMenu()
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
@@ -376,7 +386,14 @@ private fun StorageDayRow(label: String, bytes: Long, fraction: Float, onDelete:
             Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
             Text(humanSize(bytes), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(4.dp))
-            TextButton(onClick = onDelete) { Text("✕") }
+            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Outlined.Delete,
+                    contentDescription = stringResource(R.string.action_delete),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
         Spacer(Modifier.height(4.dp))
         Box(
@@ -609,10 +626,23 @@ private fun ClipCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                MaterialTheme.colorScheme.surfaceContainerHigh,
+                            ),
+                        ),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(clip.period?.emoji ?: "🎬", style = MaterialTheme.typography.displaySmall)
+                // Muted camera glyph shown behind the thumbnail while it loads (or if none exists).
+                Icon(
+                    Icons.Filled.Videocam,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                    modifier = Modifier.size(40.dp),
+                )
                 val thumb = clip.thumbUrl
                 if (thumb != null && token != null) {
                     AsyncImage(
@@ -626,12 +656,21 @@ private fun ClipCard(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
-                Icon(
-                    Icons.Filled.PlayArrow,
-                    contentDescription = stringResource(R.string.action_play),
-                    tint = Color.White.copy(alpha = 0.9f),
-                    modifier = Modifier.size(48.dp),
-                )
+                // Play button on a circular scrim so it stays legible over bright thumbnails.
+                Box(
+                    Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.32f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = stringResource(R.string.action_play),
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp),
+                    )
+                }
                 if (isNew) {
                     OverlayChip(
                         text = stringResource(R.string.overlay_new),
@@ -708,13 +747,8 @@ private fun ClipCard(
  */
 @Composable
 private fun IntensityBars(level: Int) {
-    val color = when (level) {
-        5 -> Color(0xFFE53935)   // strong
-        4 -> Color(0xFFF59E0B)   // notable
-        3 -> Color(0xFFC0CA33)   // moderate
-        2 -> Color(0xFF43A047)   // light (shadow/bug/background)
-        else -> Color(0xFF9E9E9E) // very faint / noise
-    }
+    // Semantic ramp (faint grey → strong red) lives in the theme, tuned per light/dark.
+    val color = MaterialTheme.status.intensity[(level - 1).coerceIn(0, 4)]
     Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         for (i in 1..5) {
             Box(
@@ -801,8 +835,8 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
             body = stringResource(R.string.status_critical_body),
         )
         h.lowBattery -> StatusBanner(
-            bg = Color(0xFFFFE0B2),
-            fg = Color(0xFF6D4C00),
+            bg = MaterialTheme.status.warningContainer,
+            fg = MaterialTheme.status.onWarningContainer,
             title = stringResource(R.string.status_lowbatt_title, h.battery ?: 0),
             body = stringResource(R.string.status_lowbatt_body),
         )
