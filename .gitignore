@@ -1,0 +1,43 @@
+# --- secrets / credentials ---
+.env
+**/cam.env
+**/cam*.env
+cloud.env
+*.local.ps1
+local.properties
+
+# --- private local reference (never publish) ---
+_private/
+
+# --- recordings / media ---
+recordings/
+frigate/storage/
+*.mp4
+*.mkv
+*.jpg
+*.jpeg
+*.png
+snapshot.jpg
+roi.jpg
+
+# --- logs / scratch ---
+*.log
+logs/
+
+# --- Android / Gradle build ---
+.gradle/
+build/
+*.apk
+*.aab
+.cxx/
+captures/
+
+# --- IDE ---
+.idea/
+.kotlin/
+*.iml
+.vscode/
+
+# --- OS ---
+.DS_Store
+Thumbs.db

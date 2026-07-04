@@ -1,0 +1,6 @@
+# Keep shell scripts LF so they run under Termux/Linux regardless of the checkout OS.
+*.sh text eol=lf
+termux/* text eol=lf
+
+# Let git normalize other text files.
+* text=auto
