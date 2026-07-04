@@ -61,14 +61,17 @@ class MainViewModel(
     fun isDownloaded(clip: Clip): Boolean { offlineVersion; return offline.isDownloaded(clip) }
 
     /** Local file to play from if it's already downloaded, or null to fall back to streaming. */
-    fun localFileOrNull(clip: Clip): File? = offline.localFile(clip).takeIf { it.exists() && it.length() > 0L }
+    fun localFileOrNull(clip: Clip): File? { offlineVersion; return offline.localFile(clip).takeIf { it.exists() && it.length() > 0L } }
 
     fun offlineTotalBytes(): Long { offlineVersion; return offline.totalSizeBytes() }
 
-    /** Offline (downloaded) bytes per day, most recent first, days with nothing cached omitted. */
+    /** Offline (downloaded) bytes per day, most recent first, days with nothing cached omitted.
+     *  Deliberately independent of [dateFilter] (a Days-screen-only concern): the Storage screen
+     *  must always account for every offline byte it might delete, not just whatever the Days
+     *  screen's filter happens to be showing at the time. */
     fun offlineSizeByDay(): List<Pair<String, Long>> {
         offlineVersion
-        return clipsByDay()
+        return allClipsGroupedByDay()
             .map { (day, dayClips) -> day to dayClips.filter { offline.isDownloaded(it) }.sumOf { it.sizeBytes } }
             .filter { it.second > 0 }
     }
@@ -154,12 +157,18 @@ class MainViewModel(
         }
     }
 
-    /** Days (YYYYMMDD) -> that day's clips, with the filter applied, most recent first. */
-    fun clipsByDay(): List<Pair<String, List<Clip>>> =
-        clips.filter { it.dateKey != null && passesDateFilter(it) }
+    /** Every clip that has a day, grouped and sorted most-recent-first — unfiltered by [dateFilter]. */
+    private fun allClipsGroupedByDay(): List<Pair<String, List<Clip>>> =
+        clips.filter { it.dateKey != null }
             .groupBy { it.dateKey!! }
             .toSortedMap(compareByDescending { it })
             .map { it.key to it.value }
+
+    /** Days (YYYYMMDD) -> that day's clips, with [dateFilter] applied, most recent first. */
+    fun clipsByDay(): List<Pair<String, List<Clip>>> =
+        allClipsGroupedByDay()
+            .map { (day, dayClips) -> day to dayClips.filter { passesDateFilter(it) } }
+            .filter { it.second.isNotEmpty() }
 
     fun clipsOf(dateKey: String): List<Clip> =
         clips.filter { it.dateKey == dateKey }

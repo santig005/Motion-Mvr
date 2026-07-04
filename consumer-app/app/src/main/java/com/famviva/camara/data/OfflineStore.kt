@@ -6,7 +6,10 @@ import android.net.NetworkCapabilities
 import com.famviva.camara.media.ClipActions
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -42,17 +45,29 @@ class OfflineStore(private val context: Context) {
     }
 
     /** Streams [clip] to local storage, atomically (.part + rename on success) so a half-finished
-     *  download is never mistaken for a complete one. No-op (true) if already downloaded. */
-    suspend fun download(clip: Clip, token: String): Boolean = withContext(Dispatchers.IO) {
-        if (isDownloaded(clip)) return@withContext true
-        val part = File(dir, "${clip.name}.part")
-        val ok = runCatching { FileOutputStream(part).use { ClipActions.streamTo(clip.streamUrl, token, it) } }
-            .getOrDefault(false)
-        if (ok) part.renameTo(localFile(clip)) else part.delete()
-        ok
+     *  download is never mistaken for a complete one. No-op (true) if already downloaded.
+     *  Per-clip-locked: the ViewModel's own auto-download and NewClipsWorker's background poll can
+     *  both decide to fetch the same new clip around the same time, and two writers to the same
+     *  ".part" path would otherwise interleave into a corrupt file. */
+    suspend fun download(clip: Clip, token: String): Boolean {
+        if (isDownloaded(clip)) return true
+        return downloadLocks.getOrPut(clip.name) { Mutex() }.withLock {
+            if (isDownloaded(clip)) return@withLock true   // finished by the other caller while we waited
+            withContext(Dispatchers.IO) {
+                val part = File(dir, "${clip.name}.part")
+                val streamed = runCatching { FileOutputStream(part).use { ClipActions.streamTo(clip.streamUrl, token, it) } }
+                    .getOrDefault(false)
+                val done = streamed && part.renameTo(localFile(clip))
+                if (!done) { part.delete() }
+                done
+            }
+        }
     }
 
     private companion object {
         const val KEY_AUTO = "auto_download_enabled"
+        // Process-wide (not per-OfflineStore-instance): NewClipsWorker and the app's own ViewModel
+        // each construct their own OfflineStore, so the lock has to live above both.
+        val downloadLocks = ConcurrentHashMap<String, Mutex>()
     }
 }

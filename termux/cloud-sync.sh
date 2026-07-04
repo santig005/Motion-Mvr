@@ -14,6 +14,7 @@
 #   LOCAL_KEEP_DAYS   days on phone    (default: 7)
 #   CLOUD_KEEP_DAYS   days on Drive    (default: 30)
 #   SYNC_INTERVAL     seconds/cycle    (default: 120)
+#   LOG_MAX_KB        cap on cloud-sync.log before it's trimmed to its newest half (default: 2048)
 set -u
 [ -f "$HOME/cloud.env" ] && . "$HOME/cloud.env"
 CAMERAS_DIR="${CAMERAS_DIR:-/sdcard/Movies/Cameras}"
@@ -22,8 +23,18 @@ LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-7}"
 CLOUD_KEEP_DAYS="${CLOUD_KEEP_DAYS:-30}"
 INTERVAL="${SYNC_INTERVAL:-60}"
 LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
+LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 mkdir -p "$(dirname "$LOG")" "$CAMERAS_DIR"
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+
+# The -v upload log (below) makes this grow with real usage instead of staying a fixed-size
+# summary; nothing else on the phone rotates logs, so cap it here rather than let it grow forever.
+trim_log(){
+  local sz
+  sz=$(stat -c %s "$LOG" 2>/dev/null) || return 0
+  [ "$sz" -gt $((LOG_MAX_KB * 1024)) ] || return 0
+  tail -c $((LOG_MAX_KB * 1024 / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+}
 
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d every ${INTERVAL}s ==="
 while true; do
@@ -48,5 +59,6 @@ while true; do
   fi
   # 4) CLOUD retention: delete on Drive anything older than CLOUD_KEEP_DAYS (mp4 + thumbnails)
   rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+  trim_log
   sleep "$INTERVAL"
 done

@@ -130,14 +130,18 @@ compute_battery_eta(){ # $1=current pct
     }'
 }
 
-write_status(){ # $1=recording_ok(1/0)
-  local rec now bat pct chg eta extra=""
+write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
+  local rec now bat pct chg eta extra="" hb="${2:-0}"
   [ "$1" = 1 ] && rec=true || rec=false
   now=$(date +%s)
   if bat=$(read_battery); then
     pct=${bat% *}; chg=${bat#* }
     extra=",\"battery\":${pct},\"charging\":${chg}"
-    update_battery_history "$pct" "$chg"
+    # Only sample into BATTERY_HIST on the heartbeat (~every HEARTBEAT_SECS), not on every
+    # ok<->down transition: those can fire seconds apart during a flapping camera reconnect, and
+    # a single stray CHARGING reading in the middle of a flap would otherwise wipe hours of
+    # discharge history (write_status runs on transitions too, for the recording_ok signal).
+    [ "$hb" = 1 ] && update_battery_history "$pct" "$chg"
     if eta=$(compute_battery_eta "$pct"); then
       extra="${extra},\"discharge_pct_per_h\":${eta% *},\"eta_minutes\":${eta#* }"
     fi
@@ -281,7 +285,7 @@ keeper_loop(){
       write_status 0; rec_state=down; last_hb=$now
       log "⚠️ RECORDING DOWN (no new segment for >${STALE_SECS}s) -> $HEALTH_FILE"
     elif [ "$((now - last_hb))" -ge "$HEARTBEAT_SECS" ]; then
-      write_status "$rec_ok"; last_hb=$now                  # heartbeat: refresh updated + battery
+      write_status "$rec_ok" 1; last_hb=$now                # heartbeat: refresh updated + battery + history sample
     fi
     [ -z "$newest" ] && continue
     newest_start=$(seg_epoch "$(basename "$newest" .mp4)")
