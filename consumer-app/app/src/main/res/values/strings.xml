@@ -59,6 +59,20 @@
     <string name="storage_delete_day_title">Remove offline copies for %s?</string>
     <string name="storage_delete_day_body">Only the local copies on this phone are removed. The clips stay on Drive.</string>
 
+    <!-- Storage v2: sections, donut, day detail -->
+    <string name="storage_section_local">On device</string>
+    <string name="storage_section_drive">On Drive</string>
+    <string name="storage_total_drive">On Drive: %s</string>
+    <string name="storage_drive_hint">Total footage stored on Google Drive, across every day.</string>
+    <string name="storage_drive_empty">No clips on Drive yet.</string>
+    <string name="storage_drive_readonly">Read-only here — the Drive originals aren\'t deleted from the app.</string>
+    <string name="storage_other">Other</string>
+    <string name="storage_percent">%d%%</string>
+    <string name="storage_percent_lt1">&lt;1%</string>
+    <string name="storage_sort_size">Size</string>
+    <string name="storage_sort_time">Time</string>
+    <string name="storage_day_empty_local">Nothing downloaded for this day.</string>
+
     <!-- Clip card overlay -->
     <string name="overlay_new">NEW</string>
     <string name="overlay_offline">"💾 OFFLINE"</string>

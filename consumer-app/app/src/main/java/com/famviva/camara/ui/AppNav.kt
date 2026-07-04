@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,6 +56,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -117,6 +120,12 @@ fun AppNav(
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
         composable("storage") { StorageScreen(vm, nav) }
+        composable("storage_day/{section}/{day}") { entry ->
+            val section = entry.arguments?.getString("section")
+                ?.let { runCatching { StorageSection.valueOf(it) }.getOrNull() } ?: StorageSection.LOCAL
+            val day = entry.arguments?.getString("day").orEmpty()
+            StorageDayScreen(vm, nav, section, day)
+        }
         composable("clips/{day}") { entry ->
             val day = entry.arguments?.getString("day").orEmpty()
             ClipsScreen(vm, nav, day, tokenProvider)
@@ -352,17 +361,42 @@ private fun DayCard(day: String, clips: List<Clip>, newCount: Int, onClick: () -
     }
 }
 
+/** Which storage footprint the screen is showing: the local (downloaded) cache or the full Drive
+ *  footprint. Passed through navigation to the day-detail screen, so it must be a stable name. */
+enum class StorageSection { LOCAL, DRIVE }
+
+/** One donut arc / legend entry. */
+private data class DonutSlice(val value: Long, val color: Color)
+
 /**
- * Device storage used by offline (downloaded) clips, by day, with device-only deletion — never
- * touches the Drive originals (deleting there needs a broader OAuth scope, out of scope here).
+ * Storage overview with two switchable sections:
+ *  - LOCAL: what's downloaded on this device (deletable here, never touches Drive).
+ *  - DRIVE: the full cloud footprint across every clip (read-only from the app).
+ * Each section shows a per-day donut (top days by size, the rest folded into "Other") with a
+ * labelled legend — tapping a day opens its clips, sortable by size or time.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
     val context = LocalContext.current
-    val byDay = vm.offlineSizeByDay()
-    val totalBytes = vm.offlineTotalBytes()
-    val maxBytes = (byDay.maxOfOrNull { it.second } ?: 1L).coerceAtLeast(1L)
+    var section by rememberSaveable { mutableStateOf(StorageSection.LOCAL) }
+    val palette = MaterialTheme.status.chart
+    val otherColor = MaterialTheme.status.chartOther
+
+    val isLocal = section == StorageSection.LOCAL
+    val byDay = if (isLocal) vm.offlineSizeByDay() else vm.driveSizeByDay()
+    val totalBytes = if (isLocal) vm.offlineTotalBytes() else vm.driveTotalBytes()
+
+    // Largest days keep a categorical hue (fixed slot order); everything past the palette folds
+    // into a single neutral "Other" slice so the donut never sprouts dozens of thin wedges.
+    val ranked = byDay.sortedByDescending { it.second }
+    val head = ranked.take(palette.size)
+    val tailBytes = ranked.drop(palette.size).sumOf { it.second }
+    val slices = buildList {
+        head.forEachIndexed { i, (_, bytes) -> add(DonutSlice(bytes, palette[i])) }
+        if (tailBytes > 0) add(DonutSlice(tailBytes, otherColor))
+    }
+
     var confirmDeleteAll by remember { mutableStateOf(false) }
     var confirmDeleteDay by remember { mutableStateOf<String?>(null) }
 
@@ -378,35 +412,73 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
             )
         },
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).padding(16.dp)) {
+        Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)) {
+            Spacer(Modifier.height(8.dp))
+            StorageSectionSelector(section) { section = it }
+            Spacer(Modifier.height(8.dp))
             Text(
-                stringResource(R.string.storage_offline_total, humanSize(totalBytes)),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                stringResource(R.string.storage_offline_hint),
+                stringResource(
+                    if (isLocal) R.string.storage_offline_hint else R.string.storage_drive_hint,
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
 
+            val emptyMsg = if (isLocal) R.string.storage_empty else R.string.storage_drive_empty
             if (byDay.isEmpty()) {
-                Text(stringResource(R.string.storage_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(stringResource(emptyMsg), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             } else {
-                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    items(byDay, key = { it.first }) { (day, bytes) ->
-                        StorageDayRow(
+                Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                    StorageDonut(
+                        slices = slices,
+                        centerTop = humanSize(totalBytes),
+                        centerBottom = stringResource(
+                            if (isLocal) R.string.storage_section_local else R.string.storage_section_drive,
+                        ),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    itemsIndexed(head, key = { _, it -> it.first }) { i, (day, bytes) ->
+                        StorageLegendRow(
+                            color = palette[i],
                             label = prettyDate(context, day),
                             bytes = bytes,
-                            fraction = bytes.toFloat() / maxBytes.toFloat(),
-                            onDelete = { confirmDeleteDay = day },
+                            percent = percentLabel(context, bytes, totalBytes),
+                            onClick = { nav.navigate("storage_day/${section.name}/$day") },
+                            onDelete = if (isLocal) ({ confirmDeleteDay = day }) else null,
                         )
                     }
+                    if (tailBytes > 0) {
+                        item(key = "__other__") {
+                            StorageLegendRow(
+                                color = otherColor,
+                                label = stringResource(R.string.storage_other),
+                                bytes = tailBytes,
+                                percent = percentLabel(context, tailBytes, totalBytes),
+                                onClick = null,
+                                onDelete = null,
+                            )
+                        }
+                    }
                 }
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { confirmDeleteAll = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.storage_delete_all))
+
+                if (isLocal) {
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = { confirmDeleteAll = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.storage_delete_all))
+                    }
+                } else {
+                    Text(
+                        stringResource(R.string.storage_drive_readonly),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 12.dp),
+                    )
                 }
             }
         }
@@ -430,15 +502,107 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
     }
 }
 
-/** One day's offline footprint: label, a single-hue magnitude bar (relative to the day with the
- *  most), the size, and a delete action for that day's offline copies. */
+/** "42%" / "<1%" of the total, localized. */
+private fun percentLabel(context: android.content.Context, bytes: Long, total: Long): String {
+    if (total <= 0) return context.getString(R.string.storage_percent, 0)
+    val pct = (bytes * 100.0 / total)
+    return if (pct < 1.0 && bytes > 0) context.getString(R.string.storage_percent_lt1)
+    else context.getString(R.string.storage_percent, pct.toInt())
+}
+
+/** [En el teléfono] / [En Drive] two-way segmented control. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun StorageDayRow(label: String, bytes: Long, fraction: Float, onDelete: () -> Unit) {
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Text(humanSize(bytes), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(4.dp))
+private fun StorageSectionSelector(section: StorageSection, onSelect: (StorageSection) -> Unit) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = section == StorageSection.LOCAL,
+            onClick = { onSelect(StorageSection.LOCAL) },
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+        ) { Text(stringResource(R.string.storage_section_local)) }
+        SegmentedButton(
+            selected = section == StorageSection.DRIVE,
+            onClick = { onSelect(StorageSection.DRIVE) },
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+        ) { Text(stringResource(R.string.storage_section_drive)) }
+    }
+}
+
+/** Donut of per-day slices with the total in the middle (Google-One style). Slices are separated
+ *  by a small surface gap so adjacent days stay distinct even for colour-vision deficiencies. */
+@Composable
+private fun StorageDonut(slices: List<DonutSlice>, centerTop: String, centerBottom: String) {
+    Box(Modifier.size(190.dp), contentAlignment = Alignment.Center) {
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val strokePx = 30.dp.toPx()
+            val d = size.minDimension - strokePx
+            val topLeft = androidx.compose.ui.geometry.Offset((size.width - d) / 2f, (size.height - d) / 2f)
+            val arcSize = androidx.compose.ui.geometry.Size(d, d)
+            val total = slices.sumOf { it.value }.coerceAtLeast(1L).toFloat()
+            val gap = if (slices.size > 1) 3f else 0f
+            var start = -90f
+            slices.forEach { s ->
+                val sweep = 360f * (s.value.toFloat() / total)
+                drawArc(
+                    color = s.color,
+                    startAngle = start + gap / 2f,
+                    sweepAngle = (sweep - gap).coerceAtLeast(0.5f),
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = strokePx,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Butt,
+                    ),
+                )
+                start += sweep
+            }
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(centerTop, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                centerBottom,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Legend entry: colour dot + day label + share-of-total + size, with an optional delete action.
+ *  The label is the direct-label mitigation for the palette's floor-band CVD/contrast — identity
+ *  is never carried by colour alone. */
+@Composable
+private fun StorageLegendRow(
+    color: Color,
+    label: String,
+    bytes: Long,
+    percent: String,
+    onClick: (() -> Unit)?,
+    onDelete: (() -> Unit)?,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 4.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(12.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(12.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Text(
+            percent,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            humanSize(bytes),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (onDelete != null) {
             IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
                 Icon(
                     Icons.Outlined.Delete,
@@ -447,18 +611,107 @@ private fun StorageDayRow(label: String, bytes: Long, fraction: Float, onDelete:
                     modifier = Modifier.size(20.dp),
                 )
             }
-        }
-        Spacer(Modifier.height(4.dp))
-        Box(
-            Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(4.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        ) {
-            Box(
-                Modifier.fillMaxWidth(fraction.coerceIn(0.02f, 1f)).fillMaxHeight()
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(MaterialTheme.colorScheme.primary),
+        } else if (onClick != null) {
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+/** A single day's clips (from one storage section), sortable by size or by time; tap plays. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StorageDayScreen(vm: MainViewModel, nav: NavHostController, section: StorageSection, day: String) {
+    val context = LocalContext.current
+    var sortBySize by rememberSaveable { mutableStateOf(true) }
+
+    val base = if (section == StorageSection.LOCAL) vm.clipsOf(day).filter { vm.isDownloaded(it) } else vm.clipsOf(day)
+    val clips = if (sortBySize) base.sortedByDescending { it.sizeBytes } else base.sortedByDescending { it.name }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(prettyDate(context, day)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad)) {
+            ChipsRow {
+                FilterChip(
+                    selected = sortBySize,
+                    onClick = { sortBySize = true },
+                    label = { Text(stringResource(R.string.storage_sort_size)) },
+                )
+                Spacer(Modifier.width(8.dp))
+                FilterChip(
+                    selected = !sortBySize,
+                    onClick = { sortBySize = false },
+                    label = { Text(stringResource(R.string.storage_sort_time)) },
+                )
+            }
+            if (clips.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(stringResource(R.string.storage_day_empty_local), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    items(clips, key = { it.id }) { clip ->
+                        StorageClipRow(
+                            clip = clip,
+                            downloaded = vm.isDownloaded(clip),
+                            onClick = { nav.navigate("player/${clip.id}") },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Compact clip row for the storage day detail: time, period, intensity, size, offline marker. */
+@Composable
+private fun StorageClipRow(clip: Clip, downloaded: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 4.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(clip.time, style = MaterialTheme.typography.titleSmall)
+            clip.period?.let {
+                Text(
+                    stringResource(it.labelRes),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        clip.intensityLevel?.let { IntensityBars(it); Spacer(Modifier.width(12.dp)) }
+        if (downloaded) {
+            Icon(
+                Icons.Filled.DownloadDone,
+                contentDescription = stringResource(R.string.overlay_offline),
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(
+            humanSize(clip.sizeBytes),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

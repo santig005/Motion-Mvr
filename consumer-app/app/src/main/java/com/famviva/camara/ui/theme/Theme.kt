@@ -77,6 +77,12 @@ data class AppStatusColors(
     val warningContainer: Color,
     val onWarningContainer: Color,
     val intensity: List<Color>, // index 0 = level 1 (faint) … index 4 = level 5 (strong)
+    /** Categorical chart hues (fixed order) for the storage donut's per-day slices. Validated for
+     *  CVD/contrast against the app surfaces; identity is still carried by a labelled legend, never
+     *  colour alone. */
+    val chart: List<Color>,
+    /** Neutral colour for the folded "Other" slice — deliberately not one of the categorical hues. */
+    val chartOther: Color,
 )
 
 private val LightStatusColors = AppStatusColors(
@@ -89,6 +95,16 @@ private val LightStatusColors = AppStatusColors(
         Color(0xFFF59E0B), // 4 notable
         Color(0xFFE53935), // 5 strong
     ),
+    chart = listOf(
+        Color(0xFF2A78D6), // blue
+        Color(0xFF1BAF7A), // aqua
+        Color(0xFFEDA100), // yellow
+        Color(0xFF008300), // green
+        Color(0xFF4A3AA7), // violet
+        Color(0xFFE34948), // red
+        Color(0xFFE87BA4), // magenta
+    ),
+    chartOther = Color(0xFFAEB4BC),
 )
 
 private val DarkStatusColors = AppStatusColors(
@@ -101,6 +117,16 @@ private val DarkStatusColors = AppStatusColors(
         Color(0xFFFFB74D),
         Color(0xFFFF6E6B),
     ),
+    chart = listOf(
+        Color(0xFF3987E5), // blue
+        Color(0xFF199E70), // aqua
+        Color(0xFFC98500), // yellow
+        Color(0xFF008300), // green
+        Color(0xFF9085E9), // violet
+        Color(0xFFE66767), // red
+        Color(0xFFD55181), // magenta
+    ),
+    chartOther = Color(0xFF5A5F66),
 )
 
 private val LocalStatusColors = staticCompositionLocalOf { LightStatusColors }

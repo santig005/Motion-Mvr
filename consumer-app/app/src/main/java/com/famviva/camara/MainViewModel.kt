@@ -65,6 +65,16 @@ class MainViewModel(
 
     fun offlineTotalBytes(): Long { offlineVersion; return offline.totalSizeBytes() }
 
+    /** Total bytes stored on Drive across every clip (the full cloud footprint). */
+    fun driveTotalBytes(): Long = clips.sumOf { it.sizeBytes }
+
+    /** Drive footprint per day (every clip's size), most recent day first, empty days omitted.
+     *  Unlike [offlineSizeByDay] this counts the cloud originals, not the local cache. */
+    fun driveSizeByDay(): List<Pair<String, Long>> =
+        allClipsGroupedByDay()
+            .map { (day, dayClips) -> day to dayClips.sumOf { it.sizeBytes } }
+            .filter { it.second > 0 }
+
     /** Offline (downloaded) bytes per day, most recent first, days with nothing cached omitted.
      *  Deliberately independent of [dateFilter] (a Days-screen-only concern): the Storage screen
      *  must always account for every offline byte it might delete, not just whatever the Days

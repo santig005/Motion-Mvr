@@ -59,6 +59,20 @@
     <string name="storage_delete_day_title">¿Quitar las copias sin conexión de %s?</string>
     <string name="storage_delete_day_body">Solo se eliminan las copias locales de este teléfono. Los clips siguen en Drive.</string>
 
+    <!-- Storage v2: secciones, donut, detalle de día -->
+    <string name="storage_section_local">En el teléfono</string>
+    <string name="storage_section_drive">En Drive</string>
+    <string name="storage_total_drive">En Drive: %s</string>
+    <string name="storage_drive_hint">Metraje total guardado en Google Drive, sumando todos los días.</string>
+    <string name="storage_drive_empty">Aún no hay clips en Drive.</string>
+    <string name="storage_drive_readonly">Solo lectura aquí — los originales de Drive no se borran desde la app.</string>
+    <string name="storage_other">Otros</string>
+    <string name="storage_percent">%d%%</string>
+    <string name="storage_percent_lt1">&lt;1%</string>
+    <string name="storage_sort_size">Tamaño</string>
+    <string name="storage_sort_time">Hora</string>
+    <string name="storage_day_empty_local">No hay nada descargado de este día.</string>
+
     <!-- Overlay de la tarjeta -->
     <string name="overlay_new">NUEVO</string>
     <string name="overlay_offline">"💾 SIN CONEXIÓN"</string>
