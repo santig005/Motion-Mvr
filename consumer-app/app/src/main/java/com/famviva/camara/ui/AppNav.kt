@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,6 +60,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -129,23 +132,60 @@ fun AppNav(
     }
 }
 
-/** Top-bar toggle for auto-downloading new clips for offline playback (Wi-Fi only). */
+/**
+ * Top-bar control for auto-downloading new clips for offline playback (Wi-Fi only). A dropdown
+ * (like the language switch) rather than a blind one-tap toggle: the current state is always
+ * visible (checkmark) and changing it is an explicit two-step choice, not an accidental tap.
+ */
 @Composable
-private fun AutoDownloadToggle(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+private fun AutoDownloadMenu(enabled: Boolean, onToggle: (Boolean) -> Unit) {
     val context = LocalContext.current
-    val toastText = stringResource(
-        if (enabled) R.string.auto_download_disabled_toast else R.string.auto_download_enabled_toast,
-    )
-    IconButton(onClick = {
-        onToggle(!enabled)
-        Toast.makeText(context, toastText, Toast.LENGTH_SHORT).show()
-    }) {
-        Icon(
-            if (enabled) Icons.Filled.DownloadDone else Icons.Filled.Download,
-            contentDescription = stringResource(if (enabled) R.string.auto_download_on else R.string.auto_download_off),
-            tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                if (enabled) Icons.Filled.DownloadDone else Icons.Filled.Download,
+                contentDescription = stringResource(R.string.auto_download_menu_title),
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            Text(
+                stringResource(R.string.auto_download_menu_title),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            AutoDownloadOption(R.string.auto_download_on, selected = enabled) {
+                expanded = false
+                if (!enabled) {
+                    onToggle(true)
+                    Toast.makeText(context, context.getString(R.string.auto_download_enabled_toast), Toast.LENGTH_SHORT).show()
+                }
+            }
+            AutoDownloadOption(R.string.auto_download_off, selected = !enabled) {
+                expanded = false
+                if (enabled) {
+                    onToggle(false)
+                    Toast.makeText(context, context.getString(R.string.auto_download_disabled_toast), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
+}
+
+@Composable
+private fun AutoDownloadOption(labelRes: Int, selected: Boolean, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(stringResource(labelRes)) },
+        onClick = onClick,
+        leadingIcon = {
+            if (selected) {
+                Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            } else {
+                Spacer(Modifier.size(24.dp))
+            }
+        },
+    )
 }
 
 /** Top-bar language switcher (English / Spanish), applied at runtime via AppCompat locales. */
@@ -156,7 +196,10 @@ private fun LanguageMenu() {
     val lang = if (tags.isNotEmpty()) tags else Locale.getDefault().language
     val isSpanish = lang.startsWith("es")
     Box {
-        TextButton(onClick = { expanded = true }) {
+        TextButton(
+            onClick = { expanded = true },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
+        ) {
             Text(if (isSpanish) "ES" else "EN", fontWeight = FontWeight.SemiBold)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -190,9 +233,19 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
+                title = {
+                    Text(
+                        stringResource(R.string.app_name),
+                        fontWeight = FontWeight.Bold,
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
+                    actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
                 actions = {
-                    AutoDownloadToggle(vm.autoDownloadEnabled, vm::setAutoDownload)
+                    AutoDownloadMenu(vm.autoDownloadEnabled, vm::setAutoDownload)
                     IconButton(onClick = { nav.navigate("storage") }) {
                         Icon(Icons.Filled.Storage, contentDescription = stringResource(R.string.storage_title))
                     }
