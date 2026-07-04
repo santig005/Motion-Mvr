@@ -31,7 +31,10 @@ while true; do
   #    compares size+modtime and RE-UPLOADS anything left partial/corrupt on Drive (self-healing).
   #    --min-age 10s: ignore files modified <10s ago (double safety; the keeper already writes
   #    atomically with .part + rename). The --include filters exclude the .part files.
-  if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s --transfers 2 --stats-one-line >>"$LOG" 2>&1; then
+  # -v: leaves one "Copied (new)" line per uploaded file with rclone's own timestamp. Needed to
+  # measure real end-to-end latency (see latency-report.sh); negligible extra cost (a print, not a
+  # process) since transfers are already happening.
+  if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s --transfers 2 -v --stats-one-line >>"$LOG" 2>&1; then
     # 2) Upload/refresh metrics and health status (no ignore-existing so they refresh)
     rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.csv" --include "*.json" --transfers 2 >>"$LOG" 2>&1
     # 3) LOCAL retention: delete mp4+jpg older than LOCAL_KEEP_DAYS (already confirmed on Drive this cycle)

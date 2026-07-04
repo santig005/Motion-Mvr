@@ -17,6 +17,7 @@ sub-stream — so every clip includes **pre-roll** (the seconds before the trigg
 | `boot-start-cam.sh` | Robust startup after a reboot (Termux:Boot runs it); launches the watchdog. |
 | `clip-metrics.sh` | Offline tool: recompute per-clip motion metrics to compare detector settings. |
 | `detect-log.sh` | Offline tool: log motion events only (no recording), to compare two detectors/streams. |
+| `latency-report.sh` | Diagnostic: reports real end-to-end latency (motion → clip built → uploaded to Drive) for recent clips, from data already on disk/in logs. |
 
 ## Requirements on the phone
 1. **Termux** (from F-Droid or GitHub, NOT the Play Store) — no Google account required.
@@ -56,6 +57,16 @@ Termux runs `sshd` on port **8022**. From the PC, with an authorized SSH key:
 ssh -i <key> -p 8022 <user>@<phone-ip>          # find <user> with `whoami` in Termux
 scp -P 8022 record-preroll.sh <user>@<phone-ip>:~/   # deploy changes
 ```
+
+## Measure real end-to-end latency
+`latency-report.sh` breaks down, per recent clip, how long each stage took:
+`motion detected -> clip built locally -> uploaded to Drive`. It reads data that's already there
+(`metrics.csv`, the clip's own mtime, cloud-sync's log) — no new recording path or process.
+```bash
+CAM_ENV=~/cam1.env ./latency-report.sh 30   # last 30 clips
+```
+Needs `cloud-sync.sh`'s clip upload to run with rclone's `-v` flag (already on by default here) so
+each upload leaves a timestamped "Copied" line to match against.
 
 ## Recalibrate for another scene/camera
 1. Capture a frame (`ffmpeg ... -frames:v 1 snap.jpg`) and pick `DET_CROP` over the walkable area.
