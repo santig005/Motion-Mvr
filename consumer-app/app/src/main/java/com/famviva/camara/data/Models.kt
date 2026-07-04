@@ -255,6 +255,13 @@ fun epochLabel(epochSec: Long): String {
     return "%02d/%02d %02d:%02d".format(t.dayOfMonth, t.monthValue, t.hour, t.minute)
 }
 
+/** "HH:MM" if the instant is today, else "DD/MM HH:MM" — for the battery "lasts until" forecast. */
+fun clockLabel(epochSec: Long): String {
+    val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())
+    return if (t.toLocalDate() == LocalDate.now()) "%02d:%02d".format(t.hour, t.minute)
+    else "%02d/%02d %02d:%02d".format(t.dayOfMonth, t.monthValue, t.hour, t.minute)
+}
+
 /** Readable byte total (KB/MB/GB). */
 fun humanSize(bytes: Long): String = when {
     bytes >= 1_073_741_824 -> "%.2f GB".format(bytes / 1_073_741_824.0)

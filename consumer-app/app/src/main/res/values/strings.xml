@@ -107,6 +107,10 @@
     <string name="battery_history_empty">Not enough history yet — it fills in as the app checks the camera over time.</string>
     <string name="battery_range">%1$s → %2$s</string>
     <string name="battery_minmax">Min %1$d%% · Max %2$d%%</string>
+    <string name="battery_forecast">Lasts until ~%s</string>
+
+    <!-- Average upload latency (recording end -> visible on Drive) across all clips -->
+    <string name="avg_upload_delay">Avg to cloud: %s</string>
 
     <!-- Relative time -->
     <string name="date_today">Today</string>

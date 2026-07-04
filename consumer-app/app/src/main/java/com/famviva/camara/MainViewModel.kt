@@ -77,6 +77,13 @@ class MainViewModel(
     /** Total bytes stored on Drive across every clip (the full cloud footprint). */
     fun driveTotalBytes(): Long = clips.sumOf { it.sizeBytes }
 
+    /** Average "recording ended -> visible on Drive" latency across clips that have both timestamps —
+     *  the "how long until footage is safe in the cloud" margin. Null if no clip has the data yet. */
+    fun avgUploadDelaySeconds(): Long? {
+        val delays = clips.mapNotNull { it.uploadDelaySeconds }
+        return if (delays.isEmpty()) null else delays.sum() / delays.size
+    }
+
     /** Drive footprint per day (every clip's size), most recent day first, empty days omitted.
      *  Unlike [offlineSizeByDay] this counts the cloud originals, not the local cache. */
     fun driveSizeByDay(): List<Pair<String, Long>> =

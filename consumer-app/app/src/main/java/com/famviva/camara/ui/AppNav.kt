@@ -98,6 +98,7 @@ import com.famviva.camara.R
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DayPeriod
+import com.famviva.camara.data.clockLabel
 import com.famviva.camara.data.epochLabel
 import com.famviva.camara.data.estimateBatteryEtaMinutes
 import com.famviva.camara.data.formatEta
@@ -293,13 +294,33 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
             }
 
             if (vm.loadedOnce && !vm.loading) {
-                Text(
-                    text = pluralStringResource(R.plurals.events, totalEvents, totalEvents) +
-                        " · " + humanSize(totalBytes),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                )
+                val avgDelay = vm.avgUploadDelaySeconds()
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = pluralStringResource(R.plurals.events, totalEvents, totalEvents) +
+                            " · " + humanSize(totalBytes),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (avgDelay != null) {
+                        Spacer(Modifier.weight(1f))
+                        Icon(
+                            Icons.Filled.CloudDone,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            stringResource(R.string.avg_upload_delay, uploadDelayLabel(avgDelay)),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
 
             PullToRefreshBox(
@@ -1337,6 +1358,16 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
                     if (suffix != null) {
                         Text(suffix, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+                // Forecast clock time = last reading's timestamp + ETA (only while discharging).
+                val lastEpoch = samples.lastOrNull()?.epochSec
+                if (!charging && etaMin != null && lastEpoch != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        stringResource(R.string.battery_forecast, clockLabel(lastEpoch + etaMin * 60L)),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
                 Spacer(Modifier.height(20.dp))
             }

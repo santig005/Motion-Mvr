@@ -107,6 +107,10 @@
     <string name="battery_history_empty">Aún no hay suficiente historial — se va llenando a medida que la app consulta la cámara.</string>
     <string name="battery_range">%1$s → %2$s</string>
     <string name="battery_minmax">Mín %1$d%% · Máx %2$d%%</string>
+    <string name="battery_forecast">Dura hasta ~%s</string>
+
+    <!-- Latencia promedio de subida (fin de grabación -> visible en Drive) de todos los clips -->
+    <string name="avg_upload_delay">Prom. a la nube: %s</string>
 
     <!-- Tiempo relativo -->
     <string name="date_today">Hoy</string>

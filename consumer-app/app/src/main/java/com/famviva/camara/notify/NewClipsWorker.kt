@@ -10,6 +10,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.famviva.camara.R
 import com.famviva.camara.auth.headlessDriveToken
+import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.OfflineStore
 import java.util.concurrent.TimeUnit
@@ -49,6 +50,14 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         // 2) NVR health (status.json): recording down / not reporting / low battery
         runCatching { drive.fetchCameraHealth() }.onSuccess { health ->
+            // Record battery readings even while the app is closed, so the history (and the ETA fit)
+            // stays dense. Deduped by the heartbeat's `updated`, so it won't double-count the app's
+            // own foreground sampling.
+            val batteryHistory = BatteryHistoryStore(ctx)
+            health.forEach { h ->
+                val b = h.battery
+                if (b != null && h.updated > 0) batteryHistory.record(h.camera, h.updated, b, h.charging == true)
+            }
             val now = System.currentTimeMillis() / 1000
             val issues = health.mapNotNull { h ->
                 when {
