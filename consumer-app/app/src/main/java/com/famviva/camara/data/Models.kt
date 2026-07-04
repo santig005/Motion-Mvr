@@ -108,6 +108,12 @@ data class CameraHealth(
     val updated: Long,          // epoch (s) of the last report -> heartbeat / "not reporting" detection
     val battery: Int? = null,   // battery % (null if the NVR doesn't report it / no Termux:API)
     val charging: Boolean? = null,
+    /** %/h discharge rate, fit by the NVR over a rolling window; null while charging or with too
+     *  little history yet. A rough linear estimate, not a precise prediction. */
+    val dischargePctPerHour: Double? = null,
+    /** Minutes until the battery reaches the NVR's floor threshold (~5%); null under the same
+     *  conditions as [dischargePctPerHour]. */
+    val etaMinutes: Int? = null,
 ) {
     /** true if there's been no report for more than [maxAgeSec] (default 3 h) -> phone probably off.
      *  The NVR heartbeat is every ~20 min and independent of whether there are videos, so "not
@@ -116,6 +122,19 @@ data class CameraHealth(
 
     /** Low battery and NOT charging. */
     val lowBattery: Boolean get() = battery != null && battery!! < 30 && charging != true
+
+    /** True when the NVR's own ETA estimate is under [thresholdMinutes] (default 2h) — a stronger
+     *  signal than [lowBattery] since it accounts for how fast the battery is actually draining. */
+    fun etaCritical(thresholdMinutes: Int = 120): Boolean = etaMinutes != null && etaMinutes!! < thresholdMinutes
+
+    /** "4h 20m" / "35m" duration label from [etaMinutes], or null if there's no estimate yet. */
+    fun etaLabel(context: Context): String? {
+        val m = etaMinutes ?: return null
+        val h = m / 60
+        val mm = m % 60
+        return if (h > 0) context.getString(R.string.battery_eta_hm, h, mm)
+        else context.getString(R.string.battery_eta_m, mm)
+    }
 
     /** "5 min ago" / "2 h ago" since the last report. */
     fun sinceLabel(context: Context, nowSec: Long): String {

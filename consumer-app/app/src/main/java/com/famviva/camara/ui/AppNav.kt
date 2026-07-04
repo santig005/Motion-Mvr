@@ -611,7 +611,10 @@ private fun CenteredText(text: String) {
 private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
     val context = LocalContext.current
     val now = System.currentTimeMillis() / 1000
-    val battTxt = h.battery?.let { "🔋 $it%${if (h.charging == true) " ⚡" else ""}" }
+    val etaTxt = h.etaLabel(context)
+    val battTxt = h.battery?.let {
+        "🔋 $it%${if (h.charging == true) " ⚡" else ""}" + (etaTxt?.let { e -> " · ~$e" } ?: "")
+    }
     when {
         !h.ok -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
@@ -624,6 +627,12 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
             fg = MaterialTheme.colorScheme.onErrorContainer,
             title = stringResource(R.string.status_stale_title, h.camera),
             body = stringResource(R.string.status_stale_body, h.sinceLabel(context, now)),
+        )
+        h.etaCritical() -> StatusBanner(
+            bg = MaterialTheme.colorScheme.errorContainer,
+            fg = MaterialTheme.colorScheme.onErrorContainer,
+            title = stringResource(R.string.status_critical_title, etaTxt ?: ""),
+            body = stringResource(R.string.status_critical_body),
         )
         h.lowBattery -> StatusBanner(
             bg = Color(0xFFFFE0B2),

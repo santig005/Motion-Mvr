@@ -55,7 +55,11 @@
     <string name="status_stale_body">Último reporte %s. Revisa el teléfono (¿apagado o sin red?).</string>
     <string name="status_lowbatt_title">🔋 Batería baja: %d%%</string>
     <string name="status_lowbatt_body">Conecta el teléfono para no perder la grabación.</string>
+    <string name="status_critical_title">🔋 Batería crítica: quedan ~%s</string>
+    <string name="status_critical_body">Conecta el teléfono antes de que se apague.</string>
     <string name="status_recording">✅ %s grabando</string>
+    <string name="battery_eta_hm">%1$dh %2$dm</string>
+    <string name="battery_eta_m">%1$dm</string>
 
     <!-- Tiempo relativo -->
     <string name="date_today">Hoy</string>

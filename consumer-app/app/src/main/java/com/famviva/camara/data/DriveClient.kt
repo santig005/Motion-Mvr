@@ -142,6 +142,8 @@ class DriveClient(
                             updated = j.optLong("updated", 0L),
                             battery = if (j.has("battery")) j.optInt("battery") else null,
                             charging = if (j.has("charging")) j.optBoolean("charging") else null,
+                            dischargePctPerHour = if (j.has("discharge_pct_per_h")) j.optDouble("discharge_pct_per_h") else null,
+                            etaMinutes = if (j.has("eta_minutes")) j.optInt("eta_minutes") else null,
                         )
                     }
                 }
