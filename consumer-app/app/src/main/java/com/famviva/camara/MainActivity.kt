@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.famviva.camara.auth.AuthManager
+import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.OfflineStore
@@ -39,6 +40,7 @@ class MainActivity : AppCompatActivity() {
         val seenStore = SeenStore(applicationContext)
         val offlineStore = OfflineStore(applicationContext)
         val clipListCache = ClipListCache(applicationContext)
+        val batteryHistory = BatteryHistoryStore(applicationContext)
 
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
                     seenStore = seenStore,
                     offlineStore = offlineStore,
                     clipListCache = clipListCache,
+                    batteryHistory = batteryHistory,
                     tokenProvider = { auth.token() },
                 )
             }

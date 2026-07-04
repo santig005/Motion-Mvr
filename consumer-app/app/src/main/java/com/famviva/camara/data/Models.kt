@@ -206,6 +206,12 @@ fun relativeLabel(context: Context, dt: LocalDateTime, now: LocalDateTime = Loca
     }
 }
 
+/** "27/06 14:30" from an epoch-second timestamp (local time) — for the battery graph axis. */
+fun epochLabel(epochSec: Long): String {
+    val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())
+    return "%02d/%02d %02d:%02d".format(t.dayOfMonth, t.monthValue, t.hour, t.minute)
+}
+
 /** Readable byte total (KB/MB/GB). */
 fun humanSize(bytes: Long): String = when {
     bytes >= 1_073_741_824 -> "%.2f GB".format(bytes / 1_073_741_824.0)

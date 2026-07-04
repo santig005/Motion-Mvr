@@ -95,8 +95,10 @@ import androidx.navigation.compose.rememberNavController
 import com.famviva.camara.DateFilter
 import com.famviva.camara.MainViewModel
 import com.famviva.camara.R
+import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DayPeriod
+import com.famviva.camara.data.epochLabel
 import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
@@ -112,16 +114,20 @@ fun AppNav(
     seenStore: com.famviva.camara.data.SeenStore,
     offlineStore: com.famviva.camara.data.OfflineStore,
     clipListCache: com.famviva.camara.data.ClipListCache,
+    batteryHistory: com.famviva.camara.data.BatteryHistoryStore,
     tokenProvider: suspend () -> String,
 ) {
     val nav = rememberNavController()
     val vm: MainViewModel = viewModel(
-        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, tokenProvider),
+        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, tokenProvider),
     )
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
         composable("storage") { StorageScreen(vm, nav) }
+        composable("battery/{camera}") { entry ->
+            BatteryScreen(vm, nav, entry.arguments?.getString("camera").orEmpty())
+        }
         composable("storage_day/{section}/{day}") { entry ->
             val section = entry.arguments?.getString("section")
                 ?.let { runCatching { StorageSection.valueOf(it) }.getOrNull() } ?: StorageSection.LOCAL
@@ -280,7 +286,9 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                 }
             }
 
-            vm.cameraHealth.forEach { h -> CameraStatusCard(h) }
+            vm.cameraHealth.forEach { h ->
+                CameraStatusCard(h, onOpenBattery = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null)
+            }
 
             if (vm.loadedOnce && !vm.loading) {
                 Text(
@@ -1148,14 +1156,16 @@ private fun CenteredText(text: String) {
  * discreet info line (battery + last signal) when everything is fine.
  */
 @Composable
-private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
+private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth, onOpenBattery: (() -> Unit)? = null) {
     val context = LocalContext.current
     val now = System.currentTimeMillis() / 1000
     val etaTxt = h.etaLabel(context)
     val battTxt = h.battery?.let {
         "🔋 $it%${if (h.charging == true) " ⚡" else ""}" + (etaTxt?.let { e -> " · ~$e" } ?: "")
     }
-    when {
+    val clickMod = if (onOpenBattery != null) Modifier.clickable(onClick = onOpenBattery) else Modifier
+    Box(clickMod) {
+      when {
         !h.ok -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
             fg = MaterialTheme.colorScheme.onErrorContainer,
@@ -1181,7 +1191,7 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
             body = stringResource(R.string.status_lowbatt_body),
         )
         else -> Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+            Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -1195,7 +1205,16 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth) {
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (onOpenBattery != null) {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
+      }
     }
 }
 
@@ -1210,5 +1229,125 @@ private fun StatusBanner(bg: Color, fg: Color, title: String, body: String) {
             Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg)
             Text(body, style = MaterialTheme.typography.bodySmall, color = fg)
         }
+    }
+}
+
+/**
+ * Battery-level over time, from the app's own local time series (each reading it saw from the NVR's
+ * status.json heartbeat). Reachable by tapping the camera status line. Resolution is bounded by how
+ * often the app checks the camera, so it fills in gradually with use.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: String) {
+    val context = LocalContext.current
+    val samples = vm.batterySamples(camera)
+    val health = vm.cameraHealth.firstOrNull { it.camera == camera }
+    val nowPct = samples.lastOrNull()?.battery ?: health?.battery
+    val charging = samples.lastOrNull()?.charging ?: (health?.charging == true)
+    val eta = health?.etaLabel(context)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.battery_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad).padding(16.dp)) {
+            if (nowPct != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.battery_now, nowPct),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    val suffix = when {
+                        charging -> "⚡ " + stringResource(R.string.battery_charging)
+                        eta != null -> "~$eta"
+                        else -> null
+                    }
+                    if (suffix != null) {
+                        Text(suffix, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+            }
+
+            if (samples.size < 2) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        stringResource(R.string.battery_history_empty),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                BatteryChart(samples, Modifier.fillMaxWidth().height(200.dp))
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    stringResource(R.string.battery_range, epochLabel(samples.first().epochSec), epochLabel(samples.last().epochSec)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    stringResource(R.string.battery_minmax, samples.minOf { it.battery }, samples.maxOf { it.battery }),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Line+area chart of battery % over time. Single series (title names it, no legend); thin 2px line,
+ *  filled area, a dot on the latest point; 0/25/50/75/100 gridlines. X spaced by real timestamp. */
+@Composable
+private fun BatteryChart(samples: List<BatterySample>, modifier: Modifier) {
+    val lineColor = MaterialTheme.colorScheme.primary
+    val fillColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    androidx.compose.foundation.Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val padTop = 6f
+        val padBottom = 6f
+        val chartH = (h - padTop - padBottom).coerceAtLeast(1f)
+        fun y(pct: Int) = padTop + chartH * (1f - pct / 100f)
+        listOf(0, 25, 50, 75, 100).forEach { g ->
+            val gy = y(g)
+            drawLine(gridColor, androidx.compose.ui.geometry.Offset(0f, gy), androidx.compose.ui.geometry.Offset(w, gy), strokeWidth = 1f)
+        }
+        val tMin = samples.first().epochSec
+        val span = (samples.last().epochSec - tMin).coerceAtLeast(1L)
+        fun x(t: Long) = w * ((t - tMin).toFloat() / span.toFloat())
+        val pts = samples.map { androidx.compose.ui.geometry.Offset(x(it.epochSec), y(it.battery)) }
+        val area = androidx.compose.ui.graphics.Path().apply {
+            moveTo(pts.first().x, padTop + chartH)
+            pts.forEach { lineTo(it.x, it.y) }
+            lineTo(pts.last().x, padTop + chartH)
+            close()
+        }
+        drawPath(area, fillColor)
+        val line = androidx.compose.ui.graphics.Path().apply {
+            moveTo(pts.first().x, pts.first().y)
+            pts.drop(1).forEach { lineTo(it.x, it.y) }
+        }
+        drawPath(
+            line,
+            lineColor,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 2.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round,
+            ),
+        )
+        drawCircle(lineColor, radius = 3.dp.toPx(), center = pts.last())
     }
 }

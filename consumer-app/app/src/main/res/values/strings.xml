@@ -100,6 +100,14 @@
     <string name="battery_eta_hm">%1$dh %2$dm</string>
     <string name="battery_eta_m">%1$dm</string>
 
+    <!-- Battery history graph -->
+    <string name="battery_title">Battery</string>
+    <string name="battery_now">Now: %d%%</string>
+    <string name="battery_charging">Charging</string>
+    <string name="battery_history_empty">Not enough history yet — it fills in as the app checks the camera over time.</string>
+    <string name="battery_range">%1$s → %2$s</string>
+    <string name="battery_minmax">Min %1$d%% · Max %2$d%%</string>
+
     <!-- Relative time -->
     <string name="date_today">Today</string>
     <string name="date_yesterday">Yesterday</string>

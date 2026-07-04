@@ -7,6 +7,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.famviva.camara.data.BatteryHistoryStore
+import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.CameraHealth
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.ClipListCache
@@ -30,6 +32,7 @@ class MainViewModel(
     private val seen: SeenStore,
     private val offline: OfflineStore,
     private val cache: ClipListCache,
+    private val battery: BatteryHistoryStore,
     private val tokenProvider: suspend () -> String,
 ) : ViewModel() {
 
@@ -55,6 +58,12 @@ class MainViewModel(
     // Bumped on every download/delete so Compose recomposes reads of offline state below — the
     // filesystem itself isn't observable, so this is the invalidation signal.
     private var offlineVersion by mutableStateOf(0)
+
+    // Same invalidation trick for the battery history file (bumped after each recorded sample).
+    private var batteryVersion by mutableStateOf(0)
+
+    /** That camera's recorded battery time series, oldest first (for the battery graph). */
+    fun batterySamples(camera: String): List<BatterySample> { batteryVersion; return battery.samples(camera) }
 
     fun selectDateFilter(f: DateFilter) { dateFilter = f }
 
@@ -146,6 +155,7 @@ class MainViewModel(
                 clips = drive.listClips()
                 cache.save(clips)
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
+                recordBatterySamples()
                 loadedOnce = true
                 if (autoDownloadEnabled) downloadTodaysClips()
             } catch (e: Exception) {
@@ -154,6 +164,15 @@ class MainViewModel(
                 loading = false
             }
         }
+    }
+
+    /** Persist a battery point for each reporting camera (deduped by heartbeat timestamp). */
+    private fun recordBatterySamples() {
+        cameraHealth.forEach { h ->
+            val b = h.battery
+            if (b != null && h.updated > 0) battery.record(h.camera, h.updated, b, h.charging == true)
+        }
+        batteryVersion++
     }
 
     private fun passesDateFilter(clip: Clip): Boolean {
@@ -190,10 +209,11 @@ class MainViewModel(
         private val seen: SeenStore,
         private val offline: OfflineStore,
         private val cache: ClipListCache,
+        private val battery: BatteryHistoryStore,
         private val tokenProvider: suspend () -> String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            MainViewModel(drive, seen, offline, cache, tokenProvider) as T
+            MainViewModel(drive, seen, offline, cache, battery, tokenProvider) as T
     }
 }
