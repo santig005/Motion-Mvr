@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Clips downloaded to cache to be shared via FileProvider. -->
+    <cache-path name="shared" path="shared/" />
+</paths>

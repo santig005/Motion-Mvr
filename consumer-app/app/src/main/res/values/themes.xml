@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme without an ActionBar; Compose draws the whole UI with Material3.
+         AppCompat parent is required because MainActivity is an AppCompatActivity
+         (needed for the in-app language switch). -->
+    <style name="Theme.CamaraFamviva" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

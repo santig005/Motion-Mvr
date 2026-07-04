@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Nombre de la app: se mantiene igual en todos los idiomas. -->
+    <string name="app_name">Motion NVR</string>
+
+    <!-- Acciones / descripciones -->
+    <string name="action_refresh">Recargar</string>
+    <string name="action_back">Atrás</string>
+    <string name="action_retry">Reintentar</string>
+    <string name="action_play">Reproducir</string>
+    <string name="action_language">Idioma</string>
+    <string name="sort_newest_first">Más recientes primero</string>
+    <string name="sort_oldest_first">Más antiguos primero</string>
+
+    <!-- Menú de idioma -->
+    <string name="lang_english">English</string>
+    <string name="lang_spanish">Español</string>
+
+    <!-- Filtros de fecha -->
+    <string name="filter_all">Todo</string>
+    <string name="filter_today">Hoy</string>
+    <string name="filter_yesterday">Ayer</string>
+    <string name="filter_week">7 días</string>
+
+    <!-- Franjas del día -->
+    <string name="period_all">Todas</string>
+    <string name="period_late_night">Madrugada</string>
+    <string name="period_morning">Mañana</string>
+    <string name="period_afternoon">Tarde</string>
+    <string name="period_evening">Noche</string>
+
+    <!-- Estados vacío / error -->
+    <string name="no_events_filter">No hay eventos para este filtro.</string>
+    <string name="no_events_period">Sin eventos en esta franja.</string>
+    <string name="clip_not_found">Clip no encontrado</string>
+    <string name="error_prefix">Error: %s</string>
+
+    <!-- Hoja de acciones del clip -->
+    <string name="authorizing">Autorizando…</string>
+    <string name="processing">Procesando…</string>
+    <string name="action_share">"📤   Compartir"</string>
+    <string name="action_download">"⬇️   Descargar a la galería"</string>
+    <string name="share_failed">No se pudo compartir</string>
+    <string name="download_failed">No se pudo descargar</string>
+    <string name="saved_to">Guardado en %s</string>
+    <string name="chooser_share">Compartir clip</string>
+
+    <!-- Overlay de la tarjeta -->
+    <string name="overlay_new">NUEVO</string>
+
+    <!-- Salud de la cámara -->
+    <string name="status_down_title">⚠️ %s sin señal</string>
+    <string name="status_down_body">No está grabando. Reiníciala (desenchúfala ~10 s y vuelve a conectarla).</string>
+    <string name="status_stale_title">📵 %s sin reportar</string>
+    <string name="status_stale_body">Último reporte %s. Revisa el teléfono (¿apagado o sin red?).</string>
+    <string name="status_lowbatt_title">🔋 Batería baja: %d%%</string>
+    <string name="status_lowbatt_body">Conecta el teléfono para no perder la grabación.</string>
+    <string name="status_recording">✅ %s grabando</string>
+
+    <!-- Tiempo relativo -->
+    <string name="date_today">Hoy</string>
+    <string name="date_yesterday">Ayer</string>
+    <string name="rel_just_now">hace un momento</string>
+    <string name="rel_minutes">hace %d min</string>
+    <string name="rel_hours">hace %d h</string>
+    <string name="rel_yesterday_time">ayer %s</string>
+    <string name="since_no_date">sin fecha</string>
+
+    <!-- Notificaciones -->
+    <string name="notif_channel_name">Eventos de movimiento</string>
+    <string name="notif_channel_desc">Avisos de nuevos clips de la cámara</string>
+    <string name="notif_health_title">⚠️ %s</string>
+    <string name="health_no_signal">%s: sin señal (no está grabando)</string>
+    <string name="health_not_reporting">%s: sin reportar (revisa el teléfono)</string>
+    <string name="health_low_battery">%1$s: batería baja %2$d%% (conéctalo)</string>
+
+    <!-- Plurales -->
+    <plurals name="events">
+        <item quantity="one">%d evento</item>
+        <item quantity="other">%d eventos</item>
+    </plurals>
+    <plurals name="badge_new">
+        <item quantity="one">%d nuevo</item>
+        <item quantity="other">%d nuevos</item>
+    </plurals>
+    <plurals name="notif_new_clips">
+        <item quantity="one">%d evento nuevo en la cámara</item>
+        <item quantity="other">%d eventos nuevos en la cámara</item>
+    </plurals>
+    <plurals name="notif_alerts_more">
+        <item quantity="one">%d aviso — toca para ver</item>
+        <item quantity="other">%d avisos — toca para ver</item>
+    </plurals>
+</resources>

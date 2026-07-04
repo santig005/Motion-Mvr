@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App name: kept the same in every language. -->
+    <string name="app_name">Motion NVR</string>
+
+    <!-- Actions / content descriptions -->
+    <string name="action_refresh">Refresh</string>
+    <string name="action_back">Back</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_play">Play</string>
+    <string name="action_language">Language</string>
+    <string name="sort_newest_first">Newest first</string>
+    <string name="sort_oldest_first">Oldest first</string>
+
+    <!-- Language menu -->
+    <string name="lang_english">English</string>
+    <string name="lang_spanish">Español</string>
+
+    <!-- Date filters (top of the Days screen) -->
+    <string name="filter_all">All</string>
+    <string name="filter_today">Today</string>
+    <string name="filter_yesterday">Yesterday</string>
+    <string name="filter_week">7 days</string>
+
+    <!-- Day periods -->
+    <string name="period_all">All</string>
+    <string name="period_late_night">Late night</string>
+    <string name="period_morning">Morning</string>
+    <string name="period_afternoon">Afternoon</string>
+    <string name="period_evening">Evening</string>
+
+    <!-- Empty / error states -->
+    <string name="no_events_filter">No events for this filter.</string>
+    <string name="no_events_period">No events in this time range.</string>
+    <string name="clip_not_found">Clip not found</string>
+    <string name="error_prefix">Error: %s</string>
+
+    <!-- Clip actions sheet -->
+    <string name="authorizing">Authorizing…</string>
+    <string name="processing">Processing…</string>
+    <string name="action_share">"📤   Share"</string>
+    <string name="action_download">"⬇️   Download to gallery"</string>
+    <string name="share_failed">Couldn\'t share</string>
+    <string name="download_failed">Couldn\'t download</string>
+    <string name="saved_to">Saved to %s</string>
+    <string name="chooser_share">Share clip</string>
+
+    <!-- Clip card overlay -->
+    <string name="overlay_new">NEW</string>
+
+    <!-- Camera health -->
+    <string name="status_down_title">⚠️ %s no signal</string>
+    <string name="status_down_body">Not recording. Restart it (unplug it ~10 s and plug it back in).</string>
+    <string name="status_stale_title">📵 %s not reporting</string>
+    <string name="status_stale_body">Last report %s. Check the phone (off or offline?).</string>
+    <string name="status_lowbatt_title">🔋 Low battery: %d%%</string>
+    <string name="status_lowbatt_body">Plug in the phone so recording doesn\'t stop.</string>
+    <string name="status_recording">✅ %s recording</string>
+
+    <!-- Relative time -->
+    <string name="date_today">Today</string>
+    <string name="date_yesterday">Yesterday</string>
+    <string name="rel_just_now">just now</string>
+    <string name="rel_minutes">%d min ago</string>
+    <string name="rel_hours">%d h ago</string>
+    <string name="rel_yesterday_time">yesterday %s</string>
+    <string name="since_no_date">no date</string>
+
+    <!-- Notifications -->
+    <string name="notif_channel_name">Motion events</string>
+    <string name="notif_channel_desc">Alerts for new camera clips</string>
+    <string name="notif_health_title">⚠️ %s</string>
+    <string name="health_no_signal">%s: no signal (not recording)</string>
+    <string name="health_not_reporting">%s: not reporting (check the phone)</string>
+    <string name="health_low_battery">%1$s: low battery %2$d%% (plug it in)</string>
+
+    <!-- Plurals -->
+    <plurals name="events">
+        <item quantity="one">%d event</item>
+        <item quantity="other">%d events</item>
+    </plurals>
+    <plurals name="badge_new">
+        <item quantity="one">%d new</item>
+        <item quantity="other">%d new</item>
+    </plurals>
+    <plurals name="notif_new_clips">
+        <item quantity="one">%d new event on the camera</item>
+        <item quantity="other">%d new events on the camera</item>
+    </plurals>
+    <plurals name="notif_alerts_more">
+        <item quantity="one">%d alert — tap to view</item>
+        <item quantity="other">%d alerts — tap to view</item>
+    </plurals>
+</resources>
