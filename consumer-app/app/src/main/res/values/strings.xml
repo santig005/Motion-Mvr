@@ -112,6 +112,13 @@
     <!-- Average upload latency (recording end -> visible on Drive) across all clips -->
     <string name="avg_upload_delay">Avg to cloud: %s</string>
 
+    <!-- Per-day analytics: 24h event distribution -->
+    <string name="analytics_activity_by_hour">Activity by hour</string>
+    <string name="analytics_peak">Peak %1$s (%2$d)</string>
+    <string name="analytics_hour_range">%1$02d–%2$02dh</string>
+    <string name="intensity_low">Low</string>
+    <string name="intensity_high">High</string>
+
     <!-- Relative time -->
     <string name="date_today">Today</string>
     <string name="date_yesterday">Yesterday</string>

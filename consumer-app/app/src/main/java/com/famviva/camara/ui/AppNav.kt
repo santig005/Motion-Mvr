@@ -109,6 +109,7 @@ import com.famviva.camara.data.uploadDelayLabel
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 @Composable
@@ -835,7 +836,8 @@ private fun ClipsScreen(
     // Clip selected with a long press (for the share/download menu).
     var actionClip by remember { mutableStateOf<Clip?>(null) }
 
-    val clips = vm.clipsOf(day)
+    val dayClips = vm.clipsOf(day)
+    val clips = dayClips
         .filter { selectedPeriod == null || it.period == selectedPeriod }
         .let { list -> if (newestFirst) list.sortedByDescending { it.name } else list.sortedBy { it.name } }
 
@@ -889,9 +891,14 @@ private fun ClipsScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    if (dayClips.isNotEmpty()) {
+                        item(key = "__analytics__") {
+                            DayAnalyticsCard(dayClips, selectedPeriod)
+                        }
+                    }
                     if (clips.isEmpty()) {
                         item {
-                            Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                            Box(Modifier.fillParentMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
                                 Text(stringResource(R.string.no_events_period))
                             }
                         }
@@ -919,6 +926,124 @@ private fun ClipsScreen(
             isDownloaded = vm.isDownloaded(clip),
             onRemoveOffline = { vm.deleteOfflineCopy(clip) },
             onDismiss = { actionClip = null },
+        )
+    }
+}
+
+/** One hour bucket of a day: how many events happened and their average motion intensity (1..5). */
+private data class HourBin(val hour: Int, val count: Int, val avgIntensity: Int?)
+
+private fun binClipsByHour(clips: List<Clip>): List<HourBin> {
+    val byHour = clips.filter { it.hour != null }.groupBy { it.hour!! }
+    return (0..23).map { h ->
+        val cs = byHour[h].orEmpty()
+        val ints = cs.mapNotNull { it.intensityLevel }
+        HourBin(h, cs.size, if (ints.isEmpty()) null else ints.average().roundToInt())
+    }
+}
+
+/**
+ * Per-day activity analytics: a 24-hour histogram of how events are distributed across the day.
+ * Bar height = number of events that hour; bar colour = the hour's average motion intensity (the
+ * app's faint→strong ramp). When a time-of-day period is selected, its hours stay lit and the rest
+ * dim, so the chart doubles as context for the filter below.
+ */
+@Composable
+private fun DayAnalyticsCard(dayClips: List<Clip>, selectedPeriod: DayPeriod?) {
+    val context = LocalContext.current
+    val bins = remember(dayClips) { binClipsByHour(dayClips) }
+    val peak = bins.maxByOrNull { it.count }?.takeIf { it.count > 0 }
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                stringResource(R.string.analytics_activity_by_hour),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (peak != null) {
+                Text(
+                    stringResource(
+                        R.string.analytics_peak,
+                        context.getString(R.string.analytics_hour_range, peak.hour, (peak.hour + 1) % 24),
+                        peak.count,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            EventDistributionChart(bins, selectedPeriod, Modifier.fillMaxWidth().height(120.dp))
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                listOf(0, 6, 12, 18, 24).forEach {
+                    Text(
+                        "${it}h",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            IntensityLegend()
+        }
+    }
+}
+
+/** 24-bar histogram; height = event count, colour = average intensity, dimmed outside [selected]. */
+@Composable
+private fun EventDistributionChart(bins: List<HourBin>, selectedPeriod: DayPeriod?, modifier: Modifier) {
+    val ramp = MaterialTheme.status.intensity
+    val fallback = MaterialTheme.colorScheme.primary
+    val baseline = MaterialTheme.colorScheme.outlineVariant
+    val maxCount = (bins.maxOfOrNull { it.count } ?: 0).coerceAtLeast(1)
+    androidx.compose.foundation.Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val slot = w / 24f
+        val barW = slot * 0.6f
+        drawLine(
+            baseline,
+            androidx.compose.ui.geometry.Offset(0f, h),
+            androidx.compose.ui.geometry.Offset(w, h),
+            strokeWidth = 1f,
+        )
+        bins.forEach { b ->
+            if (b.count <= 0) return@forEach
+            val inSel = selectedPeriod == null || b.hour in selectedPeriod.range
+            val x = b.hour * slot + (slot - barW) / 2f
+            val barH = (h - 2f) * (b.count.toFloat() / maxCount)
+            val color = (b.avgIntensity?.let { ramp[(it - 1).coerceIn(0, 4)] } ?: fallback)
+                .copy(alpha = if (inSel) 1f else 0.25f)
+            drawRoundRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(x, h - barH),
+                size = androidx.compose.ui.geometry.Size(barW, barH),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barW * 0.4f, barW * 0.4f),
+            )
+        }
+    }
+}
+
+/** Small faint→strong colour key so the intensity encoding on the histogram is decodable. */
+@Composable
+private fun IntensityLegend() {
+    val ramp = MaterialTheme.status.intensity
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            stringResource(R.string.intensity_low),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(6.dp))
+        ramp.forEach { c ->
+            Box(Modifier.size(14.dp).clip(RoundedCornerShape(3.dp)).background(c))
+            Spacer(Modifier.width(3.dp))
+        }
+        Spacer(Modifier.width(3.dp))
+        Text(
+            stringResource(R.string.intensity_high),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

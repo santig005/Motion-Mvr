@@ -112,6 +112,13 @@
     <!-- Latencia promedio de subida (fin de grabación -> visible en Drive) de todos los clips -->
     <string name="avg_upload_delay">Prom. a la nube: %s</string>
 
+    <!-- Analítica por día: distribución de eventos en 24h -->
+    <string name="analytics_activity_by_hour">Actividad por hora</string>
+    <string name="analytics_peak">Pico %1$s (%2$d)</string>
+    <string name="analytics_hour_range">%1$02d–%2$02dh</string>
+    <string name="intensity_low">Baja</string>
+    <string name="intensity_high">Alta</string>
+
     <!-- Tiempo relativo -->
     <string name="date_today">Hoy</string>
     <string name="date_yesterday">Ayer</string>
