@@ -322,7 +322,16 @@ keeper_loop(){
         [ -z "${es:-}" ] && continue
         clip_start=$((es - PREROLL)); clip_end=$((el + POSTROLL))
         if [ -z "$newest_start" ] || [ "$newest_start" -le "$clip_end" ]; then
-          echo "$es $el" >> "$MWIN.keep"          # still recording; retry later
+          if [ "$rec_ok" = 0 ]; then
+            # Recording is DOWN (stream cut): the segments past clip_end will NEVER arrive. Finalize
+            # now from whatever is already in the ring, so a mid-event cut — e.g. a thief killing the
+            # camera before the motion "closes" — still yields a saved clip instead of being dropped
+            # when the ring is pruned. Pass no "open" segment to skip (nothing is being written).
+            log "🛟 finalizing orphan window ($es..$el): recording down, preserving footage"
+            build_clip "$clip_start" "$clip_end" "" &
+          else
+            echo "$es $el" >> "$MWIN.keep"        # still recording; retry later
+          fi
         elif [ "$((now - el))" -le "$((RING_KEEP_MIN*60))" ]; then
           build_clip "$clip_start" "$clip_end" "$newest" &   # ready: trim (in background)
         fi
@@ -367,7 +376,18 @@ while true; do
           evt_last=$now
         fi
       else
-        [ "$?" -le 128 ] && { log "!! detector pipe closed"; break; }
+        [ "$?" -le 128 ] && {
+          # Pipe closed = the detector stream dropped. If a motion event is still OPEN (motion was
+          # happening when the stream died — e.g. a thief cutting the camera mid-event), flush it to
+          # $MWIN now so the keeper still preserves that footage instead of discarding it. The keeper
+          # finalizes it from the ring once it sees recording is down (see "orphan window").
+          if [ "$in_evt" -eq 1 ]; then
+            echo "$evt_start $evt_last" >> "$MWIN"
+            log "■■ event force-closed on disconnect ($evt_start..$evt_last); preserving footage"
+            in_evt=0
+          fi
+          log "!! detector pipe closed"; break
+        }
       fi
       if [ "$in_evt" -eq 1 ]; then
         now=$(date +%s)
