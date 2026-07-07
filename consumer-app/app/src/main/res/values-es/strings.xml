@@ -111,6 +111,11 @@
     <string name="battery_range">%1$s → %2$s</string>
     <string name="battery_minmax">Mín %1$d%% · Máx %2$d%%</string>
     <string name="battery_forecast">Dura hasta ~%s</string>
+    <string name="battery_scrub_hint">Desliza sobre la gráfica para ver detalle</string>
+    <string name="battery_range_24h">24h</string>
+    <string name="battery_range_3d">3d</string>
+    <string name="battery_range_7d">7d</string>
+    <string name="battery_range_all">Todo</string>
 
     <!-- Latencia promedio de subida (fin de grabación -> visible en Drive): global / por día -->
     <string name="avg_upload_delay">Prom. a la nube: %s</string>

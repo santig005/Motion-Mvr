@@ -255,6 +255,13 @@ fun epochLabel(epochSec: Long): String {
     return "%02d/%02d %02d:%02d".format(t.dayOfMonth, t.monthValue, t.hour, t.minute)
 }
 
+/** Compact axis tick: "HH:MM" for short spans, "DD/MM" once the span crosses a couple of days. */
+fun axisTimeLabel(epochSec: Long, longSpan: Boolean): String {
+    val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())
+    return if (longSpan) "%02d/%02d".format(t.dayOfMonth, t.monthValue)
+    else "%02d:%02d".format(t.hour, t.minute)
+}
+
 /** "HH:MM" if the instant is today, else "DD/MM HH:MM" — for the battery "lasts until" forecast. */
 fun clockLabel(epochSec: Long): String {
     val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())

@@ -111,6 +111,11 @@
     <string name="battery_range">%1$s → %2$s</string>
     <string name="battery_minmax">Min %1$d%% · Max %2$d%%</string>
     <string name="battery_forecast">Lasts until ~%s</string>
+    <string name="battery_scrub_hint">Drag across the graph to inspect</string>
+    <string name="battery_range_24h">24h</string>
+    <string name="battery_range_3d">3d</string>
+    <string name="battery_range_7d">7d</string>
+    <string name="battery_range_all">All</string>
 
     <!-- Average upload latency (recording end -> visible on Drive): across all clips / per day -->
     <string name="avg_upload_delay">Avg to cloud: %s</string>

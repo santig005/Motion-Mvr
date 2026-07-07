@@ -5,6 +5,8 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -78,14 +80,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -99,6 +111,7 @@ import com.famviva.camara.R
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DayPeriod
+import com.famviva.camara.data.axisTimeLabel
 import com.famviva.camara.data.clockLabel
 import com.famviva.camara.data.epochLabel
 import com.famviva.camara.data.estimateBatteryEtaMinutes
@@ -1545,65 +1558,148 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
                     )
                 }
             } else {
-                BatteryChart(samples, Modifier.fillMaxWidth().height(200.dp))
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    stringResource(R.string.battery_range, epochLabel(samples.first().epochSec), epochLabel(samples.last().epochSec)),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    stringResource(R.string.battery_minmax, samples.minOf { it.battery }, samples.maxOf { it.battery }),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                var rangeDays by rememberSaveable { mutableStateOf(1) }   // 1/3/7 days, 0 = all
+                val nowS = System.currentTimeMillis() / 1000
+                val chartSamples = if (rangeDays <= 0) samples
+                    else samples.filter { it.epochSec >= nowS - rangeDays.toLong() * 86_400L }
+
+                BatteryRangeChips(rangeDays) { rangeDays = it }
+                Spacer(Modifier.height(8.dp))
+                if (chartSamples.size < 2) {
+                    Text(
+                        stringResource(R.string.battery_history_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    BatteryGraph(chartSamples, Modifier.fillMaxWidth().height(240.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        stringResource(R.string.battery_minmax, chartSamples.minOf { it.battery }, chartSamples.maxOf { it.battery }),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
 }
 
-/** Line+area chart of battery % over time. Single series (title names it, no legend); thin 2px line,
- *  filled area, a dot on the latest point; 0/25/50/75/100 gridlines. X spaced by real timestamp. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BatteryChart(samples: List<BatterySample>, modifier: Modifier) {
+private fun BatteryRangeChips(selected: Int, onSelect: (Int) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(
+            1 to R.string.battery_range_24h,
+            3 to R.string.battery_range_3d,
+            7 to R.string.battery_range_7d,
+            0 to R.string.battery_range_all,
+        ).forEach { (days, res) ->
+            FilterChip(
+                selected = selected == days,
+                onClick = { onSelect(days) },
+                label = { Text(stringResource(res)) },
+            )
+        }
+    }
+}
+
+/** Finds the sample index nearest (by time) to a touch x within the plot area. */
+private fun nearestSampleIndex(px: Float, width: Float, leftPad: Float, samples: List<BatterySample>, tMin: Long, span: Long): Int {
+    val frac = ((px - leftPad) / (width - leftPad).coerceAtLeast(1f)).coerceIn(0f, 1f)
+    val target = tMin + (frac * span).toLong()
+    return samples.indices.minByOrNull { kotlin.math.abs(samples[it].epochSec - target) } ?: 0
+}
+
+/**
+ * Interactive battery-over-time graph: line + filled area, Y axis (0/50/100 %) and X axis (time
+ * ticks) labels, and a scrub crosshair — drag across it to read the exact time + % of any point
+ * (shown in the readout line above). Single series, so the title carries identity (no legend).
+ */
+@Composable
+private fun BatteryGraph(samples: List<BatterySample>, modifier: Modifier) {
     val lineColor = MaterialTheme.colorScheme.primary
     val fillColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
     val gridColor = MaterialTheme.colorScheme.outlineVariant
-    androidx.compose.foundation.Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        val padTop = 6f
-        val padBottom = 6f
-        val chartH = (h - padTop - padBottom).coerceAtLeast(1f)
-        fun y(pct: Int) = padTop + chartH * (1f - pct / 100f)
-        listOf(0, 25, 50, 75, 100).forEach { g ->
-            val gy = y(g)
-            drawLine(gridColor, androidx.compose.ui.geometry.Offset(0f, gy), androidx.compose.ui.geometry.Offset(w, gy), strokeWidth = 1f)
-        }
-        val tMin = samples.first().epochSec
-        val span = (samples.last().epochSec - tMin).coerceAtLeast(1L)
-        fun x(t: Long) = w * ((t - tMin).toFloat() / span.toFloat())
-        val pts = samples.map { androidx.compose.ui.geometry.Offset(x(it.epochSec), y(it.battery)) }
-        val area = androidx.compose.ui.graphics.Path().apply {
-            moveTo(pts.first().x, padTop + chartH)
-            pts.forEach { lineTo(it.x, it.y) }
-            lineTo(pts.last().x, padTop + chartH)
-            close()
-        }
-        drawPath(area, fillColor)
-        val line = androidx.compose.ui.graphics.Path().apply {
-            moveTo(pts.first().x, pts.first().y)
-            pts.drop(1).forEach { lineTo(it.x, it.y) }
-        }
-        drawPath(
-            line,
-            lineColor,
-            style = androidx.compose.ui.graphics.drawscope.Stroke(
-                width = 2.dp.toPx(),
-                cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                join = androidx.compose.ui.graphics.StrokeJoin.Round,
-            ),
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val measurer = rememberTextMeasurer()
+    val tMin = samples.first().epochSec
+    val span = (samples.last().epochSec - tMin).coerceAtLeast(1L)
+    val longSpan = span > 172_800L                      // > ~2 days -> date ticks instead of clock
+    var selIdx by remember(samples) { mutableStateOf<Int?>(null) }
+
+    Column(modifier) {
+        val sel = selIdx?.let { samples.getOrNull(it) }
+        Text(
+            text = if (sel != null) "${epochLabel(sel.epochSec)} · ${sel.battery}%"
+                else stringResource(R.string.battery_scrub_hint),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (sel != null) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (sel != null) MaterialTheme.colorScheme.primary else labelColor,
         )
-        drawCircle(lineColor, radius = 3.dp.toPx(), center = pts.last())
+        Spacer(Modifier.height(6.dp))
+        androidx.compose.foundation.Canvas(
+            Modifier.fillMaxWidth().weight(1f).pointerInput(samples) {
+                awaitEachGesture {
+                    val leftPad = 34.dp.toPx()
+                    val w = size.width.toFloat()
+                    val down = awaitFirstDown()
+                    selIdx = nearestSampleIndex(down.position.x, w, leftPad, samples, tMin, span)
+                    do {
+                        val ev = awaitPointerEvent()
+                        ev.changes.forEach { c ->
+                            if (c.pressed) { selIdx = nearestSampleIndex(c.position.x, w, leftPad, samples, tMin, span); c.consume() }
+                        }
+                    } while (ev.changes.any { it.pressed })
+                    selIdx = null
+                }
+            },
+        ) {
+            val leftPad = 34.dp.toPx()
+            val topPad = 8.dp.toPx()
+            val bottomPad = 18.dp.toPx()
+            val plotW = (size.width - leftPad).coerceAtLeast(1f)
+            val plotH = (size.height - topPad - bottomPad).coerceAtLeast(1f)
+            fun y(pct: Int) = topPad + plotH * (1f - pct / 100f)
+            fun x(t: Long) = leftPad + plotW * ((t - tMin).toFloat() / span.toFloat())
+
+            // Y gridlines + labels (0/50/100)
+            listOf(0, 25, 50, 75, 100).forEach { g ->
+                drawLine(gridColor, Offset(leftPad, y(g)), Offset(size.width, y(g)), strokeWidth = 1f)
+            }
+            listOf(0, 50, 100).forEach { g ->
+                val tl = measurer.measure("$g", style = TextStyle(color = labelColor, fontSize = 9.sp))
+                drawText(tl, topLeft = Offset(leftPad - tl.size.width - 4f, y(g) - tl.size.height / 2f))
+            }
+            // Area + line
+            val pts = samples.map { Offset(x(it.epochSec), y(it.battery)) }
+            val area = Path().apply {
+                moveTo(pts.first().x, topPad + plotH); pts.forEach { lineTo(it.x, it.y) }
+                lineTo(pts.last().x, topPad + plotH); close()
+            }
+            drawPath(area, fillColor)
+            val line = Path().apply {
+                moveTo(pts.first().x, pts.first().y); pts.drop(1).forEach { lineTo(it.x, it.y) }
+            }
+            drawPath(line, lineColor, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+            // X axis time ticks (first / middle / last)
+            listOf(0, samples.size / 2, samples.size - 1).distinct().forEach { i ->
+                val s = samples[i]
+                val tl = measurer.measure(axisTimeLabel(s.epochSec, longSpan), style = TextStyle(color = labelColor, fontSize = 9.sp))
+                val tx = (x(s.epochSec) - tl.size.width / 2f).coerceIn(leftPad, size.width - tl.size.width)
+                drawText(tl, topLeft = Offset(tx, size.height - bottomPad + 3f))
+            }
+            // Scrub crosshair + selected point, or the latest-point dot when idle
+            val idx = selIdx
+            if (idx != null && idx in pts.indices) {
+                val p = pts[idx]
+                drawLine(lineColor.copy(alpha = 0.5f), Offset(p.x, topPad), Offset(p.x, topPad + plotH), strokeWidth = 1.5.dp.toPx())
+                drawCircle(lineColor, radius = 4.5.dp.toPx(), center = p)
+                drawCircle(Color.White, radius = 2.dp.toPx(), center = p)
+            } else {
+                drawCircle(lineColor, radius = 3.dp.toPx(), center = pts.last())
+            }
+        }
     }
 }
+
