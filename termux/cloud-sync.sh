@@ -13,7 +13,10 @@
 #   RCLONE_REMOTE     rclone root      (default: gdrive:Cameras)
 #   LOCAL_KEEP_DAYS   days on phone    (default: 7)
 #   CLOUD_KEEP_DAYS   days on Drive    (default: 30)
-#   SYNC_INTERVAL     seconds/cycle    (default: 120)
+#   SYNC_INTERVAL     seconds/cycle    (default: 25) — how fast a new clip lands on Drive
+#   RETENTION_EVERY   seconds between retention sweeps (default: 28800 = 8h, ~3x/day). The
+#                     local-purge + Drive `rclone delete` are decoupled from the upload cycle: a
+#                     fast upload cadence must NOT run a recursive Drive delete-listing every cycle.
 #   LOG_MAX_KB        cap on cloud-sync.log before it's trimmed to its newest half (default: 2048)
 set -u
 [ -f "$HOME/cloud.env" ] && . "$HOME/cloud.env"
@@ -21,7 +24,8 @@ CAMERAS_DIR="${CAMERAS_DIR:-/sdcard/Movies/Cameras}"
 REMOTE="${RCLONE_REMOTE:-gdrive:Cameras}"
 LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-7}"
 CLOUD_KEEP_DAYS="${CLOUD_KEEP_DAYS:-30}"
-INTERVAL="${SYNC_INTERVAL:-60}"
+INTERVAL="${SYNC_INTERVAL:-25}"
+RETENTION_EVERY="${RETENTION_EVERY:-28800}"
 LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 mkdir -p "$(dirname "$LOG")" "$CAMERAS_DIR"
@@ -36,8 +40,11 @@ trim_log(){
   tail -c $((LOG_MAX_KB * 1024 / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
 }
 
-log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d every ${INTERVAL}s ==="
+log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | upload every ${INTERVAL}s, retention every ${RETENTION_EVERY}s ==="
+last_retention=0
 while true; do
+  now=$(date +%s)
+  uploaded_ok=0
   # 1) Upload clips + thumbnails of EVERY camera (recursive). WITHOUT --ignore-existing: rclone
   #    compares size+modtime and RE-UPLOADS anything left partial/corrupt on Drive (self-healing).
   #    --min-age 10s: ignore files modified <10s ago (double safety; the keeper already writes
@@ -45,20 +52,31 @@ while true; do
   # -v: leaves one "Copied (new)" line per uploaded file with rclone's own timestamp. Needed to
   # measure real end-to-end latency (see latency-report.sh); negligible extra cost (a print, not a
   # process) since transfers are already happening.
-  if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s --transfers 2 -v --stats-one-line >>"$LOG" 2>&1; then
-    # 2) Upload/refresh metrics and health status (no ignore-existing so they refresh)
-    rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.csv" --include "*.json" --transfers 2 >>"$LOG" 2>&1
-    # 3) LOCAL retention: delete mp4+jpg older than LOCAL_KEEP_DAYS (already confirmed on Drive this cycle)
-    n=$(find "$CAMERAS_DIR" \( -name "*.mp4" -o -name "*.jpg" \) -mtime +"$LOCAL_KEEP_DAYS" 2>/dev/null | wc -l)
-    if [ "$n" -gt 0 ]; then
-      find "$CAMERAS_DIR" \( -name "*.mp4" -o -name "*.jpg" \) -mtime +"$LOCAL_KEEP_DAYS" -delete 2>/dev/null
-      log "local retention: deleted $n files > ${LOCAL_KEEP_DAYS}d"
-    fi
+  if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s --transfers 3 -v --stats-one-line >>"$LOG" 2>&1; then
+    # Upload/refresh metrics and health status (no ignore-existing so they refresh)
+    rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.csv" --include "*.json" --transfers 3 >>"$LOG" 2>&1
+    uploaded_ok=1
   else
     log "!! rclone copy failed (no network/Drive?); NOT purging local this cycle"
   fi
-  # 4) CLOUD retention: delete on Drive anything older than CLOUD_KEEP_DAYS (mp4 + thumbnails)
-  rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+
+  # 2) RETENTION SWEEP — decoupled from the upload cycle so a fast upload cadence doesn't run a
+  #    recursive Drive delete-listing every ${INTERVAL}s. Runs ~every RETENTION_EVERY (a few times
+  #    a day). Local purge only after a confirmed upload this cycle (Drive reachable + current).
+  if [ "$((now - last_retention))" -ge "$RETENTION_EVERY" ]; then
+    if [ "$uploaded_ok" = 1 ]; then
+      n=$(find "$CAMERAS_DIR" \( -name "*.mp4" -o -name "*.jpg" \) -mtime +"$LOCAL_KEEP_DAYS" 2>/dev/null | wc -l)
+      if [ "$n" -gt 0 ]; then
+        find "$CAMERAS_DIR" \( -name "*.mp4" -o -name "*.jpg" \) -mtime +"$LOCAL_KEEP_DAYS" -delete 2>/dev/null
+        log "local retention: deleted $n files > ${LOCAL_KEEP_DAYS}d"
+      fi
+    fi
+    # Delete on Drive anything older than CLOUD_KEEP_DAYS (mp4 + thumbnails)
+    rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+    log "cloud retention sweep (removed Drive files > ${CLOUD_KEEP_DAYS}d)"
+    last_retention=$now
+  fi
+
   trim_log
   sleep "$INTERVAL"
 done
