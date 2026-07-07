@@ -47,6 +47,8 @@ RING_KEEP_MIN="${RING_KEEP_MIN:-5}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-5}"           # consecutive connection failures before flagging the camera down
 HEALTHY_SECS="${HEALTHY_SECS:-8}"               # if a connection lasted >= this, count it as healthy (reset failures)
 RETRY_MAX="${RETRY_MAX:-60}"                     # cap of the retry backoff (s); avoids hammering the camera
+FALLBACK_AFTER="${FALLBACK_AFTER:-3}"           # consecutive short 2K runs before the segmenter drops to the sub-stream
+RETRY_2K_SECS="${RETRY_2K_SECS:-180}"           # while on the sub-stream, re-probe the 2K this often to switch back
 DET_FPS="${DET_FPS:-6}"
 DET_CROP="${DET_CROP:-210:360:226:0}"
 DIFF_TH="${DIFF_TH:-20}"
@@ -186,19 +188,43 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur
 }
 
 # 1) SEGMENTER (supervised) -------------------------------------------------------
+# Records the 2K (RTSP_MAIN) normally. When the 2K link is too degraded to hold (FALLBACK_AFTER
+# short runs in a row — e.g. a weak-Wi-Fi spell), it drops to the much lighter sub-stream
+# (RTSP_DETECT, 360p) so we still capture SOMETHING instead of near-nothing, and re-probes the 2K
+# every RETRY_2K_SECS to switch back automatically once the link recovers. Clips recorded during a
+# sub-stream spell are low-res and (since METRIC_CROP is sized for the 2K) kept untrimmed — an
+# acceptable degradation vs. missing the footage entirely.
 segmenter_loop(){
-  local sfails=0 t0 ran delay
+  local sfails=0 t0 ran delay mode="2K" src probe last_2k now
+  last_2k=$(date +%s)
   while true; do
-    log "▶ segmenter connecting ($(echo "$RTSP_MAIN"|sed 's#//[^@]*@#//...@#'))"
+    now=$(date +%s)
+    probe=0
+    # While on the sub-stream, periodically try the 2K again (one probe attempt).
+    if [ "$mode" = "SUB" ] && [ "$((now - last_2k))" -ge "$RETRY_2K_SECS" ]; then
+      mode="2K"; probe=1; last_2k=$now; log "⤴ segmenter re-probing 2K (${RTSP_MAIN##*/})"
+    fi
+    [ "$mode" = "2K" ] && src="$RTSP_MAIN" || src="$RTSP_DETECT"
+    log "▶ segmenter connecting [$mode] ($(echo "$src"|sed 's#//[^@]*@#//...@#'))"
     t0=$(date +%s)
-    ffmpeg -nostdin -loglevel error -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$RTSP_MAIN" \
+    ffmpeg -nostdin -loglevel error -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$src" \
       -c:v copy -c:a aac -f segment -segment_time "$SEG_TIME" -reset_timestamps 1 -strftime 1 \
       "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1
     ran=$(( $(date +%s) - t0 ))
-    if [ "$ran" -ge "$HEALTHY_SECS" ]; then sfails=0; else sfails=$((sfails+1)); fi
+    if [ "$ran" -ge "$HEALTHY_SECS" ]; then
+      sfails=0
+      [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a healthy probe -> stay on 2K
+    else
+      sfails=$((sfails+1))
+      # 2K keeps failing (or a 2K probe failed) -> fall back to the sub-stream.
+      if [ "$mode" = "2K" ] && { [ "$probe" = 1 ] || [ "$sfails" -ge "$FALLBACK_AFTER" ]; }; then
+        log "⤵ 2K unstable (${sfails} fails); recording sub-stream (${RTSP_DETECT##*/}) for now"
+        mode="SUB"; last_2k=$(date +%s); sfails=0
+      fi
+    fi
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
-    log "!! segmenter dropped (ran ${ran}s, failure $sfails); retry in ${delay}s"; sleep "$delay"
+    log "!! segmenter dropped (ran ${ran}s, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
   done
 }
 
