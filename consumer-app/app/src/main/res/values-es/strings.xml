@@ -41,6 +41,9 @@
     <string name="action_share">"📤   Compartir"</string>
     <string name="action_download">"⬇️   Descargar a la galería"</string>
     <string name="action_remove_offline">"🗑️   Quitar copia sin conexión"</string>
+    <string name="action_favorite_add">"⭐   Marcar como favorito"</string>
+    <string name="action_favorite_remove">"★   Quitar de favoritos"</string>
+    <string name="favorite">Favorito</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>
     <string name="share_failed">No se pudo compartir</string>
@@ -109,8 +112,9 @@
     <string name="battery_minmax">Mín %1$d%% · Máx %2$d%%</string>
     <string name="battery_forecast">Dura hasta ~%s</string>
 
-    <!-- Latencia promedio de subida (fin de grabación -> visible en Drive) de todos los clips -->
+    <!-- Latencia promedio de subida (fin de grabación -> visible en Drive): global / por día -->
     <string name="avg_upload_delay">Prom. a la nube: %s</string>
+    <string name="avg_upload_delay_day">Prom. subida este día: %s</string>
 
     <!-- Analítica por día: distribución de eventos en 24h -->
     <string name="analytics_activity_by_hour">Actividad por hora</string>

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Delete
@@ -119,11 +120,12 @@ fun AppNav(
     offlineStore: com.famviva.camara.data.OfflineStore,
     clipListCache: com.famviva.camara.data.ClipListCache,
     batteryHistory: com.famviva.camara.data.BatteryHistoryStore,
+    favoritesStore: com.famviva.camara.data.FavoritesStore,
     tokenProvider: suspend () -> String,
 ) {
     val nav = rememberNavController()
     val vm: MainViewModel = viewModel(
-        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, tokenProvider),
+        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, tokenProvider),
     )
 
     NavHost(navController = nav, startDestination = "days") {
@@ -909,6 +911,7 @@ private fun ClipsScreen(
                                 token = token,
                                 isNew = vm.isNew(clip),
                                 isDownloaded = vm.isDownloaded(clip),
+                                isFavorite = vm.isFavorite(clip),
                                 onClick = { nav.navigate("player/${clip.id}") },
                                 onLongClick = { actionClip = clip },
                             )
@@ -924,6 +927,8 @@ private fun ClipsScreen(
             clip = clip,
             token = token,
             isDownloaded = vm.isDownloaded(clip),
+            isFavorite = vm.isFavorite(clip),
+            onToggleFavorite = { vm.toggleFavorite(clip) },
             onRemoveOffline = { vm.deleteOfflineCopy(clip) },
             onDismiss = { actionClip = null },
         )
@@ -953,6 +958,9 @@ private fun DayAnalyticsCard(dayClips: List<Clip>, selectedPeriod: DayPeriod?) {
     val context = LocalContext.current
     val bins = remember(dayClips) { binClipsByHour(dayClips) }
     val peak = bins.maxByOrNull { it.count }?.takeIf { it.count > 0 }
+    val avgDelay = remember(dayClips) {
+        dayClips.mapNotNull { it.uploadDelaySeconds }.let { if (it.isEmpty()) null else it.sum() / it.size }
+    }
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(
@@ -967,6 +975,13 @@ private fun DayAnalyticsCard(dayClips: List<Clip>, selectedPeriod: DayPeriod?) {
                         context.getString(R.string.analytics_hour_range, peak.hour, (peak.hour + 1) % 24),
                         peak.count,
                     ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (avgDelay != null) {
+                Text(
+                    stringResource(R.string.avg_upload_delay_day, uploadDelayLabel(avgDelay)),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1055,6 +1070,8 @@ private fun ClipActionsSheet(
     clip: Clip,
     token: String?,
     isDownloaded: Boolean,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     onRemoveOffline: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1069,6 +1086,13 @@ private fun ClipActionsSheet(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
             )
+            // Local-only, no token needed: star/unstar to protect it from batch deletes.
+            SheetAction(
+                stringResource(if (isFavorite) R.string.action_favorite_remove else R.string.action_favorite_add),
+            ) {
+                onToggleFavorite()
+                onDismiss()
+            }
             // Doesn't need a token: it only touches the local (device) copy, never Drive.
             if (isDownloaded) {
                 SheetAction(stringResource(R.string.action_remove_offline)) {
@@ -1131,6 +1155,7 @@ private fun ClipCard(
     token: String?,
     isNew: Boolean,
     isDownloaded: Boolean,
+    isFavorite: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -1206,6 +1231,20 @@ private fun ClipCard(
                         fg = Color.White,
                         modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
                     )
+                }
+                if (isFavorite) {
+                    Box(
+                        Modifier.align(Alignment.BottomStart).padding(8.dp)
+                            .size(26.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.Star,
+                            contentDescription = stringResource(R.string.favorite),
+                            tint = Color(0xFFFFC107),
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
                 clip.durationLabel?.let { dur ->
                     OverlayChip(

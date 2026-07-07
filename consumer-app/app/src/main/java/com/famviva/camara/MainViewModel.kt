@@ -13,6 +13,7 @@ import com.famviva.camara.data.CameraHealth
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.FavoritesStore
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
 import java.io.File
@@ -33,6 +34,7 @@ class MainViewModel(
     private val offline: OfflineStore,
     private val cache: ClipListCache,
     private val battery: BatteryHistoryStore,
+    private val favorites: FavoritesStore,
     private val tokenProvider: suspend () -> String,
 ) : ViewModel() {
 
@@ -53,6 +55,8 @@ class MainViewModel(
     var cameraHealth by mutableStateOf<List<CameraHealth>>(emptyList())
         private set
     var autoDownloadEnabled by mutableStateOf(offline.autoDownloadEnabled)
+        private set
+    var favoriteIds by mutableStateOf(favorites.all())
         private set
 
     // Bumped on every download/delete so Compose recomposes reads of offline state below — the
@@ -78,10 +82,19 @@ class MainViewModel(
     fun driveTotalBytes(): Long = clips.sumOf { it.sizeBytes }
 
     /** Average "recording ended -> visible on Drive" latency across clips that have both timestamps —
-     *  the "how long until footage is safe in the cloud" margin. Null if no clip has the data yet. */
+     *  the "how long until footage is safe in the cloud" margin. Null if no clip has the data yet.
+     *  (The per-day view computes its own average straight from that day's clips.) */
     fun avgUploadDelaySeconds(): Long? {
         val delays = clips.mapNotNull { it.uploadDelaySeconds }
         return if (delays.isEmpty()) null else delays.sum() / delays.size
+    }
+
+    fun isFavorite(clip: Clip): Boolean = clip.id in favoriteIds
+
+    /** Toggles a clip's favorite star. Favorites are protected from batch deletes. */
+    fun toggleFavorite(clip: Clip) {
+        favorites.toggle(clip.id)
+        favoriteIds = favorites.all()
     }
 
     /** Drive footprint per day (every clip's size), most recent day first, empty days omitted.
@@ -102,21 +115,23 @@ class MainViewModel(
             .filter { it.second > 0 }
     }
 
-    /** Removes the offline (device-only) copies for that day; the Drive originals are untouched. */
+    /** Removes the offline (device-only) copies for that day; the Drive originals are untouched.
+     *  Favorites (starred) are kept — batch deletes never touch them. */
     fun deleteOfflineDay(dateKey: String) {
-        clipsOf(dateKey).forEach { if (offline.isDownloaded(it)) offline.delete(it) }
+        clipsOf(dateKey).forEach { if (offline.isDownloaded(it) && !isFavorite(it)) offline.delete(it) }
         offlineVersion++
     }
 
-    /** Removes a single clip's offline copy; the Drive original is untouched. */
+    /** Removes a single clip's offline copy; the Drive original is untouched. An explicit per-clip
+     *  action, so it deletes even a favorite (only *batch* deletes protect favorites). */
     fun deleteOfflineCopy(clip: Clip) {
         offline.delete(clip)
         offlineVersion++
     }
 
-    /** Frees all offline copies (device only); the Drive originals are untouched. */
+    /** Frees all offline copies (device only) except favorites; the Drive originals are untouched. */
     fun deleteAllOffline() {
-        offline.deleteAll()
+        clips.forEach { if (offline.isDownloaded(it) && !isFavorite(it)) offline.delete(it) }
         offlineVersion++
     }
 
@@ -217,10 +232,11 @@ class MainViewModel(
         private val offline: OfflineStore,
         private val cache: ClipListCache,
         private val battery: BatteryHistoryStore,
+        private val favorites: FavoritesStore,
         private val tokenProvider: suspend () -> String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            MainViewModel(drive, seen, offline, cache, battery, tokenProvider) as T
+            MainViewModel(drive, seen, offline, cache, battery, favorites, tokenProvider) as T
     }
 }

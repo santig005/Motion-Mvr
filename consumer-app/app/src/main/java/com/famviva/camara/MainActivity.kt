@@ -13,6 +13,7 @@ import com.famviva.camara.auth.AuthManager
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.FavoritesStore
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
 import com.famviva.camara.notify.NewClipsWorker
@@ -41,6 +42,7 @@ class MainActivity : AppCompatActivity() {
         val offlineStore = OfflineStore(applicationContext)
         val clipListCache = ClipListCache(applicationContext)
         val batteryHistory = BatteryHistoryStore(applicationContext)
+        val favoritesStore = FavoritesStore(applicationContext)
 
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
@@ -54,6 +56,7 @@ class MainActivity : AppCompatActivity() {
                     offlineStore = offlineStore,
                     clipListCache = clipListCache,
                     batteryHistory = batteryHistory,
+                    favoritesStore = favoritesStore,
                     tokenProvider = { auth.token() },
                 )
             }

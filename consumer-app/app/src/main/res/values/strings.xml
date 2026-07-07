@@ -41,6 +41,9 @@
     <string name="action_share">"📤   Share"</string>
     <string name="action_download">"⬇️   Download to gallery"</string>
     <string name="action_remove_offline">"🗑️   Remove offline copy"</string>
+    <string name="action_favorite_add">"⭐   Mark as favorite"</string>
+    <string name="action_favorite_remove">"★   Remove from favorites"</string>
+    <string name="favorite">Favorite</string>
     <string name="action_delete">Delete</string>
     <string name="action_cancel">Cancel</string>
     <string name="share_failed">Couldn\'t share</string>
@@ -109,8 +112,9 @@
     <string name="battery_minmax">Min %1$d%% · Max %2$d%%</string>
     <string name="battery_forecast">Lasts until ~%s</string>
 
-    <!-- Average upload latency (recording end -> visible on Drive) across all clips -->
+    <!-- Average upload latency (recording end -> visible on Drive): across all clips / per day -->
     <string name="avg_upload_delay">Avg to cloud: %s</string>
+    <string name="avg_upload_delay_day">Avg upload this day: %s</string>
 
     <!-- Per-day analytics: 24h event distribution -->
     <string name="analytics_activity_by_hour">Activity by hour</string>
