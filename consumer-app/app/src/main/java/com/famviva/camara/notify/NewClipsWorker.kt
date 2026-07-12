@@ -40,7 +40,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     if (newOnes.isNotEmpty()) {
                         Notifications.notifyNewClips(ctx, newOnes.size)
                         store.setLastNotified(newest)
-                        if (offline.autoDownloadEnabled && offline.isOnUnmeteredNetwork()) {
+                        if (offline.shouldAutoDownloadNow()) {
                             newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }
                         }
                     }

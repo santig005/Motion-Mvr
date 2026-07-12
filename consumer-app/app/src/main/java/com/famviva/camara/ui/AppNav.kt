@@ -108,6 +108,7 @@ import androidx.navigation.compose.rememberNavController
 import com.famviva.camara.DateFilter
 import com.famviva.camara.MainViewModel
 import com.famviva.camara.R
+import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DayPeriod
@@ -169,18 +170,19 @@ fun AppNav(
 }
 
 /**
- * Top-bar control for auto-downloading new clips for offline playback (Wi-Fi only). A dropdown
- * (like the language switch) rather than a blind one-tap toggle: the current state is always
- * visible (checkmark) and changing it is an explicit two-step choice, not an accidental tap.
+ * Top-bar control for auto-downloading new clips for offline playback. A dropdown (like the language
+ * switch) rather than a blind one-tap toggle: the current policy is always visible (checkmark) and
+ * changing it is an explicit two-step choice. Three states — Off / Wi-Fi only / Wi-Fi + mobile data
+ * — so the user can opt into using mobile data while away from Wi-Fi.
  */
 @Composable
-private fun AutoDownloadMenu(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+private fun AutoDownloadMenu(mode: AutoDownloadMode, onSelect: (AutoDownloadMode) -> Unit) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
             Icon(
-                if (enabled) Icons.Filled.DownloadDone else Icons.Filled.Download,
+                if (mode != AutoDownloadMode.OFF) Icons.Filled.DownloadDone else Icons.Filled.Download,
                 contentDescription = stringResource(R.string.auto_download_menu_title),
             )
         }
@@ -191,19 +193,21 @@ private fun AutoDownloadMenu(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            AutoDownloadOption(R.string.auto_download_on, selected = enabled) {
+            fun pick(target: AutoDownloadMode, toastRes: Int) {
                 expanded = false
-                if (!enabled) {
-                    onToggle(true)
-                    Toast.makeText(context, context.getString(R.string.auto_download_enabled_toast), Toast.LENGTH_SHORT).show()
+                if (mode != target) {
+                    onSelect(target)
+                    Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
                 }
             }
-            AutoDownloadOption(R.string.auto_download_off, selected = !enabled) {
-                expanded = false
-                if (enabled) {
-                    onToggle(false)
-                    Toast.makeText(context, context.getString(R.string.auto_download_disabled_toast), Toast.LENGTH_SHORT).show()
-                }
+            AutoDownloadOption(R.string.auto_download_off, selected = mode == AutoDownloadMode.OFF) {
+                pick(AutoDownloadMode.OFF, R.string.auto_download_disabled_toast)
+            }
+            AutoDownloadOption(R.string.auto_download_wifi, selected = mode == AutoDownloadMode.WIFI_ONLY) {
+                pick(AutoDownloadMode.WIFI_ONLY, R.string.auto_download_wifi_toast)
+            }
+            AutoDownloadOption(R.string.auto_download_data, selected = mode == AutoDownloadMode.WIFI_AND_DATA) {
+                pick(AutoDownloadMode.WIFI_AND_DATA, R.string.auto_download_data_toast)
             }
         }
     }
@@ -281,7 +285,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 actions = {
-                    AutoDownloadMenu(vm.autoDownloadEnabled, vm::setAutoDownload)
+                    AutoDownloadMenu(vm.autoDownloadMode, vm::setAutoDownloadMode)
                     IconButton(onClick = { nav.navigate("storage") }) {
                         Icon(Icons.Filled.Storage, contentDescription = stringResource(R.string.storage_title))
                     }

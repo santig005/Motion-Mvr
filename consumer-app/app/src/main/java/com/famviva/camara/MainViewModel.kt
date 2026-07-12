@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.CameraHealth
@@ -54,7 +55,7 @@ class MainViewModel(
         private set
     var cameraHealth by mutableStateOf<List<CameraHealth>>(emptyList())
         private set
-    var autoDownloadEnabled by mutableStateOf(offline.autoDownloadEnabled)
+    var autoDownloadMode by mutableStateOf(offline.autoDownloadMode)
         private set
     var favoriteIds by mutableStateOf(favorites.all())
         private set
@@ -135,17 +136,18 @@ class MainViewModel(
         offlineVersion++
     }
 
-    fun setAutoDownload(enabled: Boolean) {
-        offline.autoDownloadEnabled = enabled
-        autoDownloadEnabled = enabled
-        if (enabled) downloadTodaysClips()
+    fun setAutoDownloadMode(mode: AutoDownloadMode) {
+        offline.autoDownloadMode = mode
+        autoDownloadMode = mode
+        if (mode != AutoDownloadMode.OFF) downloadTodaysClips()
     }
 
     /** Auto-download is forward-looking, not a backfill of the whole history: bounded to today's
-     *  clips (grows through the day as new ones land) and to Wi-Fi, so turning it on can't kick
-     *  off downloading weeks of footage or burn mobile data. */
+     *  clips (grows through the day as new ones land) and to the current network policy, so turning
+     *  it on can't kick off downloading weeks of footage (or burn mobile data unless the user opted
+     *  into the Wi-Fi + data mode). */
     private fun downloadTodaysClips() {
-        if (!offline.isOnUnmeteredNetwork()) return
+        if (!offline.shouldAutoDownloadNow()) return
         val today = LocalDate.now()
         val pending = clips.filter { it.localDate == today && !offline.isDownloaded(it) }
         if (pending.isEmpty()) return
@@ -179,7 +181,7 @@ class MainViewModel(
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
                 recordBatterySamples()
                 loadedOnce = true
-                if (autoDownloadEnabled) downloadTodaysClips()
+                if (autoDownloadMode != AutoDownloadMode.OFF) downloadTodaysClips()
             } catch (e: Exception) {
                 error = e.message ?: e.javaClass.simpleName
             } finally {

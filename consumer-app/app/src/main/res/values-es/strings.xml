@@ -84,10 +84,12 @@
     <string name="latency_line">Fin %1$s · en Drive %2$s (+%3$s)</string>
 
     <!-- Toggle de auto-descarga (reproducción sin conexión) -->
-    <string name="auto_download_menu_title">Auto-descarga (Wi-Fi)</string>
-    <string name="auto_download_on">Activada</string>
+    <string name="auto_download_menu_title">Auto-descarga</string>
     <string name="auto_download_off">Desactivada</string>
-    <string name="auto_download_enabled_toast">Auto-descarga activada (solo Wi-Fi): los clips nuevos se guardarán para verlos sin conexión.</string>
+    <string name="auto_download_wifi">Solo Wi-Fi</string>
+    <string name="auto_download_data">Wi-Fi + datos móviles</string>
+    <string name="auto_download_wifi_toast">Auto-descarga solo con Wi-Fi: los clips nuevos se guardarán para verlos sin conexión.</string>
+    <string name="auto_download_data_toast">Auto-descarga con Wi-Fi y datos móviles: los clips nuevos se descargan en cualquier red (consume tu plan de datos).</string>
     <string name="auto_download_disabled_toast">Auto-descarga desactivada.</string>
 
     <!-- Salud de la cámara -->

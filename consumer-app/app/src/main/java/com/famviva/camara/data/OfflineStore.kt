@@ -17,13 +17,31 @@ import kotlinx.coroutines.withContext
  * on uninstall, no storage permission needed) — a deliberate cache, distinct from
  * [ClipActions.saveToGallery], which is a user-triggered export to the public gallery.
  */
+/** How aggressively new clips are auto-downloaded for offline playback. */
+enum class AutoDownloadMode {
+    /** Never auto-download. */
+    OFF,
+
+    /** Only on an unmetered network (Wi-Fi) — can't silently burn mobile data. */
+    WIFI_ONLY,
+
+    /** On any connection, including mobile data (the user accepts the data cost). */
+    WIFI_AND_DATA,
+}
+
 class OfflineStore(private val context: Context) {
     private val dir = File(context.filesDir, "offline_clips").apply { mkdirs() }
     private val prefs = context.getSharedPreferences("offline_store", Context.MODE_PRIVATE)
 
-    var autoDownloadEnabled: Boolean
-        get() = prefs.getBoolean(KEY_AUTO, false)
-        set(value) = prefs.edit().putBoolean(KEY_AUTO, value).apply()
+    /** Auto-download policy. Migrates the old boolean flag (true -> Wi-Fi only) on first read. */
+    var autoDownloadMode: AutoDownloadMode
+        get() {
+            prefs.getString(KEY_MODE, null)?.let { stored ->
+                return runCatching { AutoDownloadMode.valueOf(stored) }.getOrDefault(AutoDownloadMode.OFF)
+            }
+            return if (prefs.getBoolean(KEY_AUTO_LEGACY, false)) AutoDownloadMode.WIFI_ONLY else AutoDownloadMode.OFF
+        }
+        set(value) = prefs.edit().putString(KEY_MODE, value.name).apply()
 
     fun localFile(clip: Clip): File = File(dir, clip.name)
 
@@ -36,12 +54,25 @@ class OfflineStore(private val context: Context) {
     /** Frees all offline copies (device only — the Drive originals are untouched). */
     fun deleteAll() { dir.listFiles()?.forEach { it.delete() } }
 
-    /** True on an unmetered network (Wi-Fi) — auto-download only runs on it, so the feature can't
+    private fun activeCaps(): NetworkCapabilities? {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+        return cm.getNetworkCapabilities(cm.activeNetwork)
+    }
+
+    /** True on an unmetered network (Wi-Fi) — the WIFI_ONLY policy only runs on it, so it can't
      *  silently burn the user's mobile data. */
-    fun isOnUnmeteredNetwork(): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
-        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    fun isOnUnmeteredNetwork(): Boolean =
+        activeCaps()?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) == true
+
+    /** True on any network with internet (Wi-Fi or mobile data). */
+    private fun isOnline(): Boolean =
+        activeCaps()?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+
+    /** Whether auto-download is allowed to run right now, given the mode and the current network. */
+    fun shouldAutoDownloadNow(): Boolean = when (autoDownloadMode) {
+        AutoDownloadMode.OFF -> false
+        AutoDownloadMode.WIFI_ONLY -> isOnUnmeteredNetwork()
+        AutoDownloadMode.WIFI_AND_DATA -> isOnline()
     }
 
     /** Streams [clip] to local storage, atomically (.part + rename on success) so a half-finished
@@ -65,7 +96,8 @@ class OfflineStore(private val context: Context) {
     }
 
     private companion object {
-        const val KEY_AUTO = "auto_download_enabled"
+        const val KEY_MODE = "auto_download_mode"
+        const val KEY_AUTO_LEGACY = "auto_download_enabled"   // pre-3-state boolean, migrated on read
         // Process-wide (not per-OfflineStore-instance): NewClipsWorker and the app's own ViewModel
         // each construct their own OfflineStore, so the lock has to live above both.
         val downloadLocks = ConcurrentHashMap<String, Mutex>()
