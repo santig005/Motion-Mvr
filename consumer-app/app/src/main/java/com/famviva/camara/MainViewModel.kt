@@ -140,7 +140,7 @@ class MainViewModel(
         offlineVersion++
     }
 
-    fun setAutoDownloadMode(mode: AutoDownloadMode) {
+    fun selectAutoDownloadMode(mode: AutoDownloadMode) {
         offline.autoDownloadMode = mode
         autoDownloadMode = mode
         if (mode != AutoDownloadMode.OFF) downloadTodaysClips()

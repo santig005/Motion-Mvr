@@ -215,7 +215,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
             fun pickDownload(target: AutoDownloadMode, toastRes: Int) {
                 expanded = false
                 if (vm.autoDownloadMode != target) {
-                    vm.setAutoDownloadMode(target)
+                    vm.selectAutoDownloadMode(target)
                     Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
                 }
             }
