@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
@@ -47,7 +48,6 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -56,6 +56,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -175,51 +176,87 @@ fun AppNav(
 }
 
 /**
- * Top-bar control for auto-downloading new clips for offline playback. A dropdown (like the language
- * switch) rather than a blind one-tap toggle: the current policy is always visible (checkmark) and
- * changing it is an explicit two-step choice. Three states — Off / Wi-Fi only / Wi-Fi + mobile data
- * — so the user can opt into using mobile data while away from Wi-Fi.
+ * Single overflow (⋮) menu for the home screen, so the top bar stays uncluttered: navigation
+ * (Live / Favorites / Storage), the auto-download policy (Off / Wi-Fi only / Wi-Fi + mobile data),
+ * and the language switch — each showing its current state inline with a checkmark. Refresh stays a
+ * direct icon (it's the most frequent action).
  */
 @Composable
-private fun AutoDownloadMenu(mode: AutoDownloadMode, onSelect: (AutoDownloadMode) -> Unit) {
+private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
+
+    val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
+    val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
+
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(
-                if (mode != AutoDownloadMode.OFF) Icons.Filled.DownloadDone else Icons.Filled.Download,
-                contentDescription = stringResource(R.string.auto_download_menu_title),
-            )
+            Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            Text(
-                stringResource(R.string.auto_download_menu_title),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.live_title)) },
+                leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
+                onClick = { expanded = false; nav.navigate("live") },
             )
-            fun pick(target: AutoDownloadMode, toastRes: Int) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.favorites_title)) },
+                leadingIcon = { Icon(Icons.Filled.Star, contentDescription = null) },
+                onClick = { expanded = false; nav.navigate("favorites") },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.storage_title)) },
+                leadingIcon = { Icon(Icons.Filled.Storage, contentDescription = null) },
+                onClick = { expanded = false; nav.navigate("storage") },
+            )
+            HorizontalDivider()
+
+            MenuSectionLabel(stringResource(R.string.auto_download_menu_title))
+            fun pickDownload(target: AutoDownloadMode, toastRes: Int) {
                 expanded = false
-                if (mode != target) {
-                    onSelect(target)
+                if (vm.autoDownloadMode != target) {
+                    vm.setAutoDownloadMode(target)
                     Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
                 }
             }
-            AutoDownloadOption(R.string.auto_download_off, selected = mode == AutoDownloadMode.OFF) {
-                pick(AutoDownloadMode.OFF, R.string.auto_download_disabled_toast)
+            CheckableMenuItem(R.string.auto_download_off, selected = vm.autoDownloadMode == AutoDownloadMode.OFF) {
+                pickDownload(AutoDownloadMode.OFF, R.string.auto_download_disabled_toast)
             }
-            AutoDownloadOption(R.string.auto_download_wifi, selected = mode == AutoDownloadMode.WIFI_ONLY) {
-                pick(AutoDownloadMode.WIFI_ONLY, R.string.auto_download_wifi_toast)
+            CheckableMenuItem(R.string.auto_download_wifi, selected = vm.autoDownloadMode == AutoDownloadMode.WIFI_ONLY) {
+                pickDownload(AutoDownloadMode.WIFI_ONLY, R.string.auto_download_wifi_toast)
             }
-            AutoDownloadOption(R.string.auto_download_data, selected = mode == AutoDownloadMode.WIFI_AND_DATA) {
-                pick(AutoDownloadMode.WIFI_AND_DATA, R.string.auto_download_data_toast)
+            CheckableMenuItem(R.string.auto_download_data, selected = vm.autoDownloadMode == AutoDownloadMode.WIFI_AND_DATA) {
+                pickDownload(AutoDownloadMode.WIFI_AND_DATA, R.string.auto_download_data_toast)
+            }
+            HorizontalDivider()
+
+            MenuSectionLabel(stringResource(R.string.menu_language))
+            CheckableMenuItem(R.string.lang_english, selected = !isSpanish) {
+                expanded = false
+                AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("en"))
+            }
+            CheckableMenuItem(R.string.lang_spanish, selected = isSpanish) {
+                expanded = false
+                AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("es"))
             }
         }
     }
 }
 
+/** Small section header inside a dropdown menu. */
 @Composable
-private fun AutoDownloadOption(labelRes: Int, selected: Boolean, onClick: () -> Unit) {
+private fun MenuSectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+/** A dropdown item that shows a leading checkmark when it's the current selection. */
+@Composable
+private fun CheckableMenuItem(labelRes: Int, selected: Boolean, onClick: () -> Unit) {
     DropdownMenuItem(
         text = { Text(stringResource(labelRes)) },
         onClick = onClick,
@@ -231,39 +268,6 @@ private fun AutoDownloadOption(labelRes: Int, selected: Boolean, onClick: () -> 
             }
         },
     )
-}
-
-/** Top-bar language switcher (English / Spanish), applied at runtime via AppCompat locales. */
-@Composable
-private fun LanguageMenu() {
-    var expanded by remember { mutableStateOf(false) }
-    val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
-    val lang = if (tags.isNotEmpty()) tags else Locale.getDefault().language
-    val isSpanish = lang.startsWith("es")
-    Box {
-        TextButton(
-            onClick = { expanded = true },
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
-        ) {
-            Text(if (isSpanish) "ES" else "EN", fontWeight = FontWeight.SemiBold)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.lang_english)) },
-                onClick = {
-                    expanded = false
-                    AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("en"))
-                },
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.lang_spanish)) },
-                onClick = {
-                    expanded = false
-                    AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("es"))
-                },
-            )
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -290,20 +294,10 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 actions = {
-                    IconButton(onClick = { nav.navigate("live") }) {
-                        Icon(Icons.Filled.Videocam, contentDescription = stringResource(R.string.live_title))
-                    }
-                    AutoDownloadMenu(vm.autoDownloadMode, vm::setAutoDownloadMode)
-                    IconButton(onClick = { nav.navigate("favorites") }) {
-                        Icon(Icons.Filled.Star, contentDescription = stringResource(R.string.favorites_title))
-                    }
-                    IconButton(onClick = { nav.navigate("storage") }) {
-                        Icon(Icons.Filled.Storage, contentDescription = stringResource(R.string.storage_title))
-                    }
-                    LanguageMenu()
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
                     }
+                    HomeOverflowMenu(vm, nav)
                 },
             )
         },

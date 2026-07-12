@@ -111,6 +111,8 @@
     <string name="latency_line">Fin %1$s · en Drive %2$s (+%3$s)</string>
 
     <!-- Toggle de auto-descarga (reproducción sin conexión) -->
+    <string name="menu_more">Más opciones</string>
+    <string name="menu_language">Idioma</string>
     <string name="auto_download_menu_title">Auto-descarga</string>
     <string name="auto_download_off">Desactivada</string>
     <string name="auto_download_wifi">Solo Wi-Fi</string>

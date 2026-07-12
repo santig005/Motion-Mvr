@@ -110,6 +110,9 @@
     <!-- Per-clip upload latency (recording finished -> visible on Drive) -->
     <string name="latency_line">Finished %1$s · on Drive %2$s (+%3$s)</string>
 
+    <string name="menu_more">More options</string>
+    <string name="menu_language">Language</string>
+
     <!-- Auto-download menu (offline playback) -->
     <string name="auto_download_menu_title">Auto-download</string>
     <string name="auto_download_off">Off</string>
