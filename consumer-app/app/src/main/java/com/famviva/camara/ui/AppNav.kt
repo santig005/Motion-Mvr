@@ -144,6 +144,7 @@ fun AppNav(
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
+        composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
         composable("storage") { StorageScreen(vm, nav) }
         composable("battery/{camera}") { entry ->
             BatteryScreen(vm, nav, entry.arguments?.getString("camera").orEmpty())
@@ -286,6 +287,9 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                 ),
                 actions = {
                     AutoDownloadMenu(vm.autoDownloadMode, vm::setAutoDownloadMode)
+                    IconButton(onClick = { nav.navigate("favorites") }) {
+                        Icon(Icons.Filled.Star, contentDescription = stringResource(R.string.favorites_title))
+                    }
                     IconButton(onClick = { nav.navigate("storage") }) {
                         Icon(Icons.Filled.Storage, contentDescription = stringResource(R.string.storage_title))
                     }
@@ -934,6 +938,92 @@ private fun ClipsScreen(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+
+    actionClip?.let { clip ->
+        ClipActionsSheet(
+            clip = clip,
+            token = token,
+            isDownloaded = vm.isDownloaded(clip),
+            isFavorite = vm.isFavorite(clip),
+            onToggleFavorite = { vm.toggleFavorite(clip) },
+            onRemoveOffline = { vm.deleteOfflineCopy(clip) },
+            onDismiss = { actionClip = null },
+        )
+    }
+}
+
+/** Starred clips across every day, newest first. Tap plays; long-press opens the actions sheet
+ *  (from which a clip can be un-starred). Favorites survive batch deletes, so this is where the
+ *  memorable moments live. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FavoritesScreen(
+    vm: MainViewModel,
+    nav: NavHostController,
+    tokenProvider: suspend () -> String,
+) {
+    var token by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { token = runCatching { tokenProvider() }.getOrNull() }
+
+    var actionClip by remember { mutableStateOf<Clip?>(null) }
+    val clips = vm.favoriteClips()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.favorites_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            )
+        },
+    ) { pad ->
+        if (clips.isEmpty()) {
+            Column(
+                Modifier.fillMaxSize().padding(pad).padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Star,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.size(48.dp),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    stringResource(R.string.favorites_empty),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(pad),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(clips, key = { it.id }) { clip ->
+                    ClipCard(
+                        clip = clip,
+                        token = token,
+                        isNew = vm.isNew(clip),
+                        isDownloaded = vm.isDownloaded(clip),
+                        isFavorite = true,
+                        onClick = { nav.navigate("player/${clip.id}") },
+                        onLongClick = { actionClip = clip },
+                    )
                 }
             }
         }

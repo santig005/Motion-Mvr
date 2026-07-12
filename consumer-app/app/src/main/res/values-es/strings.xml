@@ -44,6 +44,8 @@
     <string name="action_favorite_add">"⭐   Marcar como favorito"</string>
     <string name="action_favorite_remove">"★   Quitar de favoritos"</string>
     <string name="favorite">Favorito</string>
+    <string name="favorites_title">Favoritos</string>
+    <string name="favorites_empty">Aún no tienes favoritos — mantén pulsado un clip y elige «Marcar como favorito». Los favoritos se conservan aunque borres un día.</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>
     <string name="share_failed">No se pudo compartir</string>

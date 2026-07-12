@@ -92,6 +92,10 @@ class MainViewModel(
 
     fun isFavorite(clip: Clip): Boolean = clip.id in favoriteIds
 
+    /** Every starred clip, most recent first — for the Favorites screen. */
+    fun favoriteClips(): List<Clip> =
+        clips.filter { it.id in favoriteIds }.sortedByDescending { it.name }
+
     /** Toggles a clip's favorite star. Favorites are protected from batch deletes. */
     fun toggleFavorite(clip: Clip) {
         favorites.toggle(clip.id)
