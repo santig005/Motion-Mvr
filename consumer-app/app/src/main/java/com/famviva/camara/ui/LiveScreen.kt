@@ -15,9 +15,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -52,7 +52,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
@@ -124,7 +123,7 @@ private fun LiveSetupPrompt(onSetup: () -> Unit) {
 }
 
 /** The RTSP surface + on-video controls (quality SD/HD, mute) and connection-error handling. */
-@OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Unit) {
     val context = LocalContext.current
@@ -196,7 +195,7 @@ private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Uni
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { muted = !muted }) {
                 Icon(
-                    if (muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                    if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = stringResource(if (muted) R.string.live_unmute else R.string.live_mute),
                     tint = Color.White,
                 )
