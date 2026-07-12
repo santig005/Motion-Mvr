@@ -146,6 +146,8 @@ fun AppNav(
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
+        composable("live") { LiveScreen(nav) }
+        composable("camera_settings") { CameraSettingsScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
         composable("storage") { StorageScreen(vm, nav) }
         composable("battery/{camera}") { entry ->
@@ -288,6 +290,9 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 actions = {
+                    IconButton(onClick = { nav.navigate("live") }) {
+                        Icon(Icons.Filled.Videocam, contentDescription = stringResource(R.string.live_title))
+                    }
                     AutoDownloadMenu(vm.autoDownloadMode, vm::setAutoDownloadMode)
                     IconButton(onClick = { nav.navigate("favorites") }) {
                         Icon(Icons.Filled.Star, contentDescription = stringResource(R.string.favorites_title))

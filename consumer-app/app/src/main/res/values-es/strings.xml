@@ -45,6 +45,31 @@
     <string name="action_favorite_remove">"★   Quitar de favoritos"</string>
     <string name="favorite">Favorito</string>
     <string name="favorites_title">Favoritos</string>
+
+    <!-- Video en vivo (RTSP) -->
+    <string name="live_title">En vivo</string>
+    <string name="live_configure_prompt">Configura la cámara para ver en vivo.</string>
+    <string name="live_configure_button">Configurar cámara</string>
+    <string name="live_error">No se pudo conectar. Asegúrate de estar en la Wi-Fi de la cámara y de que los datos de conexión sean correctos.</string>
+    <string name="live_retry">Reintentar</string>
+    <string name="live_quality_sd">SD</string>
+    <string name="live_quality_hd">HD (2K)</string>
+    <string name="live_mute">Silenciar</string>
+    <string name="live_unmute">Activar sonido</string>
+
+    <!-- Configuración de cámara (credenciales RTSP, guardadas cifradas en el dispositivo) -->
+    <string name="camera_settings_title">Configurar cámara</string>
+    <string name="camera_settings_help">Los encuentras en la app AJCloud / FAMVIVA en Ajustes de cámara → RTSP. Se guardan cifrados solo en este dispositivo — nunca se suben.</string>
+    <string name="camera_field_host">Dirección IP de la cámara</string>
+    <string name="camera_field_port">Puerto RTSP</string>
+    <string name="camera_field_user">Usuario RTSP</string>
+    <string name="camera_field_pass">Contraseña RTSP</string>
+    <string name="camera_pass_show">Mostrar</string>
+    <string name="camera_pass_hide">Ocultar</string>
+    <string name="camera_save">Guardar</string>
+    <string name="camera_clear">Borrar</string>
+    <string name="camera_saved_toast">Cámara guardada.</string>
+    <string name="camera_host_required">Ingresa la IP de la cámara.</string>
     <string name="favorites_empty">Aún no tienes favoritos — mantén pulsado un clip y elige «Marcar como favorito». Los favoritos se conservan aunque borres un día.</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>

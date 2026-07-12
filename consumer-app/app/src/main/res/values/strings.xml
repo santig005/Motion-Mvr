@@ -45,6 +45,31 @@
     <string name="action_favorite_remove">"★   Remove from favorites"</string>
     <string name="favorite">Favorite</string>
     <string name="favorites_title">Favorites</string>
+
+    <!-- Live view (RTSP) -->
+    <string name="live_title">Live</string>
+    <string name="live_configure_prompt">Set up the camera to watch live.</string>
+    <string name="live_configure_button">Set up camera</string>
+    <string name="live_error">Couldn\'t connect. Make sure you\'re on the camera\'s Wi-Fi and the connection details are correct.</string>
+    <string name="live_retry">Retry</string>
+    <string name="live_quality_sd">SD</string>
+    <string name="live_quality_hd">HD (2K)</string>
+    <string name="live_mute">Mute</string>
+    <string name="live_unmute">Unmute</string>
+
+    <!-- Camera setup (RTSP credentials, stored encrypted on-device) -->
+    <string name="camera_settings_title">Camera setup</string>
+    <string name="camera_settings_help">Find these in the AJCloud / FAMVIVA app under Camera Settings → RTSP. Stored encrypted on this device only — never uploaded.</string>
+    <string name="camera_field_host">Camera IP address</string>
+    <string name="camera_field_port">RTSP port</string>
+    <string name="camera_field_user">RTSP user</string>
+    <string name="camera_field_pass">RTSP password</string>
+    <string name="camera_pass_show">Show</string>
+    <string name="camera_pass_hide">Hide</string>
+    <string name="camera_save">Save</string>
+    <string name="camera_clear">Clear</string>
+    <string name="camera_saved_toast">Camera saved.</string>
+    <string name="camera_host_required">Enter the camera\'s IP address.</string>
     <string name="favorites_empty">No favorites yet — press and hold a clip, then choose “Mark as favorite”. Favorites are kept even when you clear a day.</string>
     <string name="action_delete">Delete</string>
     <string name="action_cancel">Cancel</string>

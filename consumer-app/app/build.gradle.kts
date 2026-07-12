@@ -55,9 +55,13 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.navigation:navigation-compose:2.8.5")
 
-    // Video player (progressive streaming from Drive)
+    // Video player (progressive streaming from Drive + live RTSP from the camera on the LAN)
     implementation("androidx.media3:media3-exoplayer:1.5.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
+
+    // Encrypted storage for the camera's RTSP credentials (entered once in-app, never in git)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Google sign-in + Authorization API (OAuth token for Drive)
     implementation("com.google.android.gms:play-services-auth:21.3.0")
