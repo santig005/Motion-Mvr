@@ -73,6 +73,7 @@
     <string name="camera_clear">Clear</string>
     <string name="camera_saved_toast">Camera saved.</string>
     <string name="camera_host_required">Enter the camera\'s IP address.</string>
+    <string name="camera_remote_help">To watch from outside your home, set up Tailscale (a free VPN) on this phone and on the NVR phone — then this same IP address works from anywhere, with no other change.</string>
     <string name="favorites_empty">No favorites yet — press and hold a clip, then choose “Mark as favorite”. Favorites are kept even when you clear a day.</string>
     <string name="action_delete">Delete</string>
     <string name="action_cancel">Cancel</string>

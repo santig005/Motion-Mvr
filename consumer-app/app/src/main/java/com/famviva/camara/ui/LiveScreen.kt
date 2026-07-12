@@ -404,6 +404,12 @@ fun CameraSettingsScreen(nav: androidx.navigation.NavHostController) {
                     onClick = { cfg.clear(); host = ""; port = "554"; user = ""; password = "" },
                 ) { Text(stringResource(R.string.camera_clear)) }
             }
+            Spacer(Modifier.height(24.dp))
+            Text(
+                stringResource(R.string.camera_remote_help),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

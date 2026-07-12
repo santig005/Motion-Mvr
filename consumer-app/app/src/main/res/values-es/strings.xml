@@ -73,6 +73,7 @@
     <string name="camera_clear">Borrar</string>
     <string name="camera_saved_toast">Cámara guardada.</string>
     <string name="camera_host_required">Ingresa la IP de la cámara.</string>
+    <string name="camera_remote_help">Para ver desde fuera de casa, instala Tailscale (una VPN gratis) en este teléfono y en el teléfono del NVR — así esta misma IP funciona desde cualquier lugar, sin ningún otro cambio.</string>
     <string name="favorites_empty">Aún no tienes favoritos — mantén pulsado un clip y elige «Marcar como favorito». Los favoritos se conservan aunque borres un día.</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>
