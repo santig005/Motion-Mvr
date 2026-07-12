@@ -121,6 +121,19 @@
     <string name="battery_range_7d">7d</string>
     <string name="battery_range_all">All</string>
 
+    <!-- Battery forecast accuracy -->
+    <string name="forecast_accuracy_title">Forecast accuracy</string>
+    <string name="forecast_accuracy_error">Average error: ±%1$s</string>
+    <string name="forecast_accuracy_optimistic">Runs optimistic (predicts ~%1$s more than reality)</string>
+    <string name="forecast_accuracy_pessimistic">Runs cautious (predicts ~%1$s less than reality)</string>
+    <string name="forecast_accuracy_improving">Getting more accurate over time</string>
+    <string name="forecast_accuracy_worsening">Less accurate lately</string>
+    <string name="forecast_accuracy_collecting">Collecting predictions — accuracy will appear here once there are enough to check against real discharge.</string>
+    <plurals name="forecast_checked">
+        <item quantity="one">Checked against %1$d real discharge</item>
+        <item quantity="other">Checked against %1$d real discharges</item>
+    </plurals>
+
     <!-- Average upload latency (recording end -> visible on Drive): across all clips / per day -->
     <string name="avg_upload_delay">Avg to cloud: %s</string>
     <string name="avg_upload_delay_day">Avg upload this day: %s</string>

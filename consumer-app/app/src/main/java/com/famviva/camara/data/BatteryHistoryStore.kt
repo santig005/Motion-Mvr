@@ -5,8 +5,16 @@ import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** One battery reading the app observed from the NVR's status.json heartbeat. */
-data class BatterySample(val epochSec: Long, val battery: Int, val charging: Boolean)
+/** One battery reading the app observed from the NVR's status.json heartbeat. [etaMinutes] is the
+ *  NVR's live battery-life forecast *at that moment* (minutes to ~5%), recorded so we can later score
+ *  how accurate the forecast was against the discharge that actually followed. Null when the NVR had
+ *  no estimate yet (e.g. right after a charge) or while charging. */
+data class BatterySample(
+    val epochSec: Long,
+    val battery: Int,
+    val charging: Boolean,
+    val etaMinutes: Int? = null,
+)
 
 /**
  * App-private, longer-lived battery time series. The NVR's own battery-history file is ephemeral
@@ -20,11 +28,11 @@ class BatteryHistoryStore(context: Context) {
     private val cap = 2000  // ~a month at a 20-min cadence; oldest points drop past this
 
     /** Appends one reading for [camera], unless a point already exists at this heartbeat timestamp. */
-    fun record(camera: String, epochSec: Long, battery: Int, charging: Boolean) {
+    fun record(camera: String, epochSec: Long, battery: Int, charging: Boolean, etaMinutes: Int? = null) {
         if (epochSec <= 0) return
         val all = loadRaw().toMutableList()
         if (all.any { it.first == camera && it.second.epochSec == epochSec }) return
-        all += camera to BatterySample(epochSec, battery, charging)
+        all += camera to BatterySample(epochSec, battery, charging, etaMinutes)
         val trimmed = if (all.size > cap) all.sortedBy { it.second.epochSec }.takeLast(cap) else all
         save(trimmed)
     }
@@ -39,7 +47,8 @@ class BatteryHistoryStore(context: Context) {
             val arr = JSONArray(file.readText())
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
-                o.optString("cam") to BatterySample(o.getLong("t"), o.getInt("b"), o.optBoolean("c"))
+                val eta = if (o.has("e")) o.getInt("e") else null
+                o.optString("cam") to BatterySample(o.getLong("t"), o.getInt("b"), o.optBoolean("c"), eta)
             }
         }.getOrDefault(emptyList())
     }
@@ -53,6 +62,7 @@ class BatteryHistoryStore(context: Context) {
                     put("t", s.epochSec)
                     put("b", s.battery)
                     put("c", s.charging)
+                    s.etaMinutes?.let { put("e", it) }
                 },
             )
         }

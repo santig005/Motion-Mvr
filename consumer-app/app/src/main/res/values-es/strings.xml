@@ -121,6 +121,19 @@
     <string name="battery_range_7d">7d</string>
     <string name="battery_range_all">Todo</string>
 
+    <!-- Precisión del pronóstico de batería -->
+    <string name="forecast_accuracy_title">Precisión del pronóstico</string>
+    <string name="forecast_accuracy_error">Error promedio: ±%1$s</string>
+    <string name="forecast_accuracy_optimistic">Es optimista (predice ~%1$s de más frente a la realidad)</string>
+    <string name="forecast_accuracy_pessimistic">Es cauto (predice ~%1$s de menos frente a la realidad)</string>
+    <string name="forecast_accuracy_improving">Cada vez más preciso</string>
+    <string name="forecast_accuracy_worsening">Menos preciso últimamente</string>
+    <string name="forecast_accuracy_collecting">Recolectando predicciones — la precisión aparecerá aquí cuando haya suficientes para contrastar con la descarga real.</string>
+    <plurals name="forecast_checked">
+        <item quantity="one">Contrastado con %1$d descarga real</item>
+        <item quantity="other">Contrastado con %1$d descargas reales</item>
+    </plurals>
+
     <!-- Latencia promedio de subida (fin de grabación -> visible en Drive): global / por día -->
     <string name="avg_upload_delay">Prom. a la nube: %s</string>
     <string name="avg_upload_delay_day">Prom. subida este día: %s</string>

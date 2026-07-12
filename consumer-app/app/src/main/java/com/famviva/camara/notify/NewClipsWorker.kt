@@ -56,7 +56,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val batteryHistory = BatteryHistoryStore(ctx)
             health.forEach { h ->
                 val b = h.battery
-                if (b != null && h.updated > 0) batteryHistory.record(h.camera, h.updated, b, h.charging == true)
+                if (b != null && h.updated > 0) batteryHistory.record(h.camera, h.updated, b, h.charging == true, h.etaMinutes)
             }
             val now = System.currentTimeMillis() / 1000
             val issues = health.mapNotNull { h ->

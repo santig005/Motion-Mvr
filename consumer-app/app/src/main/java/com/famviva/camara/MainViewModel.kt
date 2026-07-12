@@ -198,7 +198,7 @@ class MainViewModel(
     private fun recordBatterySamples() {
         cameraHealth.forEach { h ->
             val b = h.battery
-            if (b != null && h.updated > 0) battery.record(h.camera, h.updated, b, h.charging == true)
+            if (b != null && h.updated > 0) battery.record(h.camera, h.updated, b, h.charging == true, h.etaMinutes)
         }
         batteryVersion++
     }

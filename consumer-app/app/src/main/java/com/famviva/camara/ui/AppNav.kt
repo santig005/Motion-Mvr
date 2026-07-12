@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -116,6 +117,7 @@ import com.famviva.camara.data.axisTimeLabel
 import com.famviva.camara.data.clockLabel
 import com.famviva.camara.data.epochLabel
 import com.famviva.camara.data.estimateBatteryEtaMinutes
+import com.famviva.camara.data.evaluateBatteryForecast
 import com.famviva.camara.data.formatEta
 import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
@@ -1612,7 +1614,10 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
             )
         },
     ) { pad ->
-        Column(Modifier.fillMaxSize().padding(pad).padding(16.dp)) {
+        Column(
+            Modifier.fillMaxSize().padding(pad).padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
             if (nowPct != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -1644,7 +1649,7 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
             }
 
             if (samples.size < 2) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
                     Text(
                         stringResource(R.string.battery_history_empty),
                         style = MaterialTheme.typography.bodyMedium,
@@ -1674,6 +1679,70 @@ private fun BatteryScreen(vm: MainViewModel, nav: NavHostController, camera: Str
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // Forecast accuracy is scored over the FULL history (not just the visible range).
+                Spacer(Modifier.height(20.dp))
+                ForecastAccuracyCard(evaluateBatteryForecast(samples))
+            }
+        }
+    }
+}
+
+/**
+ * How close the battery-life forecast has been. Scores each past NVR prediction against the discharge
+ * that actually followed it (see [evaluateBatteryForecast]). Until enough predictions can be checked,
+ * shows a "collecting" note so it's clear the data is being recorded now for later.
+ */
+@Composable
+private fun ForecastAccuracyCard(accuracy: com.famviva.camara.data.ForecastAccuracy?) {
+    val context = LocalContext.current
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                stringResource(R.string.forecast_accuracy_title),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (accuracy == null) {
+                Text(
+                    stringResource(R.string.forecast_accuracy_collecting),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+            Text(
+                stringResource(R.string.forecast_accuracy_error, formatEta(context, accuracy.meanAbsErrorMin)),
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                pluralStringResource(R.plurals.forecast_checked, accuracy.count, accuracy.count),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // Direction of the bias, only when it's more than a rounding wobble (~10 min).
+            val bias = accuracy.meanSignedErrorMin
+            if (kotlin.math.abs(bias) >= 10) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    stringResource(
+                        if (bias > 0) R.string.forecast_accuracy_optimistic else R.string.forecast_accuracy_pessimistic,
+                        formatEta(context, kotlin.math.abs(bias)),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            accuracy.improving?.let { improving ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    stringResource(if (improving) R.string.forecast_accuracy_improving else R.string.forecast_accuracy_worsening),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (improving) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
