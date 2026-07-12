@@ -56,6 +56,9 @@
     <string name="live_quality_hd">HD (2K)</string>
     <string name="live_mute">Silenciar</string>
     <string name="live_unmute">Activar sonido</string>
+    <string name="live_connecting">Conectando…</string>
+    <string name="live_fullscreen_enter">Pantalla completa</string>
+    <string name="live_fullscreen_exit">Salir de pantalla completa</string>
 
     <!-- Configuración de cámara (credenciales RTSP, guardadas cifradas en el dispositivo) -->
     <string name="camera_settings_title">Configurar cámara</string>

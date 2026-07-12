@@ -1,6 +1,8 @@
 package com.famviva.camara.ui
 
+import android.app.Activity
 import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,8 +19,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -43,20 +48,34 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
 import com.famviva.camara.R
 import com.famviva.camara.data.CameraConfigStore
+import kotlinx.coroutines.delay
+
+private enum class LiveStatus { CONNECTING, PLAYING, ERROR }
+
+// A live RTSP connection can stall silently (buffering forever). If it hasn't started within this
+// window we tear it down and reconnect automatically, up to a few times, instead of leaving the user
+// on a frozen frame having to back out and re-enter.
+private const val WATCHDOG_MS = 9_000L
+private const val MAX_AUTO_RETRIES = 3
 
 /**
  * Live view of the camera over RTSP (Media3). Works on the camera's local network: the app opens its
@@ -70,39 +89,55 @@ fun LiveScreen(nav: androidx.navigation.NavHostController) {
     val context = LocalContext.current
     val cfg = remember { CameraConfigStore(context) }
     var hd by rememberSaveable { mutableStateOf(false) }
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
     val url = remember(hd) { cfg.rtspUrl(hd) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.live_title)) },
-                navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { nav.navigate("camera_settings") }) {
-                        Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.camera_settings_title))
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
-                    actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
-                ),
-            )
-        },
-    ) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
-            if (url == null) {
-                LiveSetupPrompt { nav.navigate("camera_settings") }
-            } else {
-                RtspLivePlayer(url = url, hd = hd, onQuality = { hd = it })
+    // Hide the system bars while in fullscreen (restored automatically when leaving or on dispose).
+    ImmersiveMode(enabled = fullscreen && url != null)
+
+    when {
+        url == null -> Scaffold(
+            topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
+        ) { pad -> Box(Modifier.fillMaxSize().padding(pad)) { LiveSetupPrompt { nav.navigate("camera_settings") } } }
+
+        fullscreen -> Box(Modifier.fillMaxSize().background(Color.Black)) {
+            RtspLivePlayer(url, hd, onQuality = { hd = it }, fullscreen = true, onToggleFullscreen = { fullscreen = false })
+        }
+
+        else -> Scaffold(
+            topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
+        ) { pad ->
+            Box(Modifier.fillMaxSize().padding(pad)) {
+                RtspLivePlayer(url, hd, onQuality = { hd = it }, fullscreen = false, onToggleFullscreen = { fullscreen = true })
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LiveTopBar(title: String, nav: androidx.navigation.NavHostController, showSettings: Boolean) {
+    TopAppBar(
+        title = { Text(title) },
+        navigationIcon = {
+            IconButton(onClick = { nav.popBackStack() }) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+            }
+        },
+        actions = {
+            if (showSettings) {
+                IconButton(onClick = { nav.navigate("camera_settings") }) {
+                    Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.camera_settings_title))
+                }
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            titleContentColor = MaterialTheme.colorScheme.onPrimary,
+            navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
+            actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+    )
 }
 
 @Composable
@@ -122,23 +157,67 @@ private fun LiveSetupPrompt(onSetup: () -> Unit) {
     }
 }
 
-/** The RTSP surface + on-video controls (quality SD/HD, mute) and connection-error handling. */
+/** Toggles the system bars for an immersive fullscreen video. */
+@Composable
+private fun ImmersiveMode(enabled: Boolean) {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    val window = (view.context as? Activity)?.window ?: return
+    DisposableEffect(enabled) {
+        val controller = WindowCompat.getInsetsController(window, view)
+        if (enabled) {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
+    }
+}
+
+/**
+ * The RTSP surface + on-video controls (quality SD/HD, mute, fullscreen) with connection-state
+ * handling: a spinner while connecting, an automatic reconnect if it stalls (see [WATCHDOG_MS]), and
+ * a manual retry once the auto-retries are exhausted.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Unit) {
+private fun RtspLivePlayer(
+    url: String,
+    hd: Boolean,
+    onQuality: (Boolean) -> Unit,
+    fullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
+) {
     val context = LocalContext.current
     var muted by rememberSaveable { mutableStateOf(true) }
-    var error by remember(url) { mutableStateOf(false) }
-    var retryKey by remember { mutableIntStateOf(0) }
+    // retryKey/attempts reset when the URL changes (quality switch); status resets on each attempt.
+    var retryKey by remember(url) { mutableIntStateOf(0) }
+    var attempts by remember(url) { mutableIntStateOf(0) }
+    var status by remember(url, retryKey) { mutableStateOf(LiveStatus.CONNECTING) }
 
     val player = remember(url, retryKey) {
-        ExoPlayer.Builder(context).build().apply {
+        // Small buffers biased toward low latency — this is a live feed, not a VOD file.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(1_000, 5_000, 500, 1_000)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply {
             val source = RtspMediaSource.Factory()
                 .setForceUseRtpTcp(true)               // TCP transport: reliable through Wi-Fi/NAT
+                .setTimeoutMs(8_000)                   // fail fast instead of hanging -> triggers reconnect
                 .createMediaSource(MediaItem.fromUri(url))
             setMediaSource(source)
             addListener(object : Player.Listener {
-                override fun onPlayerError(e: PlaybackException) { error = true }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) status = LiveStatus.PLAYING
+                }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    if (isPlaying) status = LiveStatus.PLAYING
+                }
+                override fun onPlayerError(e: PlaybackException) {
+                    if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+                }
             })
             prepare()
             playWhenReady = true
@@ -147,7 +226,15 @@ private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Uni
     LaunchedEffect(player, muted) { player.volume = if (muted) 0f else 1f }
     DisposableEffect(player) { onDispose { player.release() } }
 
-    Box(Modifier.fillMaxSize()) {
+    // Watchdog: if it's still connecting after the window, reconnect (or give up to a manual retry).
+    LaunchedEffect(url, retryKey) {
+        delay(WATCHDOG_MS)
+        if (status == LiveStatus.CONNECTING) {
+            if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -160,8 +247,17 @@ private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Uni
             },
         )
 
-        if (error) {
-            Column(
+        when (status) {
+            LiveStatus.CONNECTING -> Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                Spacer(Modifier.height(12.dp))
+                Text(stringResource(R.string.live_connecting), color = Color.White)
+            }
+            LiveStatus.ERROR -> Column(
                 Modifier.fillMaxSize().padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
@@ -169,16 +265,21 @@ private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Uni
                 Text(
                     stringResource(R.string.live_error),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = Color.White,
                 )
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { error = false; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
+                Button(onClick = { attempts = 0; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
             }
+            LiveStatus.PLAYING -> Unit
         }
 
-        // On-video control bar (quality + mute). Kept minimal and legible over dark frames.
+        // On-video control bar over a scrim so it stays visible/findable on any frame.
         Row(
-            Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(12.dp),
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.4f))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             FilterChip(
@@ -197,6 +298,13 @@ private fun RtspLivePlayer(url: String, hd: Boolean, onQuality: (Boolean) -> Uni
                 Icon(
                     if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = stringResource(if (muted) R.string.live_unmute else R.string.live_mute),
+                    tint = Color.White,
+                )
+            }
+            IconButton(onClick = onToggleFullscreen) {
+                Icon(
+                    if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                    contentDescription = stringResource(if (fullscreen) R.string.live_fullscreen_exit else R.string.live_fullscreen_enter),
                     tint = Color.White,
                 )
             }

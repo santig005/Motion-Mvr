@@ -56,6 +56,9 @@
     <string name="live_quality_hd">HD (2K)</string>
     <string name="live_mute">Mute</string>
     <string name="live_unmute">Unmute</string>
+    <string name="live_connecting">Connecting…</string>
+    <string name="live_fullscreen_enter">Fullscreen</string>
+    <string name="live_fullscreen_exit">Exit fullscreen</string>
 
     <!-- Camera setup (RTSP credentials, stored encrypted on-device) -->
     <string name="camera_settings_title">Camera setup</string>
