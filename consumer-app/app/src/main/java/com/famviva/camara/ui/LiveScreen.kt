@@ -29,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -51,6 +52,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -78,7 +80,9 @@ import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
 import com.famviva.camara.R
 import com.famviva.camara.data.CameraConfigStore
+import com.famviva.camara.media.ClipActions
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private enum class LiveStatus { CONNECTING, PLAYING, ERROR }
 
@@ -266,10 +270,15 @@ private fun RtspLivePlayer(
     onToggleFullscreen: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var muted by rememberSaveable { mutableStateOf(true) }
     var status by remember { mutableStateOf(LiveStatus.CONNECTING) }
     var retryKey by remember { mutableIntStateOf(0) }
     var attempts by remember { mutableIntStateOf(0) }
+    // Kept so "take photo" can grab the current frame straight off the video surface (PixelCopy),
+    // without touching the player/Surface handoff that the 2K-freeze fix stabilised.
+    var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    val snapshotFailed = stringResource(R.string.live_snapshot_failed)
     // Current quality label for logs; updated in the load effect (never log the URL — it has creds).
     var quality by remember { mutableStateOf(if (hd) "HD/ch0(2K)" else "SD/ch1(360p)") }
 
@@ -337,6 +346,38 @@ private fun RtspLivePlayer(
         }
     }
 
+    // Grab the current frame off the video surface and save it to the gallery as a JPEG. PixelCopy
+    // reads the SurfaceView directly, so it works with the hardware video surface (a plain
+    // View.draw() would come back black).
+    fun captureSnapshot() {
+        val surface = playerView?.videoSurfaceView as? android.view.SurfaceView
+        if (surface == null || surface.width <= 0 || surface.height <= 0) {
+            Toast.makeText(context, snapshotFailed, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val bmp = android.graphics.Bitmap.createBitmap(
+            surface.width, surface.height, android.graphics.Bitmap.Config.ARGB_8888,
+        )
+        LiveLog.add("snapshot: capturing ${surface.width}x${surface.height}")
+        android.view.PixelCopy.request(surface, bmp, { result ->
+            if (result == android.view.PixelCopy.SUCCESS) {
+                scope.launch {
+                    val name = "live_" + java.time.LocalDateTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".jpg"
+                    val path = ClipActions.saveSnapshot(context, bmp, name)
+                    Toast.makeText(
+                        context,
+                        if (path != null) context.getString(R.string.saved_to, path) else snapshotFailed,
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            } else {
+                LiveLog.add("snapshot: PixelCopy failed result=$result")
+                Toast.makeText(context, snapshotFailed, Toast.LENGTH_SHORT).show()
+            }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -346,6 +387,7 @@ private fun RtspLivePlayer(
                     useController = false
                     keepScreenOn = true
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    playerView = this
                 }
             },
         )
@@ -398,6 +440,15 @@ private fun RtspLivePlayer(
                 label = { Text(stringResource(R.string.live_quality_hd)) },
             )
             Spacer(Modifier.weight(1f))
+            if (status == LiveStatus.PLAYING) {
+                IconButton(onClick = { captureSnapshot() }) {
+                    Icon(
+                        Icons.Filled.PhotoCamera,
+                        contentDescription = stringResource(R.string.live_snapshot),
+                        tint = Color.White,
+                    )
+                }
+            }
             IconButton(onClick = { muted = !muted }) {
                 Icon(
                     if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,

@@ -127,6 +127,32 @@ class DriveClient(
         }
     }
 
+    /** Downloads the NVR's own preview jpg (the `mt_*.jpg` sibling written next to the clip) and
+     *  decodes it to a bitmap, for a rich (BigPicture) new-clip notification. Two light calls
+     *  (locate + fetch); returns null if there's no sibling or anything fails. */
+    suspend fun fetchClipThumbnail(clip: Clip): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+        val base = clip.name.removeSuffix(".mp4")
+        val token = tokenProvider()
+        val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = '$base.jpg' and trashed = false")
+            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("pageSize", "1")
+            .build()
+        val id = http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?.optJSONObject(0)?.optString("id")?.ifBlank { null }
+            } ?: return@withContext null
+        val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
+        http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val bytes = resp.body?.bytes() ?: return@withContext null
+                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+    }
+
     /** Reads the status.json files across the tree and returns each camera's health. */
     suspend fun fetchCameraHealth(): List<CameraHealth> = withContext(Dispatchers.IO) {
         val token = tokenProvider()

@@ -1,6 +1,7 @@
 package com.famviva.camara
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -8,7 +9,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
+import com.famviva.camara.notify.Notifications
 import com.famviva.camara.auth.AuthManager
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.ClipListCache
@@ -25,6 +29,10 @@ import com.famviva.camara.ui.theme.CamaraTheme
 class MainActivity : AppCompatActivity() {
 
     private lateinit var auth: AuthManager
+
+    // Deep-link destination from a tapped notification (e.g. "live"). Backed by Compose state so
+    // onNewIntent (activity reused, singleTop) re-triggers navigation, not just the first launch.
+    private val deepLink = mutableStateOf<String?>(null)
 
     // Notification permission (Android 13+). Must be registered before STARTED.
     private val notifPermLauncher =
@@ -47,9 +55,12 @@ class MainActivity : AppCompatActivity() {
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
 
+        deepLink.value = intent?.getStringExtra(Notifications.EXTRA_DEST)
+
         enableEdgeToEdge()
         setContent {
             CamaraTheme {
+                val dest by deepLink
                 AppNav(
                     drive = drive,
                     seenStore = seenStore,
@@ -58,9 +69,17 @@ class MainActivity : AppCompatActivity() {
                     batteryHistory = batteryHistory,
                     favoritesStore = favoritesStore,
                     tokenProvider = { auth.token() },
+                    deepLinkRoute = dest,
+                    onDeepLinkHandled = { deepLink.value = null },
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        deepLink.value = intent.getStringExtra(Notifications.EXTRA_DEST)
     }
 
     private fun maybeRequestNotificationPermission() {

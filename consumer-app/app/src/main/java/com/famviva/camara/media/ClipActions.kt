@@ -58,6 +58,39 @@ object ClipActions {
         return true
     }
 
+    /** Saves a still frame (JPEG) to the gallery (Pictures/MotionNVR). Returns the visible path or
+     *  null on failure. Used by the live view's "take photo" action. */
+    suspend fun saveSnapshot(context: Context, bitmap: android.graphics.Bitmap, name: String): String? =
+        withContext(Dispatchers.IO) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + GALLERY_DIR)
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return@withContext null
+                val ok = resolver.openOutputStream(uri)?.use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it)
+                } ?: false
+                if (!ok) { resolver.delete(uri, null, null); return@withContext null }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                "Pictures/$GALLERY_DIR/$name"
+            } else {
+                val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), GALLERY_DIR)
+                    .apply { mkdirs() }
+                val file = File(dir, name)
+                val ok = FileOutputStream(file).use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it)
+                }
+                if (ok) file.absolutePath else null
+            }
+        }
+
     /** Saves the clip to the gallery (Movies/MotionNVR). Returns the visible path or null on failure. */
     suspend fun saveToGallery(context: Context, clip: Clip, token: String): String? =
         withContext(Dispatchers.IO) {

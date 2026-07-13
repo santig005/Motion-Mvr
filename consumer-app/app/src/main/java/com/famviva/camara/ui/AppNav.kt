@@ -125,6 +125,7 @@ import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
 import com.famviva.camara.data.uploadDelayLabel
 import com.famviva.camara.media.ClipActions
+import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -139,11 +140,22 @@ fun AppNav(
     batteryHistory: com.famviva.camara.data.BatteryHistoryStore,
     favoritesStore: com.famviva.camara.data.FavoritesStore,
     tokenProvider: suspend () -> String,
+    deepLinkRoute: String? = null,
+    onDeepLinkHandled: () -> Unit = {},
 ) {
     val nav = rememberNavController()
     val vm: MainViewModel = viewModel(
         factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, tokenProvider),
     )
+
+    // A tapped notification asks for a screen (e.g. "live"): push it on top of "days" so Back
+    // still returns to the event list. Consumed once so it doesn't re-fire on recomposition.
+    LaunchedEffect(deepLinkRoute) {
+        if (deepLinkRoute != null) {
+            nav.navigate(deepLinkRoute)
+            onDeepLinkHandled()
+        }
+    }
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
@@ -187,6 +199,11 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
 
+    // Away/Home is read by the background poll (NewClipsWorker) straight from the store, so the menu
+    // toggles it there directly — no ViewModel round-trip (same as the language switch below).
+    val notifyStore = remember { NotifyStore(context) }
+    var away by remember { mutableStateOf(notifyStore.away) }
+
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
 
@@ -228,6 +245,23 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
             }
             CheckableMenuItem(R.string.auto_download_data, selected = vm.autoDownloadMode == AutoDownloadMode.WIFI_AND_DATA) {
                 pickDownload(AutoDownloadMode.WIFI_AND_DATA, R.string.auto_download_data_toast)
+            }
+            HorizontalDivider()
+
+            MenuSectionLabel(stringResource(R.string.away_menu_title))
+            fun pickMode(target: Boolean, toastRes: Int) {
+                expanded = false
+                if (away != target) {
+                    away = target
+                    notifyStore.away = target
+                    Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
+                }
+            }
+            CheckableMenuItem(R.string.away_home, selected = !away) {
+                pickMode(false, R.string.away_home_toast)
+            }
+            CheckableMenuItem(R.string.away_away, selected = away) {
+                pickMode(true, R.string.away_away_toast)
             }
             HorizontalDivider()
 

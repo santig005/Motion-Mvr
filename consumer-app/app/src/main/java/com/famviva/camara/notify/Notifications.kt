@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -18,6 +19,11 @@ object Notifications {
     private const val CHANNEL_ID = "events"
     private const val NOTIF_ID = 1
     private const val NOTIF_ID_HEALTH = 2
+
+    /** Intent extra MainActivity reads to deep-link to a screen when a notification is tapped. */
+    const val EXTRA_DEST = "dest"
+    /** Deep-link value: open the live view. */
+    const val DEST_LIVE = "live"
 
     private fun canPost(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -35,27 +41,44 @@ object Notifications {
         }
     }
 
-    private fun openAppIntent(context: Context): PendingIntent {
+    private fun openAppIntent(context: Context, dest: String? = null): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        if (dest != null) intent.putExtra(EXTRA_DEST, dest)
+        // Distinct request code per destination so the "open live" and plain-open PendingIntents
+        // don't collide (FLAG_UPDATE_CURRENT would otherwise overwrite the extras of one another).
         return PendingIntent.getActivity(
-            context, 0, intent,
+            context, dest?.hashCode() ?: 0, intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
     }
 
-    fun notifyNewClips(context: Context, count: Int) {
+    /**
+     * New-clip alert. When we could fetch the newest clip's preview it becomes a BigPicture
+     * notification (photo + thumbnail); tapping it jumps straight to the live view so the user can
+     * check what's happening now.
+     */
+    fun notifyNewClips(context: Context, count: Int, latestTime: String? = null, thumb: Bitmap? = null) {
         if (!canPost(context)) return
         ensureChannel(context)
         val text = context.resources.getQuantityString(R.plurals.notif_new_clips, count, count)
-        val notif = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context))
-            .build()
-        NotificationManagerCompat.from(context).notify(NOTIF_ID, notif)
+            .setContentIntent(openAppIntent(context, DEST_LIVE))
+        latestTime?.let { builder.setSubText(it) }
+        if (thumb != null) {
+            builder.setLargeIcon(thumb)
+                .setStyle(
+                    NotificationCompat.BigPictureStyle()
+                        .bigPicture(thumb)
+                        .bigLargeIcon(null as Bitmap?)   // hide the thumbnail once expanded
+                        .setSummaryText(text),
+                )
+        }
+        NotificationManagerCompat.from(context).notify(NOTIF_ID, builder.build())
     }
 
     /** NVR health warning (recording down / not reporting / low battery). */

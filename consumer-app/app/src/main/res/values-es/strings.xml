@@ -59,6 +59,8 @@
     <string name="live_connecting">Conectando…</string>
     <string name="live_fullscreen_enter">Pantalla completa</string>
     <string name="live_fullscreen_exit">Salir de pantalla completa</string>
+    <string name="live_snapshot">Tomar foto</string>
+    <string name="live_snapshot_failed">No se pudo capturar la foto</string>
     <string name="live_logs_title">Registros (en vivo)</string>
     <string name="log_share">Compartir</string>
     <string name="log_clear">Limpiar</string>
@@ -128,6 +130,13 @@
     <string name="auto_download_wifi_toast">Auto-descarga solo con Wi-Fi: los clips nuevos se guardarán para verlos sin conexión.</string>
     <string name="auto_download_data_toast">Auto-descarga con Wi-Fi y datos móviles: los clips nuevos se descargan en cualquier red (consume tu plan de datos).</string>
     <string name="auto_download_disabled_toast">Auto-descarga desactivada.</string>
+
+    <!-- Modo ausente (manual; controla las alertas de movimiento) -->
+    <string name="away_menu_title">Alertas de movimiento</string>
+    <string name="away_home">En casa — en silencio</string>
+    <string name="away_away">Ausente — con alertas</string>
+    <string name="away_home_toast">Modo en casa: alertas de movimiento en silencio (los avisos de salud siguen llegando).</string>
+    <string name="away_away_toast">Modo ausente: alertas de movimiento activadas.</string>
 
     <!-- Salud de la cámara -->
     <string name="status_down_title">⚠️ %s sin señal</string>

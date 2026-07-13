@@ -38,7 +38,13 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 } else {
                     val newOnes = recent.filter { it.name > last }
                     if (newOnes.isNotEmpty()) {
-                        Notifications.notifyNewClips(ctx, newOnes.size)
+                        // Only alert on motion while Away. Still advance the baseline (so switching to
+                        // Away later doesn't dump the backlog) and still auto-download regardless.
+                        if (store.away) {
+                            val newestClip = recent.first()   // newest overall = newest of the new ones
+                            val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
+                            Notifications.notifyNewClips(ctx, newOnes.size, newestClip.time, thumb)
+                        }
                         store.setLastNotified(newest)
                         if (offline.shouldAutoDownloadNow()) {
                             newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }

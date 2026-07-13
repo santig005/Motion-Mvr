@@ -59,6 +59,8 @@
     <string name="live_connecting">Connecting…</string>
     <string name="live_fullscreen_enter">Fullscreen</string>
     <string name="live_fullscreen_exit">Exit fullscreen</string>
+    <string name="live_snapshot">Take photo</string>
+    <string name="live_snapshot_failed">Couldn\'t capture the photo</string>
     <string name="live_logs_title">Live logs</string>
     <string name="log_share">Share</string>
     <string name="log_clear">Clear</string>
@@ -129,6 +131,13 @@
     <string name="auto_download_wifi_toast">Auto-download on Wi-Fi only: new clips will be saved for offline playback.</string>
     <string name="auto_download_data_toast">Auto-download on Wi-Fi and mobile data: new clips download anywhere (uses your data plan).</string>
     <string name="auto_download_disabled_toast">Auto-download disabled.</string>
+
+    <!-- Away mode (manual; motion-alert gate) -->
+    <string name="away_menu_title">Motion alerts</string>
+    <string name="away_home">At home — muted</string>
+    <string name="away_away">Away — alerts on</string>
+    <string name="away_home_toast">Home mode: motion alerts muted (health warnings still notify).</string>
+    <string name="away_away_toast">Away mode: motion alerts are on.</string>
 
     <!-- Camera health -->
     <string name="status_down_title">⚠️ %s no signal</string>
