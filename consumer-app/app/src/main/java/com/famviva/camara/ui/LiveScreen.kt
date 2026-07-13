@@ -1,6 +1,7 @@
 package com.famviva.camara.ui
 
 import android.app.Activity
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -70,6 +71,17 @@ import com.famviva.camara.data.CameraConfigStore
 import kotlinx.coroutines.delay
 
 private enum class LiveStatus { CONNECTING, PLAYING, ERROR }
+
+// Filter logcat by this tag to diagnose live playback (e.g. the 2K/HD freeze):  adb logcat -s LiveRTSP
+private const val LIVE_TAG = "LiveRTSP"
+
+private fun playbackStateName(state: Int): String = when (state) {
+    Player.STATE_IDLE -> "IDLE"
+    Player.STATE_BUFFERING -> "BUFFERING"
+    Player.STATE_READY -> "READY"
+    Player.STATE_ENDED -> "ENDED"
+    else -> "UNKNOWN($state)"
+}
 
 // A live RTSP connection can stall silently (buffering forever). If it hasn't started within this
 // window we tear it down and reconnect automatically, up to a few times, instead of leaving the user
@@ -196,7 +208,11 @@ private fun RtspLivePlayer(
     var attempts by remember(url) { mutableIntStateOf(0) }
     var status by remember(url, retryKey) { mutableStateOf(LiveStatus.CONNECTING) }
 
+    // Human-readable label for logs (never log the URL — it carries credentials).
+    val quality = if (hd) "HD/ch0(2K)" else "SD/ch1(360p)"
+
     val player = remember(url, retryKey) {
+        Log.i(LIVE_TAG, "creating player quality=$quality attempt=$retryKey")
         // Small buffers biased toward low latency — this is a live feed, not a VOD file.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(1_000, 5_000, 500, 1_000)
@@ -210,12 +226,29 @@ private fun RtspLivePlayer(
             setMediaSource(source)
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    Log.i(LIVE_TAG, "[$quality] state=${playbackStateName(playbackState)}")
                     if (playbackState == Player.STATE_READY) status = LiveStatus.PLAYING
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    Log.i(LIVE_TAG, "[$quality] isPlaying=$isPlaying")
                     if (isPlaying) status = LiveStatus.PLAYING
                 }
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    Log.i(LIVE_TAG, "[$quality] videoSize=${videoSize.width}x${videoSize.height}")
+                }
+                override fun onRenderedFirstFrame() {
+                    Log.i(LIVE_TAG, "[$quality] first frame rendered")
+                }
+                override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                    tracks.groups.forEach { g ->
+                        for (i in 0 until g.length) {
+                            val f = g.getTrackFormat(i)
+                            Log.i(LIVE_TAG, "[$quality] track mime=${f.sampleMimeType} ${f.width}x${f.height} selected=${g.isTrackSelected(i)} supported=${g.isTrackSupported(i)}")
+                        }
+                    }
+                }
                 override fun onPlayerError(e: PlaybackException) {
+                    Log.e(LIVE_TAG, "[$quality] ERROR code=${e.errorCodeName} msg=${e.message} cause=${e.cause}", e)
                     if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
                 }
             })
@@ -230,6 +263,7 @@ private fun RtspLivePlayer(
     LaunchedEffect(url, retryKey) {
         delay(WATCHDOG_MS)
         if (status == LiveStatus.CONNECTING) {
+            Log.w(LIVE_TAG, "[$quality] watchdog: still CONNECTING after ${WATCHDOG_MS}ms, attempts=$attempts")
             if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
         }
     }
@@ -268,7 +302,7 @@ private fun RtspLivePlayer(
                     color = Color.White,
                 )
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { attempts = 0; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
+                Button(onClick = { Log.i(LIVE_TAG, "[$quality] manual retry"); attempts = 0; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
             }
             LiveStatus.PLAYING -> Unit
         }
