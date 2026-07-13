@@ -13,9 +13,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -51,6 +55,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -131,21 +136,51 @@ fun LiveScreen(nav: androidx.navigation.NavHostController) {
     // Hide the system bars while in fullscreen (restored automatically when leaving or on dispose).
     ImmersiveMode(enabled = fullscreen && url != null)
 
-    when {
-        url == null -> Scaffold(
+    if (url == null) {
+        Scaffold(
             topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
         ) { pad -> Box(Modifier.fillMaxSize().padding(pad)) { LiveSetupPrompt { nav.navigate("camera_settings") } } }
+        return
+    }
 
-        fullscreen -> Box(Modifier.fillMaxSize().background(Color.Black)) {
-            RtspLivePlayer(url, hd, onQuality = { hd = it }, fullscreen = true, onToggleFullscreen = { fullscreen = false })
+    // ONE stable player position for the whole screen — it must survive both the quality switch and
+    // the fullscreen toggle. Recreating the player (or moving it in the tree) breaks the video Surface
+    // handoff: the new player reaches READY but never renders a frame -> frozen (the bug the logs
+    // showed). So the chrome is drawn as overlays on top, and fullscreen only toggles them.
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        RtspLivePlayer(
+            url = url,
+            hd = hd,
+            fullscreen = fullscreen,
+            onQuality = { hd = it },
+            onToggleFullscreen = { fullscreen = !fullscreen },
+        )
+        if (!fullscreen) LiveOverlayTopBar(nav)
+    }
+}
+
+/** Translucent top bar drawn over the live video (used instead of a Scaffold app bar so toggling
+ *  fullscreen doesn't move the player in the tree and recreate it). */
+@Composable
+private fun LiveOverlayTopBar(nav: androidx.navigation.NavHostController) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { nav.popBackStack() }) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back), tint = Color.White)
         }
-
-        else -> Scaffold(
-            topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
-        ) { pad ->
-            Box(Modifier.fillMaxSize().padding(pad)) {
-                RtspLivePlayer(url, hd, onQuality = { hd = it }, fullscreen = false, onToggleFullscreen = { fullscreen = true })
-            }
+        Text(stringResource(R.string.live_title), color = Color.White, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = { nav.navigate("live_logs") }) {
+            Icon(Icons.Filled.BugReport, contentDescription = stringResource(R.string.live_logs_title), tint = Color.White)
+        }
+        IconButton(onClick = { nav.navigate("camera_settings") }) {
+            Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.camera_settings_title), tint = Color.White)
         }
     }
 }
@@ -215,56 +250,49 @@ private fun ImmersiveMode(enabled: Boolean) {
 }
 
 /**
- * The RTSP surface + on-video controls (quality SD/HD, mute, fullscreen) with connection-state
- * handling: a spinner while connecting, an automatic reconnect if it stalls (see [WATCHDOG_MS]), and
- * a manual retry once the auto-retries are exhausted.
+ * The RTSP surface + on-video controls (quality SD/HD, mute, fullscreen). Uses a SINGLE ExoPlayer for
+ * the screen's whole life and swaps the media source on quality/retry changes — recreating the player
+ * (as an earlier version did) broke the video Surface handoff, so the new player reached READY but
+ * never rendered a frame and the picture froze. "Playing" is therefore signalled by the first frame
+ * actually being rendered, not merely by READY; a watchdog reconnects if no frame arrives in time.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RtspLivePlayer(
     url: String,
     hd: Boolean,
-    onQuality: (Boolean) -> Unit,
     fullscreen: Boolean,
+    onQuality: (Boolean) -> Unit,
     onToggleFullscreen: () -> Unit,
 ) {
     val context = LocalContext.current
     var muted by rememberSaveable { mutableStateOf(true) }
-    // retryKey/attempts reset when the URL changes (quality switch); status resets on each attempt.
-    var retryKey by remember(url) { mutableIntStateOf(0) }
-    var attempts by remember(url) { mutableIntStateOf(0) }
-    var status by remember(url, retryKey) { mutableStateOf(LiveStatus.CONNECTING) }
+    var status by remember { mutableStateOf(LiveStatus.CONNECTING) }
+    var retryKey by remember { mutableIntStateOf(0) }
+    var attempts by remember { mutableIntStateOf(0) }
+    // Current quality label for logs; updated in the load effect (never log the URL — it has creds).
+    var quality by remember { mutableStateOf(if (hd) "HD/ch0(2K)" else "SD/ch1(360p)") }
 
-    // Human-readable label for logs (never log the URL — it carries credentials).
-    val quality = if (hd) "HD/ch0(2K)" else "SD/ch1(360p)"
-
-    val player = remember(url, retryKey) {
-        LiveLog.add("creating player quality=$quality attempt=$retryKey")
-        // Small buffers biased toward low latency — this is a live feed, not a VOD file.
+    val player = remember {
+        LiveLog.add("creating single player")
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(1_000, 5_000, 500, 1_000)
+            .setBufferDurationsMs(1_000, 5_000, 500, 1_000)   // small buffers: live feed, not VOD
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply {
-            val source = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true)               // TCP transport: reliable through Wi-Fi/NAT
-                .setTimeoutMs(8_000)                   // fail fast instead of hanging -> triggers reconnect
-                .createMediaSource(MediaItem.fromUri(url))
-            setMediaSource(source)
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     LiveLog.add("[$quality] state=${playbackStateName(playbackState)}")
-                    if (playbackState == Player.STATE_READY) status = LiveStatus.PLAYING
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     LiveLog.add("[$quality] isPlaying=$isPlaying")
-                    if (isPlaying) status = LiveStatus.PLAYING
                 }
                 override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                     LiveLog.add("[$quality] videoSize=${videoSize.width}x${videoSize.height}")
                 }
                 override fun onRenderedFirstFrame() {
                     LiveLog.add("[$quality] first frame rendered")
+                    status = LiveStatus.PLAYING            // the true "the picture is showing" signal
                 }
                 override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                     tracks.groups.forEach { g ->
@@ -279,18 +307,32 @@ private fun RtspLivePlayer(
                     if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
                 }
             })
-            prepare()
-            playWhenReady = true
         }
     }
-    LaunchedEffect(player, muted) { player.volume = if (muted) 0f else 1f }
     DisposableEffect(player) { onDispose { player.release() } }
+    LaunchedEffect(player, muted) { player.volume = if (muted) 0f else 1f }
 
-    // Watchdog: if it's still connecting after the window, reconnect (or give up to a manual retry).
+    // (Re)load on a quality change (url) or a retry — swapping the source on the SAME player.
+    LaunchedEffect(url, retryKey) {
+        quality = if (hd) "HD/ch0(2K)" else "SD/ch1(360p)"
+        status = LiveStatus.CONNECTING
+        LiveLog.add("loading quality=$quality attempt=$retryKey")
+        val source = RtspMediaSource.Factory()
+            .setForceUseRtpTcp(true)                   // TCP transport: reliable through Wi-Fi/NAT
+            .setTimeoutMs(8_000)                       // fail fast instead of hanging -> triggers reconnect
+            .createMediaSource(MediaItem.fromUri(url))
+        player.setMediaSource(source)
+        player.prepare()
+        player.playWhenReady = true
+    }
+    // Reset the auto-retry budget when the user switches quality.
+    LaunchedEffect(url) { attempts = 0 }
+
+    // Watchdog: no rendered frame within the window -> reconnect (or fall back to a manual retry).
     LaunchedEffect(url, retryKey) {
         delay(WATCHDOG_MS)
         if (status == LiveStatus.CONNECTING) {
-            LiveLog.add("[$quality] watchdog: still CONNECTING after ${WATCHDOG_MS}ms, attempts=$attempts")
+            LiveLog.add("[$quality] watchdog: no frame after ${WATCHDOG_MS}ms, attempts=$attempts")
             if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
         }
     }
@@ -340,6 +382,7 @@ private fun RtspLivePlayer(
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
                 .background(Color.Black.copy(alpha = 0.4f))
+                .windowInsetsPadding(WindowInsets.navigationBars)
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
