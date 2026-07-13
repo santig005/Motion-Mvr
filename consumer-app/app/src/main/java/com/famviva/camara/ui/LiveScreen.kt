@@ -1,9 +1,11 @@
 package com.famviva.camara.ui
 
 import android.app.Activity
+import android.content.Intent
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Settings
@@ -41,6 +44,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -51,6 +55,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -74,6 +79,25 @@ private enum class LiveStatus { CONNECTING, PLAYING, ERROR }
 
 // Filter logcat by this tag to diagnose live playback (e.g. the 2K/HD freeze):  adb logcat -s LiveRTSP
 private const val LIVE_TAG = "LiveRTSP"
+
+/**
+ * In-app ring buffer of live-player diagnostics, so the user can read/share them from the app itself
+ * (no adb/logcat needed). Everything also goes to logcat under [LIVE_TAG]. Small and bounded.
+ */
+object LiveLog {
+    private const val CAP = 400
+    val lines = mutableStateListOf<String>()
+    private val fmt = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+
+    fun add(msg: String) {
+        lines.add("${java.time.LocalTime.now().format(fmt)}  $msg")
+        while (lines.size > CAP) lines.removeAt(0)
+        Log.i(LIVE_TAG, msg)
+    }
+
+    fun dump(): String = lines.joinToString("\n")
+    fun clear() = lines.clear()
+}
 
 private fun playbackStateName(state: Int): String = when (state) {
     Player.STATE_IDLE -> "IDLE"
@@ -137,6 +161,9 @@ private fun LiveTopBar(title: String, nav: androidx.navigation.NavHostController
             }
         },
         actions = {
+            IconButton(onClick = { nav.navigate("live_logs") }) {
+                Icon(Icons.Filled.BugReport, contentDescription = stringResource(R.string.live_logs_title))
+            }
             if (showSettings) {
                 IconButton(onClick = { nav.navigate("camera_settings") }) {
                     Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.camera_settings_title))
@@ -212,7 +239,7 @@ private fun RtspLivePlayer(
     val quality = if (hd) "HD/ch0(2K)" else "SD/ch1(360p)"
 
     val player = remember(url, retryKey) {
-        Log.i(LIVE_TAG, "creating player quality=$quality attempt=$retryKey")
+        LiveLog.add("creating player quality=$quality attempt=$retryKey")
         // Small buffers biased toward low latency — this is a live feed, not a VOD file.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(1_000, 5_000, 500, 1_000)
@@ -226,29 +253,29 @@ private fun RtspLivePlayer(
             setMediaSource(source)
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
-                    Log.i(LIVE_TAG, "[$quality] state=${playbackStateName(playbackState)}")
+                    LiveLog.add("[$quality] state=${playbackStateName(playbackState)}")
                     if (playbackState == Player.STATE_READY) status = LiveStatus.PLAYING
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    Log.i(LIVE_TAG, "[$quality] isPlaying=$isPlaying")
+                    LiveLog.add("[$quality] isPlaying=$isPlaying")
                     if (isPlaying) status = LiveStatus.PLAYING
                 }
                 override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                    Log.i(LIVE_TAG, "[$quality] videoSize=${videoSize.width}x${videoSize.height}")
+                    LiveLog.add("[$quality] videoSize=${videoSize.width}x${videoSize.height}")
                 }
                 override fun onRenderedFirstFrame() {
-                    Log.i(LIVE_TAG, "[$quality] first frame rendered")
+                    LiveLog.add("[$quality] first frame rendered")
                 }
                 override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                     tracks.groups.forEach { g ->
                         for (i in 0 until g.length) {
                             val f = g.getTrackFormat(i)
-                            Log.i(LIVE_TAG, "[$quality] track mime=${f.sampleMimeType} ${f.width}x${f.height} selected=${g.isTrackSelected(i)} supported=${g.isTrackSupported(i)}")
+                            LiveLog.add("[$quality] track mime=${f.sampleMimeType} ${f.width}x${f.height} selected=${g.isTrackSelected(i)} supported=${g.isTrackSupported(i)}")
                         }
                     }
                 }
                 override fun onPlayerError(e: PlaybackException) {
-                    Log.e(LIVE_TAG, "[$quality] ERROR code=${e.errorCodeName} msg=${e.message} cause=${e.cause}", e)
+                    LiveLog.add("[$quality] ERROR code=${e.errorCodeName} msg=${e.message} cause=${e.cause}")
                     if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
                 }
             })
@@ -263,7 +290,7 @@ private fun RtspLivePlayer(
     LaunchedEffect(url, retryKey) {
         delay(WATCHDOG_MS)
         if (status == LiveStatus.CONNECTING) {
-            Log.w(LIVE_TAG, "[$quality] watchdog: still CONNECTING after ${WATCHDOG_MS}ms, attempts=$attempts")
+            LiveLog.add("[$quality] watchdog: still CONNECTING after ${WATCHDOG_MS}ms, attempts=$attempts")
             if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
         }
     }
@@ -302,7 +329,7 @@ private fun RtspLivePlayer(
                     color = Color.White,
                 )
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = { Log.i(LIVE_TAG, "[$quality] manual retry"); attempts = 0; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
+                Button(onClick = { LiveLog.add("[$quality] manual retry"); attempts = 0; retryKey++ }) { Text(stringResource(R.string.live_retry)) }
             }
             LiveStatus.PLAYING -> Unit
         }
@@ -341,6 +368,61 @@ private fun RtspLivePlayer(
                     contentDescription = stringResource(if (fullscreen) R.string.live_fullscreen_exit else R.string.live_fullscreen_enter),
                     tint = Color.White,
                 )
+            }
+        }
+    }
+}
+
+/** In-app viewer for the live-player diagnostics, with Share (e.g. to WhatsApp) and Clear. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LiveLogScreen(nav: androidx.navigation.NavHostController) {
+    val context = LocalContext.current
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.live_logs_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+                actions = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, LiveLog.dump())
+                        }
+                        context.startActivity(Intent.createChooser(send, context.getString(R.string.log_share)))
+                    }) { Text(stringResource(R.string.log_share)) }
+                    androidx.compose.material3.TextButton(onClick = { LiveLog.clear() }) {
+                        Text(stringResource(R.string.log_clear))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        if (LiveLog.lines.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(pad).padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    stringResource(R.string.log_empty),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            SelectionContainer {
+                Column(
+                    Modifier.fillMaxSize().padding(pad).padding(12.dp).verticalScroll(rememberScrollState()),
+                ) {
+                    LiveLog.lines.forEach { line ->
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
             }
         }
     }

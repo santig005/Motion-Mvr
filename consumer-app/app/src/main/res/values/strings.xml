@@ -59,6 +59,10 @@
     <string name="live_connecting">Connecting…</string>
     <string name="live_fullscreen_enter">Fullscreen</string>
     <string name="live_fullscreen_exit">Exit fullscreen</string>
+    <string name="live_logs_title">Live logs</string>
+    <string name="log_share">Share</string>
+    <string name="log_clear">Clear</string>
+    <string name="log_empty">No logs yet — open Live and try switching to 2K; the diagnostics will appear here.</string>
 
     <!-- Camera setup (RTSP credentials, stored encrypted on-device) -->
     <string name="camera_settings_title">Camera setup</string>

@@ -59,6 +59,10 @@
     <string name="live_connecting">Conectando…</string>
     <string name="live_fullscreen_enter">Pantalla completa</string>
     <string name="live_fullscreen_exit">Salir de pantalla completa</string>
+    <string name="live_logs_title">Registros (en vivo)</string>
+    <string name="log_share">Compartir</string>
+    <string name="log_clear">Limpiar</string>
+    <string name="log_empty">Aún no hay registros — abre En vivo e intenta pasar a 2K; el diagnóstico aparecerá aquí.</string>
 
     <!-- Configuración de cámara (credenciales RTSP, guardadas cifradas en el dispositivo) -->
     <string name="camera_settings_title">Configurar cámara</string>

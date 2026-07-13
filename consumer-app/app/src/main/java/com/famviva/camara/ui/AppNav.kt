@@ -149,6 +149,7 @@ fun AppNav(
         composable("days") { DaysScreen(vm, nav) }
         composable("live") { LiveScreen(nav) }
         composable("camera_settings") { CameraSettingsScreen(nav) }
+        composable("live_logs") { LiveLogScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
         composable("storage") { StorageScreen(vm, nav) }
         composable("battery/{camera}") { entry ->
