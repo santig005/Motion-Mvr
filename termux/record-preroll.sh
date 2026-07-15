@@ -170,13 +170,28 @@ write_metrics_row(){ # $1=final file  $2=yavg_max  $3=yavg_mean  $4=motion_frame
   log "📊 $(basename "$f") dur=${dur}s yavg_max=$mx motion_frames=$n -> gallery"
 }
 
-# Profiles the REAL motion over the window [offset, offset+dur] of the concat (the 2K itself).
+# Picks a crop (w:h:x:y) that actually FITS a frame of width $1: the 2K METRIC_CROP when it fits,
+# else the 360p DET_CROP (used while recording the sub-stream), else none. An out-of-range crop makes
+# ffmpeg's decode fail and the metric come back 0 — which is what showed every sub-stream clip at the
+# lowest intensity. Checking (x + w) <= width picks the right one automatically.
+crop_for_width(){ # $1=frame width
+  local w="${1:-0}"
+  if [ -n "$METRIC_CROP" ] && awk -F: -v W="$w" '{exit !(($3+$1)<=W)}' <<<"$METRIC_CROP"; then
+    echo "$METRIC_CROP"
+  elif [ -n "$DET_CROP" ] && awk -F: -v W="$w" '{exit !(($3+$1)<=W)}' <<<"$DET_CROP"; then
+    echo "$DET_CROP"
+  else
+    echo ""
+  fi
+}
+
+# Profiles the REAL motion over the window [offset, offset+dur] of the concat (the recorded video).
 # A single decode that serves to (a) find the last motion and (b) compute the metrics.
 # Prints "m0 m1 cut mx mean n" (times relative to offset, in s) or "NOMOTION".
-profile_motion(){ # $1=concat_list  $2=offset  $3=dur
-  local list="$1" offset="$2" dur="$3"
+profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
+  local list="$1" offset="$2" dur="$3" crop="$4"
   ffmpeg -nostdin -loglevel info -f concat -safe 0 -i "$list" -ss "$offset" -t "$dur" -an \
-      -vf "fps=$DET_FPS,${METRIC_CROP:+crop=$METRIC_CROP,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
+      -vf "fps=$DET_FPS,${crop:+crop=$crop,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
       -f null - 2>&1 | awk -v th="$YAVG_TH" -v tp="$TAIL_PAD" '
         /pts_time:/         { ln=$0; sub(/.*pts_time:/,"",ln); sub(/[^0-9.].*/,"",ln); t=ln+0 }
         /signalstats.YAVG=/ { v=$0; sub(/.*YAVG=/,"",v); sub(/ .*/,"",v); v=v+0;
@@ -191,11 +206,12 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur
 # Records the 2K (RTSP_MAIN) normally. When the 2K link is too degraded to hold (FALLBACK_AFTER
 # short runs in a row — e.g. a weak-Wi-Fi spell), it drops to the much lighter sub-stream
 # (RTSP_DETECT, 360p) so we still capture SOMETHING instead of near-nothing, and re-probes the 2K
-# every RETRY_2K_SECS to switch back automatically once the link recovers. Clips recorded during a
-# sub-stream spell are low-res and (since METRIC_CROP is sized for the 2K) kept untrimmed — an
-# acceptable degradation vs. missing the footage entirely.
+# every RETRY_2K_SECS — even while the sub-stream is stable (see subcap below) — to switch back
+# automatically once the link recovers. Clips recorded during a sub-stream spell are low-res but are
+# still profiled/trimmed via the 360p DET_CROP (crop_for_width), so their motion intensity stays
+# real instead of collapsing to a spurious zero.
 segmenter_loop(){
-  local sfails=0 t0 ran delay mode="2K" src probe last_2k now
+  local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -205,11 +221,16 @@ segmenter_loop(){
       mode="2K"; probe=1; last_2k=$now; log "⤴ segmenter re-probing 2K (${RTSP_MAIN##*/})"
     fi
     [ "$mode" = "2K" ] && src="$RTSP_MAIN" || src="$RTSP_DETECT"
+    # On SUB, cap the run to RETRY_2K_SECS so the loop comes back to re-probe the 2K even if the
+    # sub-stream never drops. Without this, a *stable* 360p fallback keeps us off the 2K — and off
+    # its metrics — indefinitely (which is exactly how a clip stayed 360p for ~19h and every clip
+    # came out at "lowest intensity"). No cap on 2K: record it continuously.
+    subcap=""; [ "$mode" = "SUB" ] && subcap="-t $RETRY_2K_SECS"
     log "▶ segmenter connecting [$mode] ($(echo "$src"|sed 's#//[^@]*@#//...@#'))"
     t0=$(date +%s)
     ffmpeg -nostdin -loglevel error -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$src" \
       -c:v copy -c:a aac -f segment -segment_time "$SEG_TIME" -reset_timestamps 1 -strftime 1 \
-      "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1
+      $subcap "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1
     ran=$(( $(date +%s) - t0 ))
     if [ "$ran" -ge "$HEALTHY_SECS" ]; then
       sfails=0
@@ -249,9 +270,14 @@ build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to s
   local datedir; datedir="$OUT_DIR/$(date -d "@$clip_start" "+%Y/%m/%d" 2>/dev/null)"
   mkdir -p "$datedir"
   dst="$datedir/mt_${ts}.mp4"
-  # Profile the 2K (one decode) to find the last REAL motion and the tail to trim.
-  local prof m0 m1 cut mx mean n final_dur
-  prof=$(profile_motion "$list" "$offset" "$dur")
+  # Profile (one decode) to find the last REAL motion and the tail to trim. Pick the crop from the
+  # clip's actual width, so a sub-stream (360p) clip during a 2K-fallback spell still gets a real
+  # metric (via DET_CROP) instead of a spurious zero from the out-of-range 2K crop.
+  local prof m0 m1 cut mx mean n final_dur firstseg fw mcrop
+  firstseg=$(head -1 "$list" | sed "s/^file '//;s/'\$//")
+  fw=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 "$firstseg" 2>/dev/null)
+  mcrop=$(crop_for_width "${fw:-0}")
+  prof=$(profile_motion "$list" "$offset" "$dur" "$mcrop")
   if [ "$prof" = "NOMOTION" ] || [ -z "$prof" ]; then
     final_dur="$dur"; mx=0; mean=0; n=0; m1="NA"
     log "… no measurable motion on 2K for mt_${ts}; keeping full window (${dur}s)"
