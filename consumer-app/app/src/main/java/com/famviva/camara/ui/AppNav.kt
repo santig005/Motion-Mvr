@@ -124,8 +124,9 @@ import com.famviva.camara.data.humanSize
 import com.famviva.camara.data.prettyDate
 import com.famviva.camara.data.relativeLabel
 import com.famviva.camara.data.uploadDelayLabel
+import com.famviva.camara.data.AwayMode
+import com.famviva.camara.data.AwayModeStore
 import com.famviva.camara.media.ClipActions
-import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -160,6 +161,7 @@ fun AppNav(
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
         composable("live") { LiveScreen(nav) }
+        composable("away_settings") { AwayModeScreen(nav) }
         composable("camera_settings") { CameraSettingsScreen(nav) }
         composable("live_logs") { LiveLogScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
@@ -201,14 +203,20 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
 
     // Away/Home is read by the background poll (NewClipsWorker) straight from the store, so the menu
     // toggles it there directly — no ViewModel round-trip (same as the language switch below).
-    val notifyStore = remember { NotifyStore(context) }
-    var away by remember { mutableStateOf(notifyStore.away) }
+    val awayStore = remember { AwayModeStore(context) }
+    var awayMode by remember { mutableStateOf(awayStore.mode) }
+    var manualAway by remember { mutableStateOf(awayStore.manualAway) }
 
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
 
     Box {
-        IconButton(onClick = { expanded = true }) {
+        IconButton(onClick = {
+            // Re-read on open so the checkmark reflects changes made in the away-settings screen.
+            awayMode = awayStore.mode
+            manualAway = awayStore.manualAway
+            expanded = true
+        }) {
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -249,19 +257,23 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
             HorizontalDivider()
 
             MenuSectionLabel(stringResource(R.string.away_menu_title))
-            fun pickMode(target: Boolean, toastRes: Int) {
+            fun pickManual(target: Boolean, toastRes: Int) {
                 expanded = false
-                if (away != target) {
-                    away = target
-                    notifyStore.away = target
-                    Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
-                }
+                awayStore.mode = AwayMode.MANUAL
+                awayStore.manualAway = target
+                awayMode = AwayMode.MANUAL
+                manualAway = target
+                Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
             }
-            CheckableMenuItem(R.string.away_home, selected = !away) {
-                pickMode(false, R.string.away_home_toast)
+            CheckableMenuItem(R.string.away_home, selected = awayMode == AwayMode.MANUAL && !manualAway) {
+                pickManual(false, R.string.away_home_toast)
             }
-            CheckableMenuItem(R.string.away_away, selected = away) {
-                pickMode(true, R.string.away_away_toast)
+            CheckableMenuItem(R.string.away_away, selected = awayMode == AwayMode.MANUAL && manualAway) {
+                pickManual(true, R.string.away_away_toast)
+            }
+            CheckableMenuItem(R.string.away_auto, selected = awayMode == AwayMode.AUTO) {
+                expanded = false
+                nav.navigate("away_settings")
             }
             HorizontalDivider()
 

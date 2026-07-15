@@ -66,6 +66,14 @@ dependencies {
     // Google sign-in + Authorization API (OAuth token for Drive)
     implementation("com.google.android.gms:play-services-auth:21.3.0")
 
+    // Fused location: powers the automatic (geofence-style) away mode — the poll checks distance
+    // from a saved home. No OS geofencing needed since alerts already come from the 15-min poll.
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // OpenStreetMap map for the away-mode home picker (no API key / billing, unlike Google Maps):
+    // shows the saved home and its radius so the user can confirm the spot.
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
+
     // HTTP client for the Drive REST API
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

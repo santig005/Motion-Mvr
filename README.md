@@ -85,6 +85,10 @@ See [`frigate/`](frigate/): point it at the same RTSP URLs and run `docker compo
   restarts everything after a reboot; camera "stuck" states are handled with staggered backoff.
 - **Health surfacing** — the NVR writes a `status.json` (recording fresh? battery? charging?) that
   the app turns into banners and notifications ("camera down — power-cycle it").
+- **More than a viewer** — the app also does a **live RTSP view** (SD/2K, fullscreen, works remotely
+  over Tailscale), **live snapshots**, **photo alerts** that open the live view, presence-based
+  **Home/Away** alerting (manual or by location), offline downloads, a storage breakdown, favorites,
+  and per-camera battery forecasts.
 
 ## Notes
 

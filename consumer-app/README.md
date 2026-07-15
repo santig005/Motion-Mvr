@@ -14,12 +14,22 @@ The UI is available in **English and Spanish**, switchable at runtime from the t
   sibling `mt_*.jpg` thumbnail and enriches it from `metrics.csv` (exact duration, motion intensity).
 - **Playback:** Media3/ExoPlayer, progressive streaming of `?alt=media` with an
   `Authorization: Bearer <token>` header (works because the NVR muxes with `+faststart`).
+- **Live view:** direct RTSP to the camera over the LAN (Media3), SD ↔ HD (2K), mute, fullscreen, on
+  a single reused player; a shareable in-app diagnostics log; credentials stored **encrypted**. Works
+  remotely over Tailscale.
+- **Snapshot:** grabs the current live frame (`PixelCopy`) and saves it to the gallery.
+- **Away mode:** a Home/Away gate for **motion** alerts — manual, or automatic by location (saved
+  home + radius, evaluated on the poll). Health alerts are never gated.
+- **Offline & storage:** optional auto-download (off / Wi-Fi / + mobile data), a local-vs-Drive
+  storage breakdown, and starrable favorites that survive batch deletes.
+- **Battery:** per-camera history chart and a "lasts until" ETA.
 - **Health:** reads each camera's `status.json` and surfaces "camera down / not reporting / low
-  battery" as banners and notifications.
+  battery" as banners and **photo** notifications; tapping a new-clip alert opens the live view.
 - **Localization:** UI strings live in `res/values/` (English) and `res/values-es/` (Spanish); the
   in-app switch uses AppCompat per-app locales.
 
-Screens: **Days** → **Clips of a day** → **Player**.
+Screens: **Days** → **Clips of a day** → **Player**, plus **Live**, **Away mode**, **Storage**,
+**Favorites**, and **Battery**.
 
 ## Requirements
 
@@ -64,5 +74,8 @@ gradlew :app:assembleDebug
 
 - Instant push (FCM) instead of the ~15-min WorkManager poll.
 - Distinguish clips per camera (today it groups every `mt_`).
-- Listing cache + incremental refresh.
+- True OS geofencing for away mode (today it's a location check on the poll).
 - "Person" label once Frigate is in the loop.
+
+Recorded-clip capture from the live view was considered and dropped: the NVR already records exactly
+the motion you'd want, so it added no value over the live snapshot.

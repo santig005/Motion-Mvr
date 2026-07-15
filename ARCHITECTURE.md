@@ -112,11 +112,34 @@ A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choice
 - **Playback in-app.** Media3/ExoPlayer streams the raw bytes from `?alt=media` with an
   `Authorization: Bearer` header. This works precisely because the NVR muxes with `+faststart`
   (the moov atom is at the front), so progressive streaming starts immediately.
-- **Screens:** Days → Clips of a day → Player. Plus day/period filters, unseen-clip tracking,
-  pull-to-refresh, long-press to share/download, and a motion-intensity meter.
+- **Live view (direct to the camera).** Separate from the recorded clips, the app can open the
+  camera's **RTSP stream directly** over the LAN (Media3 `RtspMediaSource`, TCP transport), so it
+  doesn't depend on the NVR phone being up. It switches SD (360p sub-stream) ↔ HD (2K main), mutes,
+  and goes fullscreen on a **single long-lived ExoPlayer** whose source is swapped in place —
+  recreating the player broke the video Surface hand-off and froze the picture, so "playing" is
+  signalled by the first rendered frame and a watchdog reconnects if none arrives. An in-app
+  diagnostics log can be shared (e.g. to WhatsApp) without adb. Camera credentials are stored
+  **encrypted** (EncryptedSharedPreferences); remote access works by putting the phone and camera on
+  a Tailscale network.
+- **Snapshot from live.** A shutter button grabs the current frame straight off the video surface
+  (`PixelCopy`, no player/Surface changes) and saves a JPEG to the gallery.
+- **Presence-aware alerts (away mode).** Motion notifications are gated by a Home/Away state: muted
+  at Home, delivered when Away (health warnings are never gated). It can be set manually or
+  **automatically by location** — the background poll compares the current fix against a saved home
+  radius. No OS geofencing: the alerts are already poll-driven, so a 15-min location check is enough
+  and avoids a receiver + reboot re-registration.
+- **Offline & storage.** New clips can auto-download for offline playback (off / Wi-Fi only / Wi-Fi
+  + mobile data). A storage screen shows the on-device vs. Drive footprint as a per-day donut, and
+  clips can be starred as **favorites** that survive batch deletes.
+- **Battery forecast.** For each camera the app charts the battery history and shows a "lasts until"
+  ETA, cross-checking the NVR's own estimate against a local fit.
+- **Screens:** Days → Clips of a day → Player, plus Live, Away-mode setup, Storage, Favorites,
+  Battery, and the in-app live-log viewer. Day/period filters, unseen-clip tracking, pull-to-refresh,
+  long-press share/download, a motion-intensity meter, and per-clip upload latency run throughout.
 - **Notifications.** A ~15-minute WorkManager poll compares the newest clip against the last one it
-  announced and posts a notification for new clips or health issues. (A future push path would have
-  the NVR notify via FCM for instant alerts.)
+  announced and posts a **photo (BigPicture)** notification for new clips — tapping it jumps to the
+  live view — plus separate health alerts. Motion alerts respect the away state above. (A future push
+  path would have the NVR notify via FCM for instant alerts.)
 - **Localization.** UI strings live in Android resources with English (`values/`) and Spanish
   (`values-es/`) translations; an in-app switch selects the locale at runtime.
 

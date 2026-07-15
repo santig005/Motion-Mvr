@@ -10,8 +10,11 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.famviva.camara.R
 import com.famviva.camara.auth.headlessDriveToken
+import com.famviva.camara.data.AwayMode
+import com.famviva.camara.data.AwayModeStore
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.LocationProvider
 import com.famviva.camara.data.OfflineStore
 import java.util.concurrent.TimeUnit
 
@@ -25,6 +28,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val token = headlessDriveToken(applicationContext) ?: return Result.success()
         val drive = DriveClient(tokenProvider = { token }, onUnauthorized = {})
         val store = NotifyStore(applicationContext)
+        val awayStore = AwayModeStore(applicationContext)
         val offline = OfflineStore(applicationContext)
         val ctx = applicationContext
 
@@ -40,7 +44,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     if (newOnes.isNotEmpty()) {
                         // Only alert on motion while Away. Still advance the baseline (so switching to
                         // Away later doesn't dump the backlog) and still auto-download regardless.
-                        if (store.away) {
+                        if (awayEffective(ctx, awayStore)) {
                             val newestClip = recent.first()   // newest overall = newest of the new ones
                             val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
                             Notifications.notifyNewClips(ctx, newOnes.size, newestClip.time, thumb)
@@ -84,6 +88,26 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         return Result.success()
     }
+
+    /**
+     * Are motion alerts enabled right now? MANUAL uses the user's toggle; AUTO compares the current
+     * location against the saved home radius (Away when outside). When AUTO can't get a fix (no
+     * permission / no cached location yet) it keeps the previous decision, and with no home saved it
+     * assumes Away so alerts aren't silently lost.
+     */
+    private suspend fun awayEffective(context: Context, store: AwayModeStore): Boolean =
+        when (store.mode) {
+            AwayMode.MANUAL -> store.manualAway
+            AwayMode.AUTO -> {
+                if (!store.hasHome()) {
+                    true
+                } else {
+                    val dist = LocationProvider.lastLocation(context)?.let { store.distanceFromHome(it) }
+                    if (dist == null) store.lastAutoAway
+                    else (dist > store.homeRadiusM).also { store.lastAutoAway = it }
+                }
+            }
+        }
 
     companion object {
         private const val WORK_NAME = "new-clips-poll"

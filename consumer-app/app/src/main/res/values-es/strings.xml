@@ -131,12 +131,41 @@
     <string name="auto_download_data_toast">Auto-descarga con Wi-Fi y datos móviles: los clips nuevos se descargan en cualquier red (consume tu plan de datos).</string>
     <string name="auto_download_disabled_toast">Auto-descarga desactivada.</string>
 
-    <!-- Modo ausente (manual; controla las alertas de movimiento) -->
+    <!-- Modo ausente: controla las alertas de movimiento. Manual (Casa/Ausente) + automático (ubicación). -->
     <string name="away_menu_title">Alertas de movimiento</string>
     <string name="away_home">En casa — en silencio</string>
     <string name="away_away">Ausente — con alertas</string>
+    <string name="away_auto">Automático (ubicación)</string>
     <string name="away_home_toast">Modo en casa: alertas de movimiento en silencio (los avisos de salud siguen llegando).</string>
     <string name="away_away_toast">Modo ausente: alertas de movimiento activadas.</string>
+    <!-- Pantalla de ajustes del modo ausente -->
+    <string name="away_settings_title">Modo ausente</string>
+    <string name="away_settings_intro">El modo automático activa las alertas de movimiento cuando sales de casa y las silencia al volver. Revisa tu ubicación en cada actualización en segundo plano; no hay seguimiento en vivo.</string>
+    <string name="away_step_permission">1 · Acceso a ubicación</string>
+    <string name="away_perm_needed">El modo automático necesita acceso a la ubicación.</string>
+    <string name="away_perm_grant">Dar acceso a la ubicación</string>
+    <string name="away_perm_granted_foreground">Acceso a la ubicación concedido.</string>
+    <string name="away_perm_granted_all">Acceso a la ubicación concedido (siempre).</string>
+    <string name="away_perm_allow_all">Permitir siempre</string>
+    <string name="away_step_home">2 · Ubicación de casa</string>
+    <string name="away_home_not_set">Aún no has fijado tu casa.</string>
+    <string name="away_home_set">Casa guardada.</string>
+    <string name="away_set_home">Usar mi ubicación actual como casa</string>
+    <string name="away_set_home_again">Actualizar casa a mi ubicación actual</string>
+    <string name="away_locating">Ubicando…</string>
+    <string name="away_radius_label">Radio de casa</string>
+    <string name="away_radius_value">%d m</string>
+    <string name="away_home_marker">Casa</string>
+    <string name="away_map_hint">Arrastra para explorar · el círculo es el radio de ausencia</string>
+    <string name="away_auto_enable">Modo automático (por ubicación)</string>
+    <string name="away_auto_enable_hint">Ausente cuando sales, en silencio en casa.</string>
+    <string name="away_auto_needs_setup">Primero da acceso a la ubicación y fija tu casa.</string>
+    <string name="away_auto_bg_hint">Consejo: permite la ubicación «siempre» para que funcione con la app cerrada.</string>
+    <string name="away_current_state">Ahora: %s</string>
+    <string name="away_state_away">Ausente — con alertas</string>
+    <string name="away_state_home">En casa — en silencio</string>
+    <string name="away_home_saved_toast">Ubicación de casa guardada.</string>
+    <string name="away_home_failed_toast">No se pudo obtener tu ubicación. Inténtalo al aire libre.</string>
 
     <!-- Salud de la cámara -->
     <string name="status_down_title">⚠️ %s sin señal</string>

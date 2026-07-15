@@ -132,12 +132,41 @@
     <string name="auto_download_data_toast">Auto-download on Wi-Fi and mobile data: new clips download anywhere (uses your data plan).</string>
     <string name="auto_download_disabled_toast">Auto-download disabled.</string>
 
-    <!-- Away mode (manual; motion-alert gate) -->
+    <!-- Away mode: motion-alert gate. Manual (Home/Away) + automatic (location). -->
     <string name="away_menu_title">Motion alerts</string>
     <string name="away_home">At home — muted</string>
     <string name="away_away">Away — alerts on</string>
+    <string name="away_auto">Automatic (location)</string>
     <string name="away_home_toast">Home mode: motion alerts muted (health warnings still notify).</string>
     <string name="away_away_toast">Away mode: motion alerts are on.</string>
+    <!-- Away-mode settings screen -->
+    <string name="away_settings_title">Away mode</string>
+    <string name="away_settings_intro">Automatic mode turns motion alerts on when you leave home and mutes them when you\'re back. It checks your location on each background update — no live tracking.</string>
+    <string name="away_step_permission">1 · Location access</string>
+    <string name="away_perm_needed">Automatic mode needs location access.</string>
+    <string name="away_perm_grant">Grant location access</string>
+    <string name="away_perm_granted_foreground">Location access granted.</string>
+    <string name="away_perm_granted_all">Location access granted (all the time).</string>
+    <string name="away_perm_allow_all">Allow all the time</string>
+    <string name="away_step_home">2 · Home location</string>
+    <string name="away_home_not_set">Home isn\'t set yet.</string>
+    <string name="away_home_set">Home saved.</string>
+    <string name="away_set_home">Use my current location as home</string>
+    <string name="away_set_home_again">Update home to my current location</string>
+    <string name="away_locating">Locating…</string>
+    <string name="away_radius_label">Home radius</string>
+    <string name="away_radius_value">%d m</string>
+    <string name="away_home_marker">Home</string>
+    <string name="away_map_hint">Drag to explore · the circle is the away radius</string>
+    <string name="away_auto_enable">Automatic mode (by location)</string>
+    <string name="away_auto_enable_hint">Away when you\'re out, muted at home.</string>
+    <string name="away_auto_needs_setup">Grant location access and set your home first.</string>
+    <string name="away_auto_bg_hint">Tip: allow location \"all the time\" so it works while the app is closed.</string>
+    <string name="away_current_state">Right now: %s</string>
+    <string name="away_state_away">Away — alerts on</string>
+    <string name="away_state_home">At home — muted</string>
+    <string name="away_home_saved_toast">Home location saved.</string>
+    <string name="away_home_failed_toast">Couldn\'t get your location. Try again outdoors.</string>
 
     <!-- Camera health -->
     <string name="status_down_title">⚠️ %s no signal</string>
