@@ -66,6 +66,7 @@ METRIC_CROP="${METRIC_CROP:-760:1296:818:0}"
 LOG="${LOG:-$HOME/logs/cam1.motion.log}"
 METRICS="${METRICS:-$OUT_DIR/metrics.csv}"
 MWIN="$RING_DIR/.motion_windows"                  # motion windows (epoch): "start end"
+REC_STATE="$RING_DIR/.rec_state"                  # segmenter -> keeper: "MODE DROPS1H" (recording-quality signal for status.json)
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
@@ -76,6 +77,7 @@ BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA ext
 
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
+printf '2K 0\n' > "$REC_STATE" 2>/dev/null || true   # assume 2K until the segmenter says otherwise
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
@@ -155,6 +157,14 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
       extra="${extra},\"discharge_pct_per_h\":${eta% *},\"eta_minutes\":${eta#* }"
     fi
   fi
+  # Recording-quality signal (from the segmenter via REC_STATE): rec_mode = "2K" | "SUB",
+  # rec_2k_drops_1h = how many times the 2K flapped in the last hour. Lets the app flag "recording in
+  # 360p" or "2K unstable" instead of it going unnoticed now that fallback is automatic.
+  if [ -r "$REC_STATE" ]; then
+    local rmode rdrops
+    read -r rmode rdrops < "$REC_STATE" 2>/dev/null
+    [ -n "$rmode" ] && extra="${extra},\"rec_mode\":\"${rmode}\",\"rec_2k_drops_1h\":${rdrops:-0}"
+  fi
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
@@ -220,7 +230,7 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 # spell are low-res but still profiled/trimmed via the 360p DET_CROP (crop_for_width), so their
 # motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
-  local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0
+  local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0 d1h="" d1hn=0
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -254,11 +264,17 @@ segmenter_loop(){
       # FLAP_MAX_DROPS drops in the window (the ~10s-flapping case that sfails alone never catches).
       flaps=$(printf '%s\n%s' "$flaps" "$now" | awk -v n="$now" -v w="$FLAP_WINDOW_SECS" 'NF && (n-$1)<=w')
       flapn=$(printf '%s' "$flaps" | grep -c .)
+      d1h=$(printf '%s\n%s' "$d1h" "$now" | awk -v n="$now" 'NF && (n-$1)<=3600')   # 2K flap-drops in the last hour
       if [ "$probe" = 1 ] || [ "$sfails" -ge "$FALLBACK_AFTER" ] || [ "$flapn" -ge "$FLAP_MAX_DROPS" ]; then
         log "⤵ 2K unstable (${sfails} short-run, ${flapn} drops/${FLAP_WINDOW_SECS}s); recording sub-stream (${RTSP_DETECT##*/}) for now"
         mode="SUB"; last_2k=$(date +%s); sfails=0; flaps=""; flapn=0
       fi
     fi
+    # Publish the recording-quality signal for the keeper (-> status.json -> Drive -> app): current
+    # mode (2K/SUB) + how many times the 2K flapped in the last hour, so a silent drop to 360p (or a
+    # 2K that keeps failing) is visible instead of unnoticed.
+    d1h=$(printf '%s' "$d1h" | awk -v n="$now" 'NF && (n-$1)<=3600'); d1hn=$(printf '%s' "$d1h" | grep -c .)
+    printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
     log "!! segmenter dropped (ran ${ran}s, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
@@ -333,7 +349,7 @@ make_thumb(){ # $1=final mp4  $2=duration s
 
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
-  local rec_state="" last_hb=0 started rec_ok mt age
+  local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode
   started=$(date +%s)
   while true; do
     sleep 5
@@ -354,6 +370,13 @@ keeper_loop(){
       log "⚠️ RECORDING DOWN (no new segment for >${STALE_SECS}s) -> $HEALTH_FILE"
     elif [ "$((now - last_hb))" -ge "$HEARTBEAT_SECS" ]; then
       write_status "$rec_ok" 1; last_hb=$now                # heartbeat: refresh updated + battery + history sample
+    fi
+    # Recording quality changed (2K <-> SUB)? Push a status update now (don't wait for the heartbeat)
+    # so the app learns promptly that we dropped to 360p or recovered the 2K.
+    cur_mode=$(cut -d' ' -f1 "$REC_STATE" 2>/dev/null)
+    if [ -n "$cur_mode" ] && [ "$cur_mode" != "$rec_mode_seen" ]; then
+      [ -n "$rec_mode_seen" ] && log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
+      rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
     fi
     [ -z "$newest" ] && continue
     newest_start=$(seg_epoch "$(basename "$newest" .mp4)")
