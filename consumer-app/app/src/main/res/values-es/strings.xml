@@ -174,6 +174,10 @@
     <string name="status_stale_body">Último reporte %s. Revisa el teléfono (¿apagado o sin red?).</string>
     <string name="status_lowbatt_title">🔋 Batería baja: %d%%</string>
     <string name="status_lowbatt_body">Conecta el teléfono para no perder la grabación.</string>
+    <string name="status_sub_title">📉 %s grabando en 360p</string>
+    <string name="status_sub_body">El enlace 2K está muy inestable ahora, así que bajó a la resolución baja. Vuelve al 2K automáticamente cuando el enlace se recupera.</string>
+    <string name="status_2kflap_title">📶 2K inestable</string>
+    <string name="status_2kflap_body">El enlace 2K se cayó %d veces en la última hora. Sigue grabando en 2K, pero revisa el Wi-Fi de la cámara si continúa.</string>
     <string name="status_critical_title">🔋 Batería crítica: quedan ~%s</string>
     <string name="status_critical_body">Conecta el teléfono antes de que se apague.</string>
     <string name="status_recording">✅ %s grabando</string>

@@ -175,6 +175,10 @@
     <string name="status_stale_body">Last report %s. Check the phone (off or offline?).</string>
     <string name="status_lowbatt_title">🔋 Low battery: %d%%</string>
     <string name="status_lowbatt_body">Plug in the phone so recording doesn\'t stop.</string>
+    <string name="status_sub_title">📉 %s recording in 360p</string>
+    <string name="status_sub_body">The 2K link is too unstable right now, so it dropped to the low-res stream. It switches back automatically when the link recovers.</string>
+    <string name="status_2kflap_title">📶 2K unstable</string>
+    <string name="status_2kflap_body">The 2K link dropped %d times in the last hour. Still recording 2K, but check the camera Wi-Fi if it keeps happening.</string>
     <string name="status_critical_title">🔋 Battery critical: ~%s left</string>
     <string name="status_critical_body">Plug in the phone before it dies.</string>
     <string name="status_recording">✅ %s recording</string>

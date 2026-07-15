@@ -1588,6 +1588,18 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth, onOpenBatt
             title = stringResource(R.string.status_lowbatt_title, h.battery ?: 0),
             body = stringResource(R.string.status_lowbatt_body),
         )
+        h.recordingInSub -> StatusBanner(
+            bg = MaterialTheme.status.warningContainer,
+            fg = MaterialTheme.status.onWarningContainer,
+            title = stringResource(R.string.status_sub_title, h.camera),
+            body = stringResource(R.string.status_sub_body),
+        )
+        h.recording2kUnstable() -> StatusBanner(
+            bg = MaterialTheme.status.warningContainer,
+            fg = MaterialTheme.status.onWarningContainer,
+            title = stringResource(R.string.status_2kflap_title),
+            body = stringResource(R.string.status_2kflap_body, h.rec2kDropsLastHour ?: 0),
+        )
         else -> Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,

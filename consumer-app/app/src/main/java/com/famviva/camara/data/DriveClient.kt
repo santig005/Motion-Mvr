@@ -185,6 +185,8 @@ class DriveClient(
                             charging = if (j.has("charging")) j.optBoolean("charging") else null,
                             dischargePctPerHour = if (j.has("discharge_pct_per_h")) j.optDouble("discharge_pct_per_h") else null,
                             etaMinutes = if (j.has("eta_minutes")) j.optInt("eta_minutes") else null,
+                            recMode = if (j.has("rec_mode")) j.optString("rec_mode") else null,
+                            rec2kDropsLastHour = if (j.has("rec_2k_drops_1h")) j.optInt("rec_2k_drops_1h") else null,
                         )
                     }
                 }

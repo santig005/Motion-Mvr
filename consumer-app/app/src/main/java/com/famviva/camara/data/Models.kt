@@ -193,6 +193,12 @@ data class CameraHealth(
     /** Minutes until the battery reaches the NVR's floor threshold (~5%); null under the same
      *  conditions as [dischargePctPerHour]. */
     val etaMinutes: Int? = null,
+    /** Recording resolution the NVR is currently using: "2K" (main) or "SUB" (360p fallback when the
+     *  2K link is too unstable). null if the NVR doesn't report it (older builds). */
+    val recMode: String? = null,
+    /** How many times the 2K link flapped (short-lived drops) in the last hour. Visible even while
+     *  still recording 2K, as an early "2K is getting unstable" signal. null if not reported. */
+    val rec2kDropsLastHour: Int? = null,
 ) {
     /** true if there's been no report for more than [maxAgeSec] (default 3 h) -> phone probably off.
      *  The NVR heartbeat is every ~20 min and independent of whether there are videos, so "not
@@ -201,6 +207,14 @@ data class CameraHealth(
 
     /** Low battery and NOT charging. */
     val lowBattery: Boolean get() = battery != null && battery!! < 30 && charging != true
+
+    /** Recording in the 360p sub-stream because the 2K link was too unstable to hold. Still
+     *  recording — just at lower resolution — so this is a warning, not an outage. */
+    val recordingInSub: Boolean get() = recMode == "SUB"
+
+    /** The 2K link flapped at least [threshold] times in the last hour (early "2K getting unstable"
+     *  signal), even if it's currently back on 2K. */
+    fun recording2kUnstable(threshold: Int = 4): Boolean = (rec2kDropsLastHour ?: 0) >= threshold
 
     /** True when the NVR's own ETA estimate is under [thresholdMinutes] (default 2h) — a stronger
      *  signal than [lowBattery] since it accounts for how fast the battery is actually draining. */
