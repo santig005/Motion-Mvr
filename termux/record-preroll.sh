@@ -47,8 +47,15 @@ RING_KEEP_MIN="${RING_KEEP_MIN:-5}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-5}"           # consecutive connection failures before flagging the camera down
 HEALTHY_SECS="${HEALTHY_SECS:-8}"               # if a connection lasted >= this, count it as healthy (reset failures)
 RETRY_MAX="${RETRY_MAX:-60}"                     # cap of the retry backoff (s); avoids hammering the camera
-FALLBACK_AFTER="${FALLBACK_AFTER:-3}"           # consecutive short 2K runs before the segmenter drops to the sub-stream
+FALLBACK_AFTER="${FALLBACK_AFTER:-3}"           # consecutive short (<HEALTHY_SECS) 2K runs before dropping to the sub-stream
 RETRY_2K_SECS="${RETRY_2K_SECS:-180}"           # while on the sub-stream, re-probe the 2K this often to switch back
+# Flapping guard: the FALLBACK_AFTER path only catches runs that can't even hold HEALTHY_SECS. A
+# camera whose 2K link "connects, holds ~10s, drops, repeats" clears HEALTHY_SECS every time, so
+# sfails keeps resetting and it hammers the 2K forever (hundreds of drops/hour) instead of recording
+# a stable sub-stream. These vars add a rolling-window count so that pattern also falls back to SUB.
+SUSTAINED_2K_SECS="${SUSTAINED_2K_SECS:-90}"    # a 2K run lasting >= this = genuinely stable -> clears the flap history
+FLAP_WINDOW_SECS="${FLAP_WINDOW_SECS:-180}"     # rolling window (s) over which short-lived 2K drops are counted
+FLAP_MAX_DROPS="${FLAP_MAX_DROPS:-4}"           # that many 2K drops within FLAP_WINDOW_SECS -> fall back to the sub-stream
 DET_FPS="${DET_FPS:-6}"
 DET_CROP="${DET_CROP:-210:360:226:0}"
 DIFF_TH="${DIFF_TH:-20}"
@@ -203,15 +210,17 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 }
 
 # 1) SEGMENTER (supervised) -------------------------------------------------------
-# Records the 2K (RTSP_MAIN) normally. When the 2K link is too degraded to hold (FALLBACK_AFTER
-# short runs in a row — e.g. a weak-Wi-Fi spell), it drops to the much lighter sub-stream
-# (RTSP_DETECT, 360p) so we still capture SOMETHING instead of near-nothing, and re-probes the 2K
-# every RETRY_2K_SECS — even while the sub-stream is stable (see subcap below) — to switch back
-# automatically once the link recovers. Clips recorded during a sub-stream spell are low-res but are
-# still profiled/trimmed via the 360p DET_CROP (crop_for_width), so their motion intensity stays
-# real instead of collapsing to a spurious zero.
+# Records the 2K (RTSP_MAIN) normally. When the 2K link is too degraded to hold, it drops to the much
+# lighter sub-stream (RTSP_DETECT, 360p) so we still capture SOMETHING instead of near-nothing, and
+# re-probes the 2K every RETRY_2K_SECS — even while the sub-stream is stable (see subcap below) — to
+# switch back automatically once the link recovers. "Too degraded" is detected two ways: (a) runs
+# that can't even hold HEALTHY_SECS (FALLBACK_AFTER of them in a row), and (b) FLAP_MAX_DROPS 2K
+# drops within FLAP_WINDOW_SECS — the "connects, holds ~10s, drops, repeats" flapping that clears
+# HEALTHY_SECS every time and would otherwise never trigger (a). Clips recorded during a sub-stream
+# spell are low-res but still profiled/trimmed via the 360p DET_CROP (crop_for_width), so their
+# motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
-  local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap
+  local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -231,16 +240,23 @@ segmenter_loop(){
     ffmpeg -nostdin -loglevel error -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$src" \
       -c:v copy -c:a aac -f segment -segment_time "$SEG_TIME" -reset_timestamps 1 -strftime 1 \
       $subcap "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1
-    ran=$(( $(date +%s) - t0 ))
-    if [ "$ran" -ge "$HEALTHY_SECS" ]; then
-      sfails=0
-      [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a healthy probe -> stay on 2K
-    else
-      sfails=$((sfails+1))
-      # 2K keeps failing (or a 2K probe failed) -> fall back to the sub-stream.
-      if [ "$mode" = "2K" ] && { [ "$probe" = 1 ] || [ "$sfails" -ge "$FALLBACK_AFTER" ]; }; then
-        log "⤵ 2K unstable (${sfails} fails); recording sub-stream (${RTSP_DETECT##*/}) for now"
-        mode="SUB"; last_2k=$(date +%s); sfails=0
+    ran=$(( $(date +%s) - t0 )); now=$(date +%s)
+    # Short-run counter (the original signal: a run that can't even hold HEALTHY_SECS).
+    if [ "$ran" -lt "$HEALTHY_SECS" ]; then sfails=$((sfails+1)); else sfails=0; fi
+    if [ "$ran" -ge "$SUSTAINED_2K_SECS" ]; then
+      # A genuinely sustained run = real health -> forget past flaps. (A stable 2K holds minutes; a
+      # SUB run hits its RETRY_2K_SECS cap, which is >= SUSTAINED_2K_SECS, so it lands here too.)
+      flaps=""; flapn=0
+      [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a sustained probe -> stay on 2K
+    elif [ "$mode" = "2K" ]; then
+      # The 2K run dropped before it was ever sustained -> record a flap and keep only those within
+      # the rolling window. Falls back to SUB on: a failed probe, FALLBACK_AFTER short runs, OR
+      # FLAP_MAX_DROPS drops in the window (the ~10s-flapping case that sfails alone never catches).
+      flaps=$(printf '%s\n%s' "$flaps" "$now" | awk -v n="$now" -v w="$FLAP_WINDOW_SECS" 'NF && (n-$1)<=w')
+      flapn=$(printf '%s' "$flaps" | grep -c .)
+      if [ "$probe" = 1 ] || [ "$sfails" -ge "$FALLBACK_AFTER" ] || [ "$flapn" -ge "$FLAP_MAX_DROPS" ]; then
+        log "⤵ 2K unstable (${sfails} short-run, ${flapn} drops/${FLAP_WINDOW_SECS}s); recording sub-stream (${RTSP_DETECT##*/}) for now"
+        mode="SUB"; last_2k=$(date +%s); sfails=0; flaps=""; flapn=0
       fi
     fi
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
