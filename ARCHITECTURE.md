@@ -68,11 +68,22 @@ Cameras/<cam>/status.json
 
 ## Upload & retention
 
-`cloud-sync.sh` runs `rclone` on its own loop, mirroring the whole `Cameras/` tree to Google Drive.
-It intentionally does **not** use `--ignore-existing`: comparing size+modtime lets it re-upload
-anything that landed partial on a previous run (self-healing). It purges local files older than
-`LOCAL_KEEP_DAYS` **only after** a successful upload that cycle, and trims the cloud copy at
-`CLOUD_KEEP_DAYS`. No network ⇒ retry, and never delete locally.
+`cloud-sync.sh` runs `rclone` on its own loop, in **three lanes**:
+
+- **Fast lane** (every `SYNC_INTERVAL`, ~25 s): uploads only each camera's **today** folder
+  (plus yesterday's during the first 30 min after midnight, for clips that finalize across the
+  boundary). One Drive listing per camera per cycle — important because rclone's default shared
+  `client_id` has a tiny per-minute query quota, and re-listing the whole tree every cycle trips
+  403s; a 403 on a destination LIST makes rclone treat the folder as missing and *re-upload* it
+  (a cascade once re-sent 210 MiB and queued fresh clips ~17 min behind it). Scoping the fast lane
+  keeps the product zero-setup (no personal `client_id`) and shrinks a 403's blast radius to one day.
+- **Self-heal lane** (every `HEAL_EVERY`, ~1 h): the only full-tree pass, with `--fast-list`. It
+  intentionally does **not** use `--ignore-existing`: comparing size+modtime re-uploads anything
+  that landed partial on a previous run.
+- **Retention** (every `RETENTION_EVERY`, ~8 h, piggybacked on a heal pass): purges local files
+  older than `LOCAL_KEEP_DAYS` **only after** that just-confirmed full upload, and trims the cloud
+  copy at `CLOUD_KEEP_DAYS` — sparing clips listed in the app-published `favorites.json`.
+  No network ⇒ retry, and never delete locally.
 
 ## Resilience
 
@@ -83,7 +94,15 @@ anything that landed partial on a previous run (self-healing). It purges local f
 - **Boot script** (`boot-start-cam.sh`, via Termux:Boot) restarts the watchdog after a reboot.
 - **Stuck-camera handling.** Some cheap cameras wedge under connection churn (RTSP returns "invalid
   data" while ping still works). Retries use **staggered backoff** (capped) to avoid hammering it,
-  and the down state is surfaced to the app instead of silently spinning.
+  and the down state is surfaced to the app instead of silently spinning. A run only counts as
+  *healthy* if it actually **wrote a segment** — runs that hang at open for the RTSP timeout (~10 s)
+  and die empty count as failures, so the backoff engages during a bad spell instead of retrying
+  every 5 s forever.
+- **Truthful recording quality.** The segmenter records the 2K main stream and falls back to the
+  360p sub-stream when the 2K flaps; the current mode (`rec_mode`) + hourly 2K drop count are
+  published to `status.json` **mid-run** (once a connection sustains ~90 s), not when the run ends —
+  a stable run never ends, and waiting for it once left the app showing "360p" hours after the 2K
+  had recovered.
 
 ## Health signalling
 
@@ -117,7 +136,11 @@ A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choice
   doesn't depend on the NVR phone being up. It switches SD (360p sub-stream) ↔ HD (2K main), mutes,
   and goes fullscreen on a **single long-lived ExoPlayer** whose source is swapped in place —
   recreating the player broke the video Surface hand-off and froze the picture, so "playing" is
-  signalled by the first rendered frame and a watchdog reconnects if none arrives. An in-app
+  signalled by the first rendered frame and a watchdog reconnects if none arrives. Two behaviours
+  keep the viewer a good citizen of the camera's (often weak) Wi-Fi: backgrounding the app
+  **releases the RTSP session** (and reconnects on return) so no invisible zombie stream competes
+  with the NVR's recording, and **HD auto-falls back to SD** once its retry budget is spent instead
+  of hammering a saturated link with fresh 2K session bursts. An in-app
   diagnostics log can be shared (e.g. to WhatsApp) without adb. Camera credentials are stored
   **encrypted** (EncryptedSharedPreferences); remote access works by putting the phone and camera on
   a Tailscale network.
