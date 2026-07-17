@@ -49,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +72,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -281,6 +285,13 @@ private fun RtspLivePlayer(
     val snapshotFailed = stringResource(R.string.live_snapshot_failed)
     // Current quality label for logs; updated in the load effect (never log the URL — it has creds).
     var quality by remember { mutableStateOf(if (hd) "HD/ch0(2K)" else "SD/ch1(360p)") }
+    // Fresh views of the quality state for the (created-once) player listener: capturing the raw
+    // params there would freeze them at first composition.
+    val hdNow = rememberUpdatedState(hd)
+    val onQualityNow = rememberUpdatedState(onQuality)
+    // True while the app is backgrounded and we deliberately stopped the stream; gates the retry
+    // machinery so nothing reconnects until the user comes back.
+    var stoppedInBackground by remember { mutableStateOf(false) }
 
     val player = remember {
         LiveLog.add("creating single player")
@@ -313,7 +324,20 @@ private fun RtspLivePlayer(
                 }
                 override fun onPlayerError(e: PlaybackException) {
                     LiveLog.add("[$quality] ERROR code=${e.errorCodeName} msg=${e.message} cause=${e.cause}")
-                    if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+                    if (stoppedInBackground) return          // we stopped it on purpose; don't reconnect
+                    when {
+                        attempts < MAX_AUTO_RETRIES -> { attempts++; retryKey++ }
+                        // HD kept failing: drop to SD instead of a dead-end error. Retrying 2K
+                        // against a struggling link just multiplies the camera's load (each retry
+                        // is a fresh RTSP session asking for a 2-4 Mbps burst) — the same spiral
+                        // that froze live HD and knocked the NVR's recording over in July.
+                        hdNow.value -> {
+                            LiveLog.add("[$quality] HD keeps failing; auto-falling back to SD")
+                            attempts = 0
+                            onQualityNow.value(false)
+                        }
+                        else -> status = LiveStatus.ERROR
+                    }
                 }
             })
         }
@@ -321,8 +345,35 @@ private fun RtspLivePlayer(
     DisposableEffect(player) { onDispose { player.release() } }
     LaunchedEffect(player, muted) { player.volume = if (muted) 0f else 1f }
 
+    // Backgrounding must FREE the camera. Without this, Home/lock left the RTSP session streaming
+    // invisibly (a zombie viewer): it burns data and keeps competing with the NVR's recording
+    // sessions on the camera's weak Wi-Fi — the July "storm" windows all lined up with live-view
+    // usage. Stop on ON_STOP (Media3 sends TEARDOWN), reconnect automatically on return.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    LiveLog.add("[$quality] app backgrounded: releasing the live RTSP session")
+                    stoppedInBackground = true
+                    player.stop()
+                }
+                Lifecycle.Event.ON_START -> if (stoppedInBackground) {   // ignore the initial ON_START
+                    LiveLog.add("[$quality] app resumed: reconnecting live")
+                    stoppedInBackground = false
+                    attempts = 0
+                    retryKey++                                           // triggers the (re)load effect
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // (Re)load on a quality change (url) or a retry — swapping the source on the SAME player.
     LaunchedEffect(url, retryKey) {
+        if (stoppedInBackground) return@LaunchedEffect   // don't (re)connect while backgrounded
         quality = if (hd) "HD/ch0(2K)" else "SD/ch1(360p)"
         status = LiveStatus.CONNECTING
         LiveLog.add("loading quality=$quality attempt=$retryKey")
@@ -337,12 +388,21 @@ private fun RtspLivePlayer(
     // Reset the auto-retry budget when the user switches quality.
     LaunchedEffect(url) { attempts = 0 }
 
-    // Watchdog: no rendered frame within the window -> reconnect (or fall back to a manual retry).
+    // Watchdog: no rendered frame within the window -> reconnect; after the retry budget, HD falls
+    // back to SD (see onPlayerError) and only SD dead-ends into the manual-retry error state.
     LaunchedEffect(url, retryKey) {
         delay(WATCHDOG_MS)
-        if (status == LiveStatus.CONNECTING) {
+        if (status == LiveStatus.CONNECTING && !stoppedInBackground) {
             LiveLog.add("[$quality] watchdog: no frame after ${WATCHDOG_MS}ms, attempts=$attempts")
-            if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+            when {
+                attempts < MAX_AUTO_RETRIES -> { attempts++; retryKey++ }
+                hd -> {
+                    LiveLog.add("[$quality] HD keeps failing; auto-falling back to SD")
+                    attempts = 0
+                    onQuality(false)
+                }
+                else -> status = LiveStatus.ERROR
+            }
         }
     }
 
