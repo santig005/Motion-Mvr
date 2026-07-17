@@ -272,6 +272,7 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 # motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
   local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0 d1h="" d1hn=0
+  local fpid sustained newest produced
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -290,15 +291,36 @@ segmenter_loop(){
     t0=$(date +%s)
     ffmpeg -nostdin -loglevel error -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$src" \
       -c:v copy -c:a aac -f segment -segment_time "$SEG_TIME" -reset_timestamps 1 -strftime 1 \
-      $subcap "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1
+      $subcap "$RING_DIR/seg_%Y%m%d_%H%M%S.mp4" >>"$LOG" 2>&1 &
+    fpid=$!
+    # MID-RUN supervision. A stable run never exits, so publishing REC_STATE only after the run
+    # ends left it (-> status.json -> app) frozen on the PREVIOUS mode for hours: on 2026-07-16 the
+    # app still said "360p" 3h after the 2K had recovered. Once the run SUSTAINS, publish the mode
+    # and clear the flap history right away (and log the recovery the moment it is true).
+    sustained=0
+    while kill -0 "$fpid" 2>/dev/null; do
+      sleep 5
+      if [ "$sustained" = 0 ] && [ "$(( $(date +%s) - t0 ))" -ge "$SUSTAINED_2K_SECS" ]; then
+        sustained=1; flaps=""; flapn=0
+        d1h=$(printf '%s' "$d1h" | awk -v n="$(date +%s)" 'NF && (n-$1)<=3600'); d1hn=$(printf '%s' "$d1h" | grep -c .)
+        printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
+        [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a sustained probe -> stay on 2K
+      fi
+    done
+    wait "$fpid" 2>/dev/null
     ran=$(( $(date +%s) - t0 )); now=$(date +%s)
-    # Short-run counter (the original signal: a run that can't even hold HEALTHY_SECS).
-    if [ "$ran" -lt "$HEALTHY_SECS" ]; then sfails=$((sfails+1)); else sfails=0; fi
+    # HEALTH = the run actually WROTE a segment, not merely "lasted a while". A run that hangs at
+    # open for the RTSP timeout (~10s) produces nothing yet outlives HEALTHY_SECS — that kept
+    # resetting sfails, so the backoff below NEVER engaged and we hammered a struggling camera
+    # every 5s for hours (the July storm logs all read "failure 0").
+    produced=0
+    newest=$(ls -t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -1)
+    [ -n "$newest" ] && [ "$(stat -c %Y "$newest" 2>/dev/null || echo 0)" -ge "$t0" ] && produced=1
+    if [ "$ran" -lt "$HEALTHY_SECS" ] || [ "$produced" = 0 ]; then sfails=$((sfails+1)); else sfails=0; fi
     if [ "$ran" -ge "$SUSTAINED_2K_SECS" ]; then
-      # A genuinely sustained run = real health -> forget past flaps. (A stable 2K holds minutes; a
-      # SUB run hits its RETRY_2K_SECS cap, which is >= SUSTAINED_2K_SECS, so it lands here too.)
-      flaps=""; flapn=0
-      [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a sustained probe -> stay on 2K
+      # Sustained run: flap history already cleared (and REC_STATE published) mid-run. (A stable 2K
+      # holds minutes; a SUB run hits its RETRY_2K_SECS cap >= SUSTAINED_2K_SECS, so it lands here.)
+      :
     elif [ "$mode" = "2K" ]; then
       # The 2K run dropped before it was ever sustained -> record a flap and keep only those within
       # the rolling window. Falls back to SUB on: a failed probe, FALLBACK_AFTER short runs, OR
@@ -318,7 +340,7 @@ segmenter_loop(){
     printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
-    log "!! segmenter dropped (ran ${ran}s, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
+    log "!! segmenter dropped (ran ${ran}s, produced=${produced}, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
   done
 }
 
