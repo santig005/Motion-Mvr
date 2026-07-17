@@ -30,6 +30,10 @@
 #                           ~/.battery_hist_<cam>; NOT uploaded). Reset whenever charging=true.
 #   BATTERY_HIST_WINDOW_SECS regression window for the discharge-rate estimate (default: 14400 = 4h)
 #   BATTERY_FLOOR_PCT       battery % the ETA extrapolates to (default: 5)
+#   LOG_MAX_KB              cap on the cam log before it's trimmed to its newest half (default: 2048)
+#   DISK_FREE_MIN_MB        free-space floor; below it the oldest clips are pruned so a full disk
+#                           can't silently stop recording, and disk_free_mb is emitted to status.json
+#                           (default: 500)
 set -u
 ENV_FILE="${CAM_ENV:-$HOME/cam.env}"
 if [ -f "$ENV_FILE" ]; then . "$ENV_FILE"; fi
@@ -74,12 +78,47 @@ HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh 
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
 BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
 BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
+LOG_MAX_KB="${LOG_MAX_KB:-2048}"                                # cap on the cam log before it's trimmed to its newest half
+DISK_FREE_MIN_MB="${DISK_FREE_MIN_MB:-500}"                     # emergency floor: below this, prune oldest clips so recording never dies on a full disk
 
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
 printf '2K 0\n' > "$REC_STATE" 2>/dev/null || true   # assume 2K until the segmenter says otherwise
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+
+# Cap the (verbose, ffmpeg-fed) cam log so a long run can't fill the disk on its own — trims to the
+# newest half once it passes LOG_MAX_KB. Ported from cloud-sync.sh, which was the only log rotator.
+trim_log(){
+  local sz
+  sz=$(stat -c %s "$LOG" 2>/dev/null) || return 0
+  [ "$sz" -gt $((LOG_MAX_KB * 1024)) ] || return 0
+  tail -c $((LOG_MAX_KB * 1024 / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+}
+
+# Free space (MB) on the filesystem that holds the recordings. -Pk (POSIX, KiB) is the most portable
+# df form; convert to MB ourselves rather than rely on a -m flag that busybox df may not have.
+disk_free_mb(){ df -Pk "$OUT_DIR" 2>/dev/null | awk 'NR==2{print int($4/1024); exit}'; }
+
+# Last-resort space reclaim: if free space drops below DISK_FREE_MIN_MB, delete the OLDEST final
+# clips (mp4 + their jpg) until back above the floor, so a full disk never silently kills recording
+# (cloud-sync only purges local AFTER a confirmed upload; if Drive is down/full for days, OUT_DIR
+# grows unbounded). This can drop clips that haven't uploaded yet — a deliberate trade: losing the
+# oldest footage beats recording stopping entirely. Favourites are safe: cloud-sync keeps their Drive
+# original, so they're re-downloadable even if their local copy here is reclaimed.
+emergency_prune(){
+  local free removed=0 oldest
+  free=$(disk_free_mb); [ -z "$free" ] && return 0
+  [ "$free" -ge "$DISK_FREE_MIN_MB" ] && return 0
+  while [ -n "$free" ] && [ "$free" -lt "$DISK_FREE_MIN_MB" ]; do
+    oldest=$(ls -1tr "$OUT_DIR"/*/*/*/mt_*.mp4 2>/dev/null | head -n1)
+    [ -z "$oldest" ] && break
+    rm -f "$oldest" "${oldest%.mp4}.jpg"
+    removed=$((removed+1))
+    free=$(disk_free_mb)
+  done
+  [ "$removed" -gt 0 ] && log "🧯 disk low (<${DISK_FREE_MIN_MB}MB): emergency-pruned $removed oldest clip(s); free now ${free:-?}MB"
+}
 
 # NVR health -> status.json (cloud-sync uploads it; the app reads it). The recording signal is
 # SEGMENT FRESHNESS (are new seg_*.mp4 files appearing?), which is what actually matters. The keeper
@@ -165,6 +204,8 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     read -r rmode rdrops < "$REC_STATE" 2>/dev/null
     [ -n "$rmode" ] && extra="${extra},\"rec_mode\":\"${rmode}\",\"rec_2k_drops_1h\":${rdrops:-0}"
   fi
+  # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
+  local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
@@ -349,7 +390,7 @@ make_thumb(){ # $1=final mp4  $2=duration s
 
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
-  local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode
+  local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0
   started=$(date +%s)
   while true; do
     sleep 5
@@ -377,6 +418,10 @@ keeper_loop(){
     if [ -n "$cur_mode" ] && [ "$cur_mode" != "$rec_mode_seen" ]; then
       [ -n "$rec_mode_seen" ] && log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
       rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
+    fi
+    # Housekeeping (~once a minute): reclaim space if the disk is critically low and cap the log.
+    if [ "$((now - last_maint))" -ge 60 ]; then
+      emergency_prune; trim_log; last_maint=$now
     fi
     [ -z "$newest" ] && continue
     newest_start=$(seg_epoch "$(basename "$newest" .mp4)")

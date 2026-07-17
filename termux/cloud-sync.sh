@@ -4,6 +4,9 @@
 # from the detector (runs in its own tmux session). If there's no network it retries and does NOT
 # delete anything locally until the upload is confirmed.
 #
+# Favourites: the app writes a favorites.json (list of mt_* basenames) at the Drive root; the cloud
+# retention sweep excludes those clips so a starred clip's Drive original survives the purge.
+#
 # Expected layout (mirrored locally and on Drive):
 #   <CAMERAS_DIR>/cam1/YYYY/MM/DD/*.mp4   ->   <REMOTE>/cam1/YYYY/MM/DD/*.mp4
 #   <CAMERAS_DIR>/cam2/YYYY/MM/DD/*.mp4   ->   <REMOTE>/cam2/YYYY/MM/DD/*.mp4   ...
@@ -22,6 +25,7 @@ set -u
 [ -f "$HOME/cloud.env" ] && . "$HOME/cloud.env"
 CAMERAS_DIR="${CAMERAS_DIR:-/sdcard/Movies/Cameras}"
 REMOTE="${RCLONE_REMOTE:-gdrive:Cameras}"
+ROOT_REMOTE="${REMOTE%%:*}:"                      # same remote at its root (for favorites.json the app writes)
 LOCAL_KEEP_DAYS="${LOCAL_KEEP_DAYS:-7}"
 CLOUD_KEEP_DAYS="${CLOUD_KEEP_DAYS:-30}"
 INTERVAL="${SYNC_INTERVAL:-25}"
@@ -71,8 +75,23 @@ while true; do
         log "local retention: deleted $n files > ${LOCAL_KEEP_DAYS}d"
       fi
     fi
-    # Delete on Drive anything older than CLOUD_KEEP_DAYS (mp4 + thumbnails)
-    rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+    # Delete on Drive anything older than CLOUD_KEEP_DAYS (mp4 + thumbnails) — EXCEPT favourites.
+    # The app publishes favorites.json (a JSON list of mt_* basenames) at the Drive root; honour it
+    # so a starred clip's ORIGINAL survives the purge (re-streamable/re-downloadable on any device).
+    # Exclude rules go first (first match wins) so a favourite is spared before the *.mp4/*.jpg
+    # includes select it. A missing/empty/unreadable marker => the normal purge (fail-open).
+    fav_excl=""
+    favs=$(rclone cat "${ROOT_REMOTE}favorites.json" 2>/dev/null | grep -oE 'mt_[0-9]{8}_[0-9]{6}' | sort -u)
+    if [ -n "$favs" ]; then
+      fav_excl="$HOME/.fav_excludes"
+      printf '%s.*\n' $favs > "$fav_excl" 2>/dev/null    # one "mt_YYYYMMDD_HHMMSS.*" rule per favourite (mp4 + jpg)
+      log "cloud retention: sparing $(printf '%s\n' "$favs" | grep -c .) favourite(s) from the >${CLOUD_KEEP_DAYS}d purge"
+    fi
+    if [ -n "$fav_excl" ]; then
+      rclone delete "$REMOTE" --exclude-from "$fav_excl" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+    else
+      rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" >>"$LOG" 2>&1 || true
+    fi
     log "cloud retention sweep (removed Drive files > ${CLOUD_KEEP_DAYS}d)"
     last_retention=$now
   fi

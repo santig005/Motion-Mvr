@@ -17,8 +17,17 @@ INTERVAL="${WATCH_INTERVAL:-120}"                 # how often (seconds) it check
 LOG="${WATCH_LOG:-$HOME/logs/watchdog.log}"
 RING_DIR="${RING_DIR:-/sdcard/Movies/.ring/cam1}"  # segmenter ring (must match cam1.env)
 STALE_KICK="${STALE_KICK:-150}"                   # seconds without a new segment (cam1 alive) before force-restarting ffmpeg
+LOG_MAX_KB="${LOG_MAX_KB:-1024}"                  # cap on watchdog.log before it's trimmed to its newest half
 mkdir -p "$(dirname "$LOG")"
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# Nothing else rotates this log; cap it so a long uptime can't grow it unbounded (trim to newest half).
+trim_log(){
+  local sz
+  sz=$(stat -c %s "$LOG" 2>/dev/null) || return 0
+  [ "$sz" -gt $((LOG_MAX_KB * 1024)) ] || return 0
+  tail -c $((LOG_MAX_KB * 1024 / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+}
 
 ensure_session(){ # $1=session name  $2=command to run
   if ! tmux has-session -t "$1" 2>/dev/null; then
@@ -49,5 +58,6 @@ while true; do
   ensure_session cam1  "cd ~ && CAM_ENV=\$HOME/cam1.env exec ./record-preroll.sh"
   ensure_session cloud "cd ~ && exec ./cloud-sync.sh"
   kick_stuck_segmenter
+  trim_log
   sleep "$INTERVAL"
 done
