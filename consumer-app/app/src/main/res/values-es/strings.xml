@@ -22,6 +22,10 @@
     <string name="filter_yesterday">Ayer</string>
     <string name="filter_week">7 días</string>
 
+    <!-- Chips de filtro por contenido (lista de clips) -->
+    <string name="filter_strong_only">Solo fuertes</string>
+    <string name="filter_new_only">Nuevos</string>
+
     <!-- Franjas del día -->
     <string name="period_all">Todas</string>
     <string name="period_late_night">Madrugada</string>
@@ -138,6 +142,10 @@
     <string name="away_auto">Automático (ubicación)</string>
     <string name="away_home_toast">Modo en casa: alertas de movimiento en silencio (los avisos de salud siguen llegando).</string>
     <string name="away_away_toast">Modo ausente: alertas de movimiento activadas.</string>
+    <string name="away_chip_auto">auto</string>
+    <string name="quiet_hours">🌙 Silenciar de noche (23–7)</string>
+    <string name="quiet_hours_on_toast">Alertas de movimiento en silencio de noche (23–7). Los avisos de salud siguen llegando.</string>
+    <string name="quiet_hours_off_toast">Silencio nocturno desactivado: las alertas de movimiento suenan a cualquier hora.</string>
     <!-- Pantalla de ajustes del modo ausente -->
     <string name="away_settings_title">Modo ausente</string>
     <string name="away_settings_intro">El modo automático activa las alertas de movimiento cuando sales de casa y las silencia al volver. Revisa tu ubicación en cada actualización en segundo plano; no hay seguimiento en vivo.</string>
@@ -238,6 +246,12 @@
     <string name="health_no_signal">%s: sin señal (no está grabando)</string>
     <string name="health_not_reporting">%s: sin reportar (revisa el teléfono)</string>
     <string name="health_low_battery">%1$s: batería baja %2$d%% (conéctalo)</string>
+    <string name="health_disk_low">%1$s: almacenamiento casi lleno (%2$.1f GB libres)</string>
+
+    <!-- Resumen diario -->
+    <string name="notif_digest_title">📸 Resumen del día</string>
+    <string name="notif_digest_peak">pico %1$s</string>
+    <string name="notif_digest_strongest">Más fuerte a las %1$s</string>
 
     <!-- Plurales -->
     <plurals name="events">

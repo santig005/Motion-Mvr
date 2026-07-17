@@ -46,8 +46,11 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -126,6 +129,7 @@ import com.famviva.camara.data.relativeLabel
 import com.famviva.camara.data.uploadDelayLabel
 import com.famviva.camara.data.AwayMode
 import com.famviva.camara.data.AwayModeStore
+import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
@@ -197,7 +201,7 @@ fun AppNav(
  * direct icon (it's the most frequent action).
  */
 @Composable
-private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
+private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayChanged: () -> Unit = {}) {
     val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
 
@@ -207,6 +211,11 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
     var awayMode by remember { mutableStateOf(awayStore.mode) }
     var manualAway by remember { mutableStateOf(awayStore.manualAway) }
 
+    // Quiet-hours (mute motion alerts at night) is read by the background poll straight from the
+    // store, so the menu toggles it there directly — same pattern as away/language.
+    val notifyStore = remember { NotifyStore(context) }
+    var quietHours by remember { mutableStateOf(notifyStore.quietHours) }
+
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
 
@@ -215,6 +224,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
             // Re-read on open so the checkmark reflects changes made in the away-settings screen.
             awayMode = awayStore.mode
             manualAway = awayStore.manualAway
+            quietHours = notifyStore.quietHours
             expanded = true
         }) {
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
@@ -263,6 +273,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
                 awayStore.manualAway = target
                 awayMode = AwayMode.MANUAL
                 manualAway = target
+                onAwayChanged()
                 Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
             }
             CheckableMenuItem(R.string.away_home, selected = awayMode == AwayMode.MANUAL && !manualAway) {
@@ -274,6 +285,16 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController) {
             CheckableMenuItem(R.string.away_auto, selected = awayMode == AwayMode.AUTO) {
                 expanded = false
                 nav.navigate("away_settings")
+            }
+            CheckableMenuItem(R.string.quiet_hours, selected = quietHours) {
+                val target = !quietHours
+                notifyStore.quietHours = target
+                quietHours = target
+                Toast.makeText(
+                    context,
+                    context.getString(if (target) R.string.quiet_hours_on_toast else R.string.quiet_hours_off_toast),
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             HorizontalDivider()
 
@@ -322,6 +343,12 @@ private fun CheckableMenuItem(labelRes: Int, selected: Boolean, onClick: () -> U
 private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
     LaunchedEffect(Unit) { if (!vm.loadedOnce) vm.load() }
 
+    val context = LocalContext.current
+    // Away state surfaced as a chip (safety-relevant, was buried in ⋮). Bumped when the overflow
+    // toggles it so the chip re-reads; it also re-reads on return from the away-settings screen.
+    val awayStore = remember { AwayModeStore(context) }
+    var awayRefresh by remember { mutableStateOf(0) }
+
     val days = vm.clipsByDay()
     val totalEvents = days.sumOf { it.second.size }
     val totalBytes = days.sumOf { pair -> pair.second.sumOf { it.sizeBytes } }
@@ -344,7 +371,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
                     }
-                    HomeOverflowMenu(vm, nav)
+                    HomeOverflowMenu(vm, nav, onAwayChanged = { awayRefresh++ })
                 },
             )
         },
@@ -360,6 +387,8 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     Spacer(Modifier.width(8.dp))
                 }
             }
+
+            AwayModeChip(awayStore, awayRefresh) { nav.navigate("away_settings") }
 
             vm.cameraHealth.forEach { h ->
                 CameraStatusCard(h, onOpenBattery = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null)
@@ -547,28 +576,19 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
                 }
                 Spacer(Modifier.height(8.dp))
 
+                // The donut folds days past the palette into a single "Other" wedge, but the legend
+                // lists every day individually (each tappable/deletable). Days beyond the palette
+                // share the neutral "Other" hue — they're the "Other" wedge, broken out by day.
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    itemsIndexed(head, key = { _, it -> it.first }) { i, (day, bytes) ->
+                    itemsIndexed(ranked, key = { _, it -> it.first }) { i, (day, bytes) ->
                         StorageLegendRow(
-                            color = palette[i],
+                            color = if (i < palette.size) palette[i] else otherColor,
                             label = prettyDate(context, day),
                             bytes = bytes,
                             percent = percentLabel(context, bytes, totalBytes),
                             onClick = { nav.navigate("storage_day/${section.name}/$day") },
                             onDelete = if (isLocal) ({ confirmDeleteDay = day }) else null,
                         )
-                    }
-                    if (tailBytes > 0) {
-                        item(key = "__other__") {
-                            StorageLegendRow(
-                                color = otherColor,
-                                label = stringResource(R.string.storage_other),
-                                bytes = tailBytes,
-                                percent = percentLabel(context, tailBytes, totalBytes),
-                                onClick = null,
-                                onDelete = null,
-                            )
-                        }
                     }
                 }
 
@@ -708,7 +728,7 @@ private fun StorageLegendRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (onDelete != null) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                 Icon(
                     Icons.Outlined.Delete,
                     contentDescription = stringResource(R.string.action_delete),
@@ -864,7 +884,7 @@ private fun StorageClipRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (onDelete != null) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                 Icon(
                     Icons.Outlined.Delete,
                     contentDescription = stringResource(R.string.action_delete),
@@ -882,7 +902,13 @@ private fun ConfirmDialog(title: String, body: String, onConfirm: () -> Unit, on
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = { Text(body) },
-        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.action_delete)) } },
+        confirmButton = {
+            // Destructive action in the error colour so "Delete" reads as the consequential choice.
+            TextButton(
+                onClick = onConfirm,
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) { Text(stringResource(R.string.action_delete)) }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
     )
 }
@@ -898,6 +924,8 @@ private fun ClipsScreen(
     val context = LocalContext.current
     var newestFirst by rememberSaveable { mutableStateOf(true) }
     var periodName by rememberSaveable { mutableStateOf<String?>(null) }
+    var strongOnly by rememberSaveable { mutableStateOf(false) }
+    var newOnly by rememberSaveable { mutableStateOf(false) }
     val selectedPeriod = periodName?.let { name -> DayPeriod.entries.firstOrNull { it.name == name } }
 
     // Token to authorize thumbnail loading and downloads (Drive).
@@ -910,6 +938,8 @@ private fun ClipsScreen(
     val dayClips = vm.clipsOf(day)
     val clips = dayClips
         .filter { selectedPeriod == null || it.period == selectedPeriod }
+        .filter { !strongOnly || (it.intensityLevel ?: 0) >= 4 }
+        .filter { !newOnly || vm.isNew(it) }
         .let { list -> if (newestFirst) list.sortedByDescending { it.name } else list.sortedBy { it.name } }
 
     Scaffold(
@@ -950,6 +980,24 @@ private fun ClipsScreen(
                     )
                     Spacer(Modifier.width(8.dp))
                 }
+                // Content filters (combine with the period filter): only strong motion / only unseen.
+                FilterChip(
+                    selected = strongOnly,
+                    onClick = { strongOnly = !strongOnly },
+                    label = { Text(stringResource(R.string.filter_strong_only)) },
+                    leadingIcon = if (strongOnly) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    } else null,
+                )
+                Spacer(Modifier.width(8.dp))
+                FilterChip(
+                    selected = newOnly,
+                    onClick = { newOnly = !newOnly },
+                    label = { Text(stringResource(R.string.filter_new_only)) },
+                    leadingIcon = if (newOnly) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    } else null,
+                )
             }
 
             PullToRefreshBox(
@@ -1547,6 +1595,34 @@ private fun ErrorBox(message: String, onRetry: () -> Unit) {
 @Composable
 private fun CenteredText(text: String) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(text) }
+}
+
+/** Home/Away chip on the home screen (the state was previously only reachable through ⋮). Tapping
+ *  opens the away settings. [refresh] is bumped by the overflow menu so the label re-reads after a
+ *  change made there; it also re-reads whenever this screen re-enters composition. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AwayModeChip(store: AwayModeStore, refresh: Int, onClick: () -> Unit) {
+    val (mode, away) = remember(refresh) {
+        val m = store.mode
+        m to when (m) {
+            AwayMode.MANUAL -> store.manualAway
+            AwayMode.AUTO -> store.lastAutoAway
+        }
+    }
+    val emoji = if (away) "🚶" else "🏠"
+    val label = "$emoji ${stringResource(if (away) R.string.away_away else R.string.away_home)}" +
+        if (mode == AwayMode.AUTO) " · ${stringResource(R.string.away_chip_auto)}" else ""
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)) {
+        AssistChip(
+            onClick = onClick,
+            label = { Text(label) },
+            colors = AssistChipDefaults.assistChipColors(
+                containerColor = if (away) MaterialTheme.status.warningContainer
+                else MaterialTheme.colorScheme.surfaceVariant,
+            ),
+        )
+    }
 }
 
 /**

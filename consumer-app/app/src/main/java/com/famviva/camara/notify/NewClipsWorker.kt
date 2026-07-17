@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -32,6 +34,8 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val offline = OfflineStore(applicationContext)
         val ctx = applicationContext
 
+        var problem = false                            // a poll that saw an issue arms a faster re-check (R3)
+
         // 1) New clips (+ auto-download them, Wi-Fi only, if the user turned that on)
         runCatching { drive.recentClips(20) }.onSuccess { recent ->
             if (recent.isNotEmpty()) {
@@ -42,12 +46,19 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 } else {
                     val newOnes = recent.filter { it.name > last }
                     if (newOnes.isNotEmpty()) {
-                        // Only alert on motion while Away. Still advance the baseline (so switching to
-                        // Away later doesn't dump the backlog) and still auto-download regardless.
+                        // Only alert on motion while Away — and not during quiet-hours (kills 3am
+                        // shadow/bug spam). Still advance the baseline (so switching to Away later
+                        // doesn't dump the backlog) and still auto-download regardless.
                         if (awayEffective(ctx, awayStore)) {
-                            val newestClip = recent.first()   // newest overall = newest of the new ones
-                            val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
-                            Notifications.notifyNewClips(ctx, newOnes.size, newestClip.time, thumb)
+                            problem = true             // an intrusion while away: re-check sooner
+                            if (!store.inQuietHours()) {
+                                val newestClip = recent.first()   // newest overall = newest of the new ones
+                                val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
+                                Notifications.notifyNewClips(
+                                    ctx, newOnes.size, newestClip.time, thumb,
+                                    Notifications.clipRoute(newestClip.id),
+                                )
+                            }
                         }
                         store.setLastNotified(newest)
                         if (offline.shouldAutoDownloadNow()) {
@@ -74,9 +85,11 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     !h.ok -> ctx.getString(R.string.health_no_signal, h.camera)
                     h.isStale(now) -> ctx.getString(R.string.health_not_reporting, h.camera)
                     h.lowBattery -> ctx.getString(R.string.health_low_battery, h.camera, h.battery ?: 0)
+                    h.diskLow() -> ctx.getString(R.string.health_disk_low, h.camera, (h.diskFreeMb ?: 0) / 1024.0)
                     else -> null
                 }
             }.sorted()
+            if (issues.isNotEmpty()) problem = true
             val sig = issues.joinToString(" | ")
             val prev = store.lastHealthAlert()
             if (issues.isNotEmpty() && sig != prev) {
@@ -86,6 +99,10 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 store.setHealthAlert(null)             // all good: reset so we alert again if it recurs
             }
         }
+
+        // R3: if this poll saw a problem, poll again soon (one-shot) instead of waiting the full
+        // 15-min tick; cancel the follow-up once things are healthy again (back off).
+        if (problem) scheduleFollowup(applicationContext) else cancelFollowup(applicationContext)
         return Result.success()
     }
 
@@ -111,18 +128,35 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
     companion object {
         private const val WORK_NAME = "new-clips-poll"
+        private const val FOLLOWUP_NAME = "new-clips-followup"
+
+        private fun connectedConstraints() =
+            Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<NewClipsWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(
-                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
-                )
+                .setConstraints(connectedConstraints())
                 .build()
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
                 request,
             )
+        }
+
+        /** One-shot re-check a few minutes out, re-armed on each problematic poll (Doze may stretch
+         *  it, but it still beats the 15-min periodic). Replaced each time so at most one is queued. */
+        private fun scheduleFollowup(context: Context) {
+            val request = OneTimeWorkRequestBuilder<NewClipsWorker>()
+                .setInitialDelay(5, TimeUnit.MINUTES)
+                .setConstraints(connectedConstraints())
+                .build()
+            WorkManager.getInstance(context)
+                .enqueueUniqueWork(FOLLOWUP_NAME, ExistingWorkPolicy.REPLACE, request)
+        }
+
+        private fun cancelFollowup(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(FOLLOWUP_NAME)
         }
     }
 }

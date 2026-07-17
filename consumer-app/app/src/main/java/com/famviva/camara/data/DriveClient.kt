@@ -5,14 +5,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.time.Instant
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Read-only access to the Google Drive REST API v3.
- * [tokenProvider] yields an OAuth access token (drive.readonly); [onUnauthorized] is called on a
- * 401 to invalidate the cached token.
+ * Access to the Google Drive REST API v3: read (list/stream clips, read status/metrics) plus a
+ * single small write — the `favorites.json` marker ([uploadFavorites]) the NVR reads to keep
+ * starred clips past its retention purge.
+ * [tokenProvider] yields an OAuth access token (drive.readonly + drive.file); [onUnauthorized] is
+ * called on a 401 to invalidate the cached token.
  */
 class DriveClient(
     private val tokenProvider: suspend () -> String,
@@ -127,6 +132,58 @@ class DriveClient(
         }
     }
 
+    /**
+     * Publishes the favorited clip basenames to a small `favorites.json` at the Drive root, so the
+     * NVR's cloud-sync can exclude them from its 30-day purge (keeping the Drive original of a
+     * starred clip). Creates the file on first use (drive.file scope: the app only ever sees the
+     * files it created), then rewrites it in place. Best-effort — returns false on any failure.
+     */
+    suspend fun uploadFavorites(names: List<String>): Boolean = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val body = JSONObject().put("favorites", JSONArray(names)).toString()
+        val jsonType = "application/json".toMediaType()
+
+        // Locate our own favorites.json (with drive.file the listing only returns app-created files).
+        val findUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = 'favorites.json' and trashed = false")
+            .addQueryParameter("spaces", "drive")
+            .addQueryParameter("fields", "files(id)")
+            .build()
+        var fileId: String? = null
+        http.newCall(Request.Builder().url(findUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (resp.code == 401) { onUnauthorized(); throw UnauthorizedException("Token rejected by Drive") }
+                if (resp.isSuccessful) {
+                    JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                        ?.takeIf { it.length() > 0 }
+                        ?.let { fileId = it.getJSONObject(0).getString("id") }
+                }
+            }
+
+        // Create the metadata-only file first if it's missing, then upload the content via media PATCH.
+        if (fileId == null) {
+            val meta = JSONObject().put("name", "favorites.json").put("mimeType", "application/json")
+            http.newCall(
+                Request.Builder()
+                    .url("https://www.googleapis.com/drive/v3/files")
+                    .header("Authorization", "Bearer $token")
+                    .post(meta.toString().toRequestBody(jsonType))
+                    .build(),
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext false
+                fileId = JSONObject(resp.body?.string() ?: "{}").optString("id").ifBlank { null }
+            }
+        }
+        val id = fileId ?: return@withContext false
+        http.newCall(
+            Request.Builder()
+                .url("https://www.googleapis.com/upload/drive/v3/files/$id?uploadType=media")
+                .header("Authorization", "Bearer $token")
+                .patch(body.toRequestBody(jsonType))
+                .build(),
+        ).execute().use { resp -> resp.isSuccessful }
+    }
+
     /** Downloads the NVR's own preview jpg (the `mt_*.jpg` sibling written next to the clip) and
      *  decodes it to a bitmap, for a rich (BigPicture) new-clip notification. Two light calls
      *  (locate + fetch); returns null if there's no sibling or anything fails. */
@@ -187,6 +244,7 @@ class DriveClient(
                             etaMinutes = if (j.has("eta_minutes")) j.optInt("eta_minutes") else null,
                             recMode = if (j.has("rec_mode")) j.optString("rec_mode") else null,
                             rec2kDropsLastHour = if (j.has("rec_2k_drops_1h")) j.optInt("rec_2k_drops_1h") else null,
+                            diskFreeMb = if (j.has("disk_free_mb")) j.optInt("disk_free_mb") else null,
                         )
                     }
                 }

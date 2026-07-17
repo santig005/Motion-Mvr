@@ -19,11 +19,14 @@ object Notifications {
     private const val CHANNEL_ID = "events"
     private const val NOTIF_ID = 1
     private const val NOTIF_ID_HEALTH = 2
+    private const val NOTIF_ID_DIGEST = 3
 
     /** Intent extra MainActivity reads to deep-link to a screen when a notification is tapped. */
     const val EXTRA_DEST = "dest"
     /** Deep-link value: open the live view. */
     const val DEST_LIVE = "live"
+    /** Deep-link route to a clip's player (the actual triggering evidence). */
+    fun clipRoute(clipId: String) = "player/$clipId"
 
     private fun canPost(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -55,10 +58,17 @@ object Notifications {
 
     /**
      * New-clip alert. When we could fetch the newest clip's preview it becomes a BigPicture
-     * notification (photo + thumbnail); tapping it jumps straight to the live view so the user can
-     * check what's happening now.
+     * notification (photo + thumbnail). Tapping it opens the triggering clip's player ([deepLinkRoute],
+     * e.g. "player/{id}") — the actual evidence — falling back to the live view when no clip route is
+     * given.
      */
-    fun notifyNewClips(context: Context, count: Int, latestTime: String? = null, thumb: Bitmap? = null) {
+    fun notifyNewClips(
+        context: Context,
+        count: Int,
+        latestTime: String? = null,
+        thumb: Bitmap? = null,
+        deepLinkRoute: String = DEST_LIVE,
+    ) {
         if (!canPost(context)) return
         ensureChannel(context)
         val text = context.resources.getQuantityString(R.plurals.notif_new_clips, count, count)
@@ -67,7 +77,7 @@ object Notifications {
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context, DEST_LIVE))
+            .setContentIntent(openAppIntent(context, deepLinkRoute))
         latestTime?.let { builder.setSubText(it) }
         if (thumb != null) {
             builder.setLargeIcon(thumb)
@@ -79,6 +89,53 @@ object Notifications {
                 )
         }
         NotificationManagerCompat.from(context).notify(NOTIF_ID, builder.build())
+    }
+
+    /**
+     * Once-a-day recap: event count + peak hour + the strongest clip's time, with that clip's
+     * thumbnail as a BigPicture when available. Tapping it opens the day's clip list ([deepLinkRoute]
+     * is a nav route like "clips/YYYYMMDD").
+     */
+    fun notifyDailyDigest(
+        context: Context,
+        count: Int,
+        peakHour: Int?,
+        strongestTime: String?,
+        thumb: Bitmap?,
+        deepLinkRoute: String,
+    ) {
+        if (!canPost(context) || count <= 0) return
+        ensureChannel(context)
+        val events = context.resources.getQuantityString(R.plurals.events, count, count)
+        val peak = peakHour?.let {
+            context.getString(
+                R.string.notif_digest_peak,
+                context.getString(R.string.analytics_hour_range, it, (it + 1) % 24),
+            )
+        }
+        val text = listOfNotNull(events, peak).joinToString(" · ")
+        val big = listOfNotNull(
+            text,
+            strongestTime?.let { context.getString(R.string.notif_digest_strongest, it) },
+        ).joinToString("\n")
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentTitle(context.getString(R.string.notif_digest_title))
+            .setContentText(text)
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent(context, deepLinkRoute))
+        if (thumb != null) {
+            builder.setLargeIcon(thumb)
+                .setStyle(
+                    NotificationCompat.BigPictureStyle()
+                        .bigPicture(thumb)
+                        .bigLargeIcon(null as Bitmap?)
+                        .setSummaryText(big),
+                )
+        } else {
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(big))
+        }
+        NotificationManagerCompat.from(context).notify(NOTIF_ID_DIGEST, builder.build())
     }
 
     /** NVR health warning (recording down / not reporting / low battery). */

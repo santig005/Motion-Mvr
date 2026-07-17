@@ -92,14 +92,27 @@ class MainViewModel(
 
     fun isFavorite(clip: Clip): Boolean = clip.id in favoriteIds
 
-    /** Every starred clip, most recent first — for the Favorites screen. */
-    fun favoriteClips(): List<Clip> =
-        clips.filter { it.id in favoriteIds }.sortedByDescending { it.name }
+    /** Every starred clip, most recent first — sourced from persisted favorite metadata so purged
+     *  clips still appear, but preferring the live Drive clip when it still exists (fresher data). */
+    fun favoriteClips(): List<Clip> {
+        val live = clips.associateBy { it.id }
+        return favorites.favorites()
+            .map { stored -> live[stored.id] ?: stored }
+            .sortedByDescending { it.name }
+    }
 
-    /** Toggles a clip's favorite star. Favorites are protected from batch deletes. */
+    /** Toggles a clip's favorite star and republishes the Drive marker so the NVR keeps the starred
+     *  clip's Drive original past its 30-day purge. Favorites are also protected from in-app batch
+     *  deletes (that predates this). */
     fun toggleFavorite(clip: Clip) {
-        favorites.toggle(clip.id)
+        favorites.toggle(clip)
         favoriteIds = favorites.all()
+        syncFavoritesToDrive()
+    }
+
+    /** Publishes the favorites marker (favorites.json) to Drive for the NVR to honour. Best-effort. */
+    private fun syncFavoritesToDrive() {
+        viewModelScope.launch { runCatching { drive.uploadFavorites(favorites.favoriteNames()) } }
     }
 
     /** Drive footprint per day (every clip's size), most recent day first, empty days omitted.
@@ -182,6 +195,11 @@ class MainViewModel(
             try {
                 clips = drive.listClips()
                 cache.save(clips)
+                // Backfill any id-only favorites (migrated / starred before we stored metadata) from
+                // this fresh listing, then republish the marker so the NVR's purge honours them.
+                favorites.backfill(clips)
+                favoriteIds = favorites.all()
+                syncFavoritesToDrive()
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
                 recordBatterySamples()
                 loadedOnce = true
@@ -230,7 +248,8 @@ class MainViewModel(
     fun clipsOf(dateKey: String): List<Clip> =
         clips.filter { it.dateKey == dateKey }
 
-    fun find(id: String): Clip? = clips.firstOrNull { it.id == id }
+    fun find(id: String): Clip? =
+        clips.firstOrNull { it.id == id } ?: favoriteClips().firstOrNull { it.id == id }
 
     class Factory(
         private val drive: DriveClient,

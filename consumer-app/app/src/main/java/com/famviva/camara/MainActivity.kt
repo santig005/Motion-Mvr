@@ -20,6 +20,7 @@ import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.FavoritesStore
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
+import com.famviva.camara.notify.DailyDigestWorker
 import com.famviva.camara.notify.NewClipsWorker
 import com.famviva.camara.ui.AppNav
 import com.famviva.camara.ui.theme.CamaraTheme
@@ -54,6 +55,7 @@ class MainActivity : AppCompatActivity() {
 
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
+        DailyDigestWorker.schedule(applicationContext)
 
         deepLink.value = intent?.getStringExtra(Notifications.EXTRA_DEST)
 

@@ -199,6 +199,9 @@ data class CameraHealth(
     /** How many times the 2K link flapped (short-lived drops) in the last hour. Visible even while
      *  still recording 2K, as an early "2K is getting unstable" signal. null if not reported. */
     val rec2kDropsLastHour: Int? = null,
+    /** Free space (MB) on the phone's recording filesystem. Lets the app warn before a full disk
+     *  silently stops recording (the NVR emergency-prunes below its own floor). null if not reported. */
+    val diskFreeMb: Int? = null,
 ) {
     /** true if there's been no report for more than [maxAgeSec] (default 3 h) -> phone probably off.
      *  The NVR heartbeat is every ~20 min and independent of whether there are videos, so "not
@@ -215,6 +218,10 @@ data class CameraHealth(
     /** The 2K link flapped at least [threshold] times in the last hour (early "2K getting unstable"
      *  signal), even if it's currently back on 2K. */
     fun recording2kUnstable(threshold: Int = 4): Boolean = (rec2kDropsLastHour ?: 0) >= threshold
+
+    /** Recording disk nearly full (below [thresholdMb], default ~1 GB): warn before it fills and the
+     *  NVR starts pruning un-uploaded footage to keep recording alive. */
+    fun diskLow(thresholdMb: Int = 1024): Boolean = diskFreeMb != null && diskFreeMb!! < thresholdMb
 
     /** True when the NVR's own ETA estimate is under [thresholdMinutes] (default 2h) — a stronger
      *  signal than [lowBattery] since it accounts for how fast the battery is actually draining. */

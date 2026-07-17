@@ -12,16 +12,18 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
- * Obtains an OAuth access token with the drive.readonly scope via the Google Play Services
- * Authorization API. Caches the token in memory; if it expires (HTTP 401), [invalidate] is called
- * and the next request re-authorizes.
+ * Obtains an OAuth access token via the Google Play Services Authorization API. Requests
+ * drive.readonly (list/stream clips) plus drive.file (write access limited to files this app itself
+ * creates — just the `favorites.json` marker the NVR reads to keep starred clips past the purge).
+ * Caches the token in memory; if it expires (HTTP 401), [invalidate] is called and the next request
+ * re-authorizes.
  *
  * Must be constructed in onCreate (it registers an ActivityResultLauncher).
  */
 class AuthManager(activity: ComponentActivity) {
 
     private val client = Identity.getAuthorizationClient(activity)
-    private val scopes = listOf(Scope("https://www.googleapis.com/auth/drive.readonly"))
+    private val scopes = DRIVE_SCOPES
 
     @Volatile private var token: String? = null
     private var pending: ((Result<String>) -> Unit)? = null
@@ -69,6 +71,14 @@ class AuthManager(activity: ComponentActivity) {
     }
 }
 
+/** Drive scopes the app requests: read (list/stream clips) + drive.file (write only files the app
+ *  creates — the favorites.json marker). Shared by the interactive and headless flows so a single
+ *  consent covers both. */
+val DRIVE_SCOPES = listOf(
+    Scope("https://www.googleapis.com/auth/drive.readonly"),
+    Scope("https://www.googleapis.com/auth/drive.file"),
+)
+
 /** Exception used to signal an expired/insufficient token (HTTP 401). */
 class UnauthorizedException(msg: String) : Exception(msg)
 
@@ -79,7 +89,7 @@ class UnauthorizedException(msg: String) : Exception(msg)
 suspend fun headlessDriveToken(context: Context): String? {
     val client = Identity.getAuthorizationClient(context)
     val request = AuthorizationRequest.builder()
-        .setRequestedScopes(listOf(Scope("https://www.googleapis.com/auth/drive.readonly")))
+        .setRequestedScopes(DRIVE_SCOPES)
         .build()
     return suspendCancellableCoroutine { cont ->
         client.authorize(request)

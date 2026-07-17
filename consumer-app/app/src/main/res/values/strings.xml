@@ -22,6 +22,10 @@
     <string name="filter_yesterday">Yesterday</string>
     <string name="filter_week">7 days</string>
 
+    <!-- Content filter chips (clip list) -->
+    <string name="filter_strong_only">Strong only</string>
+    <string name="filter_new_only">New</string>
+
     <!-- Day periods -->
     <string name="period_all">All</string>
     <string name="period_late_night">Late night</string>
@@ -139,6 +143,10 @@
     <string name="away_auto">Automatic (location)</string>
     <string name="away_home_toast">Home mode: motion alerts muted (health warnings still notify).</string>
     <string name="away_away_toast">Away mode: motion alerts are on.</string>
+    <string name="away_chip_auto">auto</string>
+    <string name="quiet_hours">🌙 Mute at night (11pm–7am)</string>
+    <string name="quiet_hours_on_toast">Motion alerts muted overnight (11pm–7am). Health warnings still notify.</string>
+    <string name="quiet_hours_off_toast">Night muting off: motion alerts fire at any hour.</string>
     <!-- Away-mode settings screen -->
     <string name="away_settings_title">Away mode</string>
     <string name="away_settings_intro">Automatic mode turns motion alerts on when you leave home and mutes them when you\'re back. It checks your location on each background update — no live tracking.</string>
@@ -239,6 +247,12 @@
     <string name="health_no_signal">%s: no signal (not recording)</string>
     <string name="health_not_reporting">%s: not reporting (check the phone)</string>
     <string name="health_low_battery">%1$s: low battery %2$d%% (plug it in)</string>
+    <string name="health_disk_low">%1$s: storage almost full (%2$.1f GB free)</string>
+
+    <!-- Daily recap digest -->
+    <string name="notif_digest_title">📸 Daily recap</string>
+    <string name="notif_digest_peak">peak %1$s</string>
+    <string name="notif_digest_strongest">Strongest at %1$s</string>
 
     <!-- Plurals -->
     <plurals name="events">
