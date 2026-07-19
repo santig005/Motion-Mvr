@@ -3,6 +3,7 @@ package com.famviva.camara.data
 import android.content.Context
 import androidx.annotation.StringRes
 import com.famviva.camara.R
+import org.json.JSONObject
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -241,6 +242,141 @@ data class CameraHealth(
         }
     }
 }
+
+/** One line of the NVR's events.jsonl outage log. `cam` is null for camera-agnostic services
+ *  (sync); `durS` is only set on `up` events (the resolved outage length). */
+data class OutageEvent(
+    val ts: Long,
+    val cam: String?,
+    val svc: String,   // recording | segmenter | detector | sync
+    val ev: String,    // down | up | drop | error
+    val durS: Int? = null,
+    val msg: String? = null,
+)
+
+/** Parses one events.jsonl line. Returns null for blanks / malformed JSON / missing required
+ *  fields, so a bad line never aborts the whole log (parse defensively, line by line). */
+fun parseOutageLine(line: String): OutageEvent? {
+    val t = line.trim()
+    if (!t.startsWith("{")) return null
+    return runCatching {
+        val j = JSONObject(t)
+        val ts = j.optLong("ts", 0L)
+        val svc = j.optString("svc").ifBlank { return null }
+        val ev = j.optString("ev").ifBlank { return null }
+        if (ts <= 0L) return null
+        OutageEvent(
+            ts = ts,
+            cam = if (j.has("cam") && !j.isNull("cam")) j.optString("cam").ifBlank { null } else null,
+            svc = svc,
+            ev = ev,
+            durS = if (j.has("dur_s") && !j.isNull("dur_s")) j.optInt("dur_s") else null,
+            msg = if (j.has("msg") && !j.isNull("msg")) j.optString("msg").ifBlank { null } else null,
+        )
+    }.getOrNull()
+}
+
+/** A resolved (or still-ongoing) service outage, paired from a down->up span. */
+data class Outage(
+    val svc: String,
+    val cam: String?,
+    val startTs: Long,
+    val endTs: Long?,          // null = still down (ongoing)
+    val durationSec: Long?,    // known length; null while ongoing
+) {
+    val ongoing: Boolean get() = endTs == null
+}
+
+/** One row of the health timeline: a paired outage span, or a minor drop/error blip. */
+sealed interface HealthEvent {
+    val ts: Long
+}
+data class OutageEntry(val outage: Outage) : HealthEvent {
+    override val ts: Long get() = outage.startTs
+}
+data class BlipEntry(val event: OutageEvent) : HealthEvent {
+    override val ts: Long get() = event.ts
+}
+
+/**
+ * Pairs down->up events per service (+camera) into [Outage] spans and keeps drop/error lines as
+ * [BlipEntry]s. A down with no following up is an ongoing outage; an up with no matching down is
+ * ignored. Result is newest-first, ready to group by day.
+ */
+fun buildHealthTimeline(events: List<OutageEvent>): List<HealthEvent> {
+    val sorted = events.sortedBy { it.ts }
+    val open = HashMap<String, OutageEvent>()   // "svc|cam" -> the still-unmatched down
+    val out = mutableListOf<HealthEvent>()
+    for (e in sorted) {
+        val key = "${e.svc}|${e.cam ?: ""}"
+        when (e.ev) {
+            "down" -> if (!open.containsKey(key)) open[key] = e   // keep the earliest open down
+            "up" -> open.remove(key)?.let { down ->
+                val dur = e.durS?.toLong() ?: (e.ts - down.ts).coerceAtLeast(0L)
+                out += OutageEntry(Outage(down.svc, down.cam ?: e.cam, down.ts, e.ts, dur))
+            }
+            else -> out += BlipEntry(e)                            // drop / error / anything unknown
+        }
+    }
+    for ((_, down) in open) out += OutageEntry(Outage(down.svc, down.cam, down.ts, null, null))
+    return out.sortedByDescending { it.ts }
+}
+
+/** Sync-pipeline heartbeat, read from the NVR's sync_status.json. */
+data class SyncStatus(
+    val updated: Long,
+    val lastFastOk: Long,
+    val lastHealOk: Long,
+    val lastRetentionOk: Long,
+    val lastError: String?,
+    val lastErrorTs: Long,
+) {
+    /** No sync heartbeat for more than [maxAgeSec] (default 10 min) -> the sync loop may be stuck. */
+    fun isStale(nowSec: Long, maxAgeSec: Long = 600): Boolean = updated > 0 && nowSec - updated > maxAgeSec
+
+    /** A non-empty last_error recorded within [withinSec] (default 6 h) — recent enough to surface. */
+    fun hasRecentError(nowSec: Long, withinSec: Long = 21_600): Boolean =
+        !lastError.isNullOrBlank() && lastErrorTs > 0 && nowSec - lastErrorTs <= withinSec
+}
+
+/** Parses a sync_status.json body; null if it isn't valid JSON. */
+fun parseSyncStatus(body: String): SyncStatus? = runCatching {
+    val j = JSONObject(body)
+    SyncStatus(
+        updated = j.optLong("updated", 0L),
+        lastFastOk = j.optLong("last_fast_ok", 0L),
+        lastHealOk = j.optLong("last_heal_ok", 0L),
+        lastRetentionOk = j.optLong("last_retention_ok", 0L),
+        lastError = if (j.has("last_error") && !j.isNull("last_error")) j.optString("last_error").ifBlank { null } else null,
+        lastErrorTs = j.optLong("last_error_ts", 0L),
+    )
+}.getOrNull()
+
+/** "HH:MM" (local time) from an epoch-second timestamp. */
+fun hourMinuteLabel(epochSec: Long): String {
+    val t = LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())
+    return "%02d:%02d".format(t.hour, t.minute)
+}
+
+/** "YYYYMMDD" grouping key for the local day an epoch-second timestamp falls in. */
+fun dateKeyOf(epochSec: Long): String =
+    LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSec), ZoneId.systemDefault())
+        .toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE)
+
+/** Localized "hace X min / X h / un momento" since an epoch-second timestamp (or "sin fecha"). */
+fun agoLabel(context: Context, epochSec: Long, nowSec: Long): String {
+    if (epochSec <= 0L) return context.getString(R.string.since_no_date)
+    val mins = ((nowSec - epochSec) / 60).coerceAtLeast(0)
+    return when {
+        mins < 1 -> context.getString(R.string.rel_just_now)
+        mins < 60 -> context.getString(R.string.rel_minutes, mins.toInt())
+        else -> context.getString(R.string.rel_hours, (mins / 60).toInt())
+    }
+}
+
+/** Duration label from a second count: "45s" under a minute, else "4h 20m"/"35m" (via [formatEta]). */
+fun formatDurationSec(context: Context, seconds: Long): String =
+    if (seconds < 60) "${seconds}s" else formatEta(context, (seconds / 60).toInt())
 
 /** "YYYYMMDD" -> "Today" / "Yesterday" / weekday / "DD/MM/YYYY" (localized). */
 fun prettyDate(context: Context, dateKey: String): String {

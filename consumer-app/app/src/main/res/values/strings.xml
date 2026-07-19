@@ -193,6 +193,31 @@
     <string name="battery_eta_hm">%1$dh %2$dm</string>
     <string name="battery_eta_m">%1$dm</string>
 
+    <!-- Data freshness line (home screen): honest app-data age, distinct from camera reporting -->
+    <string name="data_updated">Updated %1$s</string>
+    <string name="data_stale">Data not refreshed · %1$s</string>
+
+    <!-- Health screen: current status + sync health + outage timeline -->
+    <string name="health_open">Camera health</string>
+    <string name="health_title">Health</string>
+    <string name="health_current_section">Current status</string>
+    <string name="health_no_camera_data">No camera status yet — pull to refresh on the main screen.</string>
+    <string name="health_sync_section">Cloud sync</string>
+    <string name="health_sync_ok">Sync: OK (%1$s)</string>
+    <string name="health_sync_stale">Sync not updating (%1$s)</string>
+    <string name="health_sync_last_error">Last error: %1$s</string>
+    <string name="health_sync_no_data">No sync data yet.</string>
+    <string name="health_timeline_section">Outage history</string>
+    <string name="health_events_empty">No event data yet.</string>
+    <string name="health_svc_recording">Recording</string>
+    <string name="health_svc_segmenter">Segmenter</string>
+    <string name="health_svc_detector">Motion detector</string>
+    <string name="health_svc_sync">Cloud sync</string>
+    <string name="health_outage_ongoing">Ongoing</string>
+    <string name="health_outage_span">🕐 %1$s</string>
+    <string name="health_ev_drop">Brief drop</string>
+    <string name="health_ev_error">Error</string>
+
     <!-- Battery history graph -->
     <string name="battery_title">Battery</string>
     <string name="battery_now">Now: %d%%</string>

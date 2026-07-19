@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -75,6 +76,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -95,6 +97,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -105,6 +108,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -115,8 +120,19 @@ import com.famviva.camara.MainViewModel
 import com.famviva.camara.R
 import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatterySample
+import com.famviva.camara.data.agoLabel
+import com.famviva.camara.data.BlipEntry
+import com.famviva.camara.data.buildHealthTimeline
 import com.famviva.camara.data.Clip
+import com.famviva.camara.data.dateKeyOf
 import com.famviva.camara.data.DayPeriod
+import com.famviva.camara.data.formatDurationSec
+import com.famviva.camara.data.HealthEvent
+import com.famviva.camara.data.hourMinuteLabel
+import com.famviva.camara.data.Outage
+import com.famviva.camara.data.OutageEntry
+import com.famviva.camara.data.OutageEvent
+import com.famviva.camara.data.SyncStatus
 import com.famviva.camara.data.axisTimeLabel
 import com.famviva.camara.data.clockLabel
 import com.famviva.camara.data.epochLabel
@@ -153,6 +169,22 @@ fun AppNav(
         factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, tokenProvider),
     )
 
+    // Returning to the foreground refetches when the in-memory data has gone stale. Without this,
+    // reopening from background never refreshes (the first-composition load only runs once), so the
+    // health banner would judge hours-old data against the current clock -> false "not reporting".
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START &&
+                vm.shouldResumeRefresh(System.currentTimeMillis() / 1000)
+            ) {
+                vm.load()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // A tapped notification asks for a screen (e.g. "live"): push it on top of "days" so Back
     // still returns to the event list. Consumed once so it doesn't re-fire on recomposition.
     LaunchedEffect(deepLinkRoute) {
@@ -164,6 +196,7 @@ fun AppNav(
 
     NavHost(navController = nav, startDestination = "days") {
         composable("days") { DaysScreen(vm, nav) }
+        composable("health") { HealthScreen(vm, nav, drive) }
         composable("live") { LiveScreen(nav) }
         composable("away_settings") { AwayModeScreen(nav) }
         composable("camera_settings") { CameraSettingsScreen(nav) }
@@ -368,6 +401,9 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 actions = {
+                    IconButton(onClick = { nav.navigate("health") }) {
+                        Icon(Icons.Filled.MonitorHeart, contentDescription = stringResource(R.string.health_open))
+                    }
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
                     }
@@ -390,9 +426,14 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
 
             AwayModeChip(awayStore, awayRefresh) { nav.navigate("away_settings") }
 
+            val now = System.currentTimeMillis() / 1000
+            val dataFresh = vm.isDataFresh(now)
             vm.cameraHealth.forEach { h ->
-                CameraStatusCard(h, onOpenBattery = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null)
+                // On the home screen the whole card opens the Health screen; per-camera battery is
+                // reached from inside Health (the same card there routes to the battery graph).
+                CameraStatusCard(h, dataFresh = dataFresh, onClick = { nav.navigate("health") })
             }
+            DataFreshnessLine(vm, dataFresh, now) { vm.load() }
 
             if (vm.loadedOnce && !vm.loading) {
                 val avgDelay = vm.avgUploadDelaySeconds()
@@ -1626,18 +1667,64 @@ private fun AwayModeChip(store: AwayModeStore, refresh: Int, onClick: () -> Unit
 }
 
 /**
- * NVR/camera status (from status.json). Shows the most serious problem as a coloured banner, or a
- * discreet info line (battery + last signal) when everything is fine.
+ * Freshness line under the health cards. When the data is fresh it reads "Actualizado HH:MM"; when
+ * the last good load is old or the last refresh failed it flips to a neutral "Datos sin refrescar
+ * (hace X)" — the honest, non-alarming counterpart to the "not reporting" banner (which is gated on
+ * freshness, so it can't fire on stale in-memory data). Tapping the line retries the load.
  */
 @Composable
-private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth, onOpenBattery: (() -> Unit)? = null) {
+private fun DataFreshnessLine(vm: MainViewModel, dataFresh: Boolean, now: Long, onRetry: () -> Unit) {
+    if (vm.lastLoadOk <= 0) return          // nothing has ever loaded — the list's own states cover it
+    val context = LocalContext.current
+    val healthy = dataFresh && vm.error == null
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onRetry).padding(horizontal = 16.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (healthy) {
+            Text(
+                stringResource(R.string.data_updated, clockLabel(vm.lastLoadOk)),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Icon(
+                Icons.Filled.Refresh,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                stringResource(R.string.data_stale, agoLabel(context, vm.lastLoadOk, now)),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * NVR/camera status (from status.json). Shows the most serious problem as a coloured banner, or a
+ * discreet info line (battery + last signal) when everything is fine.
+ *
+ * [dataFresh] gates the "not reporting" alarm: it only fires when the app's own data was fetched
+ * recently AND the heartbeat is >3 h old. Stale in-memory data (a load from hours ago) must never
+ * be judged against the current clock — that produced a false "sin reportar" while the NVR was fine.
+ */
+@Composable
+private fun CameraStatusCard(
+    h: com.famviva.camara.data.CameraHealth,
+    dataFresh: Boolean = true,
+    onClick: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val now = System.currentTimeMillis() / 1000
     val etaTxt = h.etaLabel(context)
     val battTxt = h.battery?.let {
         "🔋 $it%${if (h.charging == true) " ⚡" else ""}" + (etaTxt?.let { e -> " · ~$e" } ?: "")
     }
-    val clickMod = if (onOpenBattery != null) Modifier.clickable(onClick = onOpenBattery) else Modifier
+    val clickMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(clickMod) {
       when {
         !h.ok -> StatusBanner(
@@ -1646,7 +1733,7 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth, onOpenBatt
             title = stringResource(R.string.status_down_title, h.camera),
             body = stringResource(R.string.status_down_body),
         )
-        h.isStale(now) -> StatusBanner(
+        dataFresh && h.isStale(now) -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
             fg = MaterialTheme.colorScheme.onErrorContainer,
             title = stringResource(R.string.status_stale_title, h.camera),
@@ -1691,7 +1778,7 @@ private fun CameraStatusCard(h: com.famviva.camara.data.CameraHealth, onOpenBatt
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (onOpenBattery != null) {
+            if (onClick != null) {
                 Icon(
                     Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = null,
@@ -1714,6 +1801,261 @@ private fun StatusBanner(bg: Color, fg: Color, title: String, body: String) {
         Column(Modifier.padding(14.dp)) {
             Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = fg)
             Text(body, style = MaterialTheme.typography.bodySmall, color = fg)
+        }
+    }
+}
+
+/**
+ * Health screen: current camera status (reused status card), sync-pipeline health, and an outage
+ * timeline built from the NVR's events.jsonl. Fetches its own data on entry (in-memory only). All of
+ * events.jsonl / sync_status.json may be absent while the NVR side ships in parallel, so every part
+ * degrades to an empty state rather than an error.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.famviva.camara.data.DriveClient) {
+    val context = LocalContext.current
+    val now = System.currentTimeMillis() / 1000
+    val dataFresh = vm.isDataFresh(now)
+
+    var loading by remember { mutableStateOf(true) }
+    var timeline by remember { mutableStateOf<List<HealthEvent>>(emptyList()) }
+    var sync by remember { mutableStateOf<SyncStatus?>(null) }
+
+    LaunchedEffect(Unit) {
+        loading = true
+        val raw = runCatching { drive.fetchOutageEvents() }.getOrDefault(emptyList())
+        timeline = buildHealthTimeline(raw)
+        sync = runCatching { drive.fetchSyncStatus() }.getOrNull()
+        loading = false
+    }
+
+    // Timeline entries are already newest-first, so groupBy yields days newest-first with each day's
+    // entries newest-first too.
+    val byDay = timeline.groupBy { dateKeyOf(it.ts) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.health_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimary,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            )
+        },
+    ) { pad ->
+        LazyColumn(
+            Modifier.fillMaxSize().padding(pad).padding(horizontal = 12.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            // Current status (reuses the same card as the home screen; here it routes on to battery).
+            item { HealthSectionHeader(stringResource(R.string.health_current_section)) }
+            if (vm.cameraHealth.isEmpty()) {
+                item { HealthEmptyText(stringResource(R.string.health_no_camera_data)) }
+            } else {
+                items(vm.cameraHealth, key = { "cam_${it.camera}" }) { h ->
+                    CameraStatusCard(
+                        h,
+                        dataFresh = dataFresh,
+                        onClick = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null,
+                    )
+                }
+            }
+
+            // Sync pipeline.
+            item {
+                Spacer(Modifier.height(6.dp))
+                HealthSectionHeader(stringResource(R.string.health_sync_section))
+            }
+            item { SyncCard(sync, now) }
+
+            // Outage timeline.
+            item {
+                Spacer(Modifier.height(6.dp))
+                HealthSectionHeader(stringResource(R.string.health_timeline_section))
+            }
+            when {
+                loading -> item {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                }
+                timeline.isEmpty() -> item { HealthEmptyText(stringResource(R.string.health_events_empty)) }
+                else -> byDay.forEach { (day, dayEvents) ->
+                    item { HealthDayHeader(prettyDate(context, day)) }
+                    items(dayEvents) { entry ->
+                        when (entry) {
+                            is OutageEntry -> OutageCard(entry.outage)
+                            is BlipEntry -> BlipRow(entry.event)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Localized service name for an events.jsonl `svc` (falls back to the raw token if unknown). */
+@Composable
+private fun serviceName(svc: String): String = when (svc) {
+    "recording" -> stringResource(R.string.health_svc_recording)
+    "segmenter" -> stringResource(R.string.health_svc_segmenter)
+    "detector" -> stringResource(R.string.health_svc_detector)
+    "sync" -> stringResource(R.string.health_svc_sync)
+    else -> svc
+}
+
+@Composable
+private fun HealthSectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun HealthDayHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun HealthEmptyText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+    )
+}
+
+/** Sync-pipeline heartbeat card: "OK (hace X)" or a stale warning, plus a recent error if any. */
+@Composable
+private fun SyncCard(sync: SyncStatus?, now: Long) {
+    val context = LocalContext.current
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            if (sync == null) {
+                Text(
+                    stringResource(R.string.health_sync_no_data),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+            val stale = sync.isStale(now)
+            Text(
+                text = if (stale) stringResource(R.string.health_sync_stale, agoLabel(context, sync.updated, now))
+                else stringResource(R.string.health_sync_ok, agoLabel(context, sync.updated, now)),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (stale) MaterialTheme.status.onWarningContainer else MaterialTheme.colorScheme.onSurface,
+            )
+            if (sync.hasRecentError(now)) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.health_sync_last_error, sync.lastError.orEmpty()),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+/** A paired outage span. Ongoing (still-down) outages stand out in the error colour. */
+@Composable
+private fun OutageCard(outage: Outage) {
+    val context = LocalContext.current
+    val ongoing = outage.ongoing
+    val bg = if (ongoing) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (ongoing) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(color = bg, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    serviceName(outage.svc) + (outage.cam?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = fg,
+                    modifier = Modifier.weight(1f),
+                )
+                if (ongoing) {
+                    Text(
+                        stringResource(R.string.health_outage_ongoing),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = fg,
+                    )
+                } else outage.durationSec?.let {
+                    Text(
+                        formatDurationSec(context, it),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = fg,
+                    )
+                }
+            }
+            val span = if (!ongoing && outage.endTs != null) {
+                "${hourMinuteLabel(outage.startTs)} – ${hourMinuteLabel(outage.endTs)}"
+            } else {
+                hourMinuteLabel(outage.startTs)
+            }
+            Text(
+                stringResource(R.string.health_outage_span, span),
+                style = MaterialTheme.typography.bodySmall,
+                color = fg,
+            )
+        }
+    }
+}
+
+/** A minor blip (short 2K drop or a logged error) — smaller than an outage card. */
+@Composable
+private fun BlipRow(event: OutageEvent) {
+    val label = when (event.ev) {
+        "drop" -> stringResource(R.string.health_ev_drop)
+        "error" -> stringResource(R.string.health_ev_error)
+        else -> event.ev
+    }
+    val isError = event.ev == "error"
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            hourMinuteLabel(event.ts),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "${serviceName(event.svc)}${event.cam?.let { " · $it" } ?: ""} · $label",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+            event.msg?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

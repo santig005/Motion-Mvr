@@ -252,6 +252,69 @@ class DriveClient(
         out
     }
 
+    /** Reads the NVR's events.jsonl outage log(s) and returns every parseable line, merged across
+     *  files. Absent file / 404 / any failure yields an empty list (the screen shows a "no data yet"
+     *  state). Parsed defensively line-by-line so one bad line never drops the rest. */
+    suspend fun fetchOutageEvents(): List<OutageEvent> = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = 'events.jsonl' and trashed = false")
+            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("pageSize", "100")
+            .build()
+        val ids = mutableListOf<String>()
+        http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?: return@withContext emptyList()
+                for (i in 0 until files.length()) ids += files.getJSONObject(i).getString("id")
+            }
+        val events = mutableListOf<OutageEvent>()
+        for (id in ids) {
+            val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
+            http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    resp.body?.string()?.lineSequence()?.forEach { line ->
+                        parseOutageLine(line)?.let { events += it }
+                    }
+                }
+        }
+        events
+    }
+
+    /** Reads the NVR's sync_status.json (the cloud-sync pipeline heartbeat). If several exist the
+     *  freshest (highest `updated`) wins. Null on absence / 404 / parse failure. */
+    suspend fun fetchSyncStatus(): SyncStatus? = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = 'sync_status.json' and trashed = false")
+            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("pageSize", "10")
+            .build()
+        val ids = mutableListOf<String>()
+        http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?: return@withContext null
+                for (i in 0 until files.length()) ids += files.getJSONObject(i).getString("id")
+            }
+        var best: SyncStatus? = null
+        for (id in ids) {
+            val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
+            http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    parseSyncStatus(resp.body?.string().orEmpty())?.let { s ->
+                        if (best == null || s.updated > best!!.updated) best = s
+                    }
+                }
+        }
+        best
+    }
+
     /** Downloads the metrics.csv files across the tree and returns: clip_name -> metrics (yavg_max, frames, dur_s). */
     private fun fetchMetrics(token: String): Map<String, ClipMetric> {
         val out = HashMap<String, ClipMetric>()

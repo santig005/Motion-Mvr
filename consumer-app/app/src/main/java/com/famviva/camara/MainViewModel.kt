@@ -49,6 +49,11 @@ class MainViewModel(
         private set
     var loadedOnce by mutableStateOf(false)
         private set
+    // Epoch (s) of the last *successful* load. Drives the freshness line and gates the health
+    // "not reporting" alarm: only data fetched recently may be judged against the current clock
+    // (a load from hours ago must not compute a false "sin reportar" against now — the real bug).
+    var lastLoadOk by mutableStateOf(0L)
+        private set
     var dateFilter by mutableStateOf(DateFilter.ALL)
         private set
     var seenIds by mutableStateOf(seen.all())
@@ -176,6 +181,19 @@ class MainViewModel(
         }
     }
 
+    /** True while the last successful load is recent enough that its status.json data may be judged
+     *  against the current clock (older than this we show a neutral "not refreshed" state instead of
+     *  a possibly-false "not reporting" alarm). */
+    fun isDataFresh(nowSec: Long): Boolean = lastLoadOk > 0 && nowSec - lastLoadOk <= DATA_FRESH_MAX_AGE_SEC
+
+    /** Seconds since the last successful load, or null if none has succeeded yet. */
+    fun dataAgeSeconds(nowSec: Long): Long? = if (lastLoadOk <= 0) null else (nowSec - lastLoadOk).coerceAtLeast(0)
+
+    /** Whether returning to the foreground should auto-refresh: something loaded before, nothing is
+     *  in flight, and the last good load is stale enough to be worth refetching. */
+    fun shouldResumeRefresh(nowSec: Long): Boolean =
+        loadedOnce && !loading && nowSec - lastLoadOk > RESUME_REFRESH_AFTER_SEC
+
     fun isNew(clip: Clip): Boolean = clip.id !in seenIds
 
     fun markSeen(id: String) {
@@ -203,6 +221,7 @@ class MainViewModel(
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
                 recordBatterySamples()
                 loadedOnce = true
+                lastLoadOk = System.currentTimeMillis() / 1000
                 if (autoDownloadMode != AutoDownloadMode.OFF) downloadTodaysClips()
             } catch (e: Exception) {
                 error = e.message ?: e.javaClass.simpleName
@@ -250,6 +269,15 @@ class MainViewModel(
 
     fun find(id: String): Clip? =
         clips.firstOrNull { it.id == id } ?: favoriteClips().firstOrNull { it.id == id }
+
+    companion object {
+        /** On resume, refetch only if the last good load is older than this (avoids hammering Drive
+         *  on every quick app switch, but still refreshes stale in-memory data). */
+        const val RESUME_REFRESH_AFTER_SEC = 60L
+
+        /** Health data older than this is treated as "not refreshed" rather than judged live. */
+        const val DATA_FRESH_MAX_AGE_SEC = 300L
+    }
 
     class Factory(
         private val drive: DriveClient,

@@ -192,6 +192,31 @@
     <string name="battery_eta_hm">%1$dh %2$dm</string>
     <string name="battery_eta_m">%1$dm</string>
 
+    <!-- Línea de frescura de datos (pantalla principal): edad honesta de los datos de la app -->
+    <string name="data_updated">Actualizado %1$s</string>
+    <string name="data_stale">Datos sin refrescar · %1$s</string>
+
+    <!-- Pantalla de salud: estado actual + salud de sincronización + historial de cortes -->
+    <string name="health_open">Salud de la cámara</string>
+    <string name="health_title">Salud</string>
+    <string name="health_current_section">Estado actual</string>
+    <string name="health_no_camera_data">Aún no hay estado de la cámara — desliza para recargar en la pantalla principal.</string>
+    <string name="health_sync_section">Sincronización</string>
+    <string name="health_sync_ok">Sync: OK (%1$s)</string>
+    <string name="health_sync_stale">Sync sin actualizar (%1$s)</string>
+    <string name="health_sync_last_error">Último error: %1$s</string>
+    <string name="health_sync_no_data">Aún no hay datos de sincronización.</string>
+    <string name="health_timeline_section">Historial de cortes</string>
+    <string name="health_events_empty">Sin datos de eventos todavía.</string>
+    <string name="health_svc_recording">Grabación</string>
+    <string name="health_svc_segmenter">Segmentador</string>
+    <string name="health_svc_detector">Detector de movimiento</string>
+    <string name="health_svc_sync">Sincronización</string>
+    <string name="health_outage_ongoing">En curso</string>
+    <string name="health_outage_span">🕐 %1$s</string>
+    <string name="health_ev_drop">Caída breve</string>
+    <string name="health_ev_error">Error</string>
+
     <!-- Gráfico de historial de batería -->
     <string name="battery_title">Batería</string>
     <string name="battery_now">Ahora: %d%%</string>
