@@ -15,8 +15,9 @@
 set -u
 INTERVAL="${WATCH_INTERVAL:-120}"                 # how often (seconds) it checks
 LOG="${WATCH_LOG:-$HOME/logs/watchdog.log}"
-RING_DIR="${RING_DIR:-/sdcard/Movies/.ring/cam1}"  # segmenter ring (must match cam1.env)
-STALE_KICK="${STALE_KICK:-150}"                   # seconds without a new segment (cam1 alive) before force-restarting ffmpeg
+CAMS="${CAMS:-cam1}"                              # space-separated camera session names; each has ~/<cam>.env. Do NOT auto-discover cam*.env (cam360.env is a profile, not a camera)
+RING_BASE="${RING_BASE:-/sdcard/Movies/.ring}"    # per-camera segmenter ring at $RING_BASE/<cam> (must match each cam's env; cam1 => /sdcard/Movies/.ring/cam1)
+STALE_KICK="${STALE_KICK:-150}"                   # seconds without a new segment (session alive) before force-restarting ffmpeg
 LOG_MAX_KB="${LOG_MAX_KB:-1024}"                  # cap on watchdog.log before it's trimmed to its newest half
 mkdir -p "$(dirname "$LOG")"
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -35,29 +36,32 @@ ensure_session(){ # $1=session name  $2=command to run
   fi
 }
 
-# If cam1 is alive but the segmenter stopped writing segments, kill its ffmpeg (it reconnects on its
-# own). Only fires on real staleness: with a healthy camera the newest segment is <20s old and never
-# crosses STALE_KICK. Killing ffmpeg during a genuine outage is harmless (it was going to retry anyway).
-kick_stuck_segmenter(){
-  tmux has-session -t cam1 2>/dev/null || return 0
-  local newest age
-  newest=$(ls -t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -1)
+# If a camera session is alive but its segmenter stopped writing segments, kill that ffmpeg (it
+# reconnects on its own). Only fires on real staleness: with a healthy camera the newest segment is
+# <20s old and never crosses STALE_KICK. Killing ffmpeg during a genuine outage is harmless (it was
+# going to retry anyway). Per camera: matches its own ring so a multi-cam setup kicks the right ffmpeg.
+kick_stuck_segmenter(){ # $1=cam  $2=ring_dir
+  local cam="$1" ring="$2" newest age
+  tmux has-session -t "$cam" 2>/dev/null || return 0
+  newest=$(ls -t "$ring"/seg_*.mp4 2>/dev/null | head -1)
   [ -z "$newest" ] && return 0                     # no segments yet (startup/long outage): the loop already retries
   age=$(( $(date +%s) - $(stat -c %Y "$newest" 2>/dev/null || echo 0) ))
   if [ "$age" -gt "$STALE_KICK" ]; then
-    if pkill -f "$RING_DIR/seg_" 2>/dev/null; then
-      log "🔧 segmenter stuck (${age}s with no new segment): ch0 ffmpeg restarted"
+    if pkill -f "$ring/seg_" 2>/dev/null; then
+      log "🔧 segmenter stuck [$cam] (${age}s with no new segment): ch0 ffmpeg restarted"
     fi
   fi
 }
 
-log "=== watchdog starts (checks every ${INTERVAL}s; segmenter kick at ${STALE_KICK}s) ==="
+log "=== watchdog starts (checks every ${INTERVAL}s; segmenter kick at ${STALE_KICK}s; cams: ${CAMS}) ==="
 while true; do
   termux-wake-lock 2>/dev/null || true                      # idempotent: keeps the lock
   pgrep -x sshd >/dev/null 2>&1 || { sshd 2>/dev/null && log "▶ revived sshd"; }
-  ensure_session cam1  "cd ~ && CAM_ENV=\$HOME/cam1.env exec ./record-preroll.sh"
+  for cam in $CAMS; do
+    ensure_session "$cam" "cd ~ && CAM_ENV=\$HOME/$cam.env exec ./record-preroll.sh"
+    kick_stuck_segmenter "$cam" "$RING_BASE/$cam"
+  done
   ensure_session cloud "cd ~ && exec ./cloud-sync.sh"
-  kick_stuck_segmenter
   trim_log
   sleep "$INTERVAL"
 done

@@ -43,8 +43,40 @@ HEAL_EVERY="${HEAL_EVERY:-3600}"
 RETENTION_EVERY="${RETENTION_EVERY:-28800}"
 LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"
+SYNC_STATUS="${SYNC_STATUS:-$CAMERAS_DIR/sync_status.json}"   # per-cycle sync health (depth 1; uploaded by the refresh lane); app infers "sync caído" from a stale 'updated'
+EVENTS_LOG="${EVENTS_LOG:-$CAMERAS_DIR/events.jsonl}"         # shared event log (record-preroll also appends); this is the ONLY writer that trims it
+EVENTS_MAX_KB="${EVENTS_MAX_KB:-256}"                         # trim events.jsonl to its newest half past this (line boundaries)
 mkdir -p "$(dirname "$LOG")" "$CAMERAS_DIR"
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+
+# Global event log at the CAMERAS_DIR root (one short JSON object per line; never URLs/creds). This is
+# the ONLY place that trims it (line-boundary, newest half) so a concurrent append from record-preroll
+# is safe. cam empty => JSON null (whole-tree events); the *.jsonl refresh include uploads the file.
+log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
+  local camf="null" d=""
+  [ -n "$1" ] && camf="\"$1\""
+  [ -n "${5:-}" ] && d=",\"dur_s\":$5"
+  printf '{"ts":%d,"cam":%s,"svc":"%s","ev":"%s"%s,"msg":"%s"}\n' \
+    "$(date +%s)" "$camf" "$2" "$3" "$d" "$4" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# Trim events.jsonl to its newest half at LINE boundaries (tail -n, never -c, so no half JSON line
+# survives). Only cloud-sync trims it, so keeper's concurrent appends can't lose a partial line.
+trim_events(){
+  local sz lines
+  sz=$(stat -c %s "$EVENTS_LOG" 2>/dev/null) || return 0
+  [ "$sz" -gt $((EVENTS_MAX_KB * 1024)) ] || return 0
+  lines=$(wc -l < "$EVENTS_LOG" 2>/dev/null) || return 0
+  [ "${lines:-0}" -gt 1 ] || return 0
+  tail -n $((lines / 2)) "$EVENTS_LOG" > "$EVENTS_LOG.tmp" 2>/dev/null && mv -f "$EVENTS_LOG.tmp" "$EVENTS_LOG" 2>/dev/null
+}
+
+# Sync health for the app (atomic tmp+mv), written once per cycle. A stale 'updated' => sync is down.
+write_sync_status(){
+  printf '{"updated":%d,"last_fast_ok":%d,"last_heal_ok":%d,"last_retention_ok":%d,"last_error":"%s","last_error_ts":%d}\n' \
+    "$(date +%s)" "$last_fast_ok" "$last_heal_ok" "$last_retention_ok" "$last_error" "$last_error_ts" \
+    > "$SYNC_STATUS.tmp" 2>/dev/null && mv -f "$SYNC_STATUS.tmp" "$SYNC_STATUS" 2>/dev/null
+}
 
 # The -v upload log (below) makes this grow with real usage instead of staying a fixed-size
 # summary; nothing else on the phone rotates logs, so cap it here rather than let it grow forever.
@@ -58,8 +90,11 @@ trim_log(){
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | fast lane (today) every ${INTERVAL}s, self-heal every ${HEAL_EVERY}s, retention every ${RETENTION_EVERY}s ==="
 last_heal=0
 last_retention=0
+last_fast_ok=0; last_heal_ok=0; last_retention_ok=0    # epochs of the last successful pass of each lane (for sync_status.json)
+last_error=""; last_error_ts=0                          # most recent sync error (short, JSON-safe) + when
 while true; do
   now=$(date +%s)
+  fast_ok=1                                             # cleared if any fast-lane copy fails this cycle
 
   # 1) FAST LANE — upload ONLY each camera's TODAY folder (plus yesterday's during the first 30
   #    minutes of the day: a clip whose motion started at 23:59 finalizes past midnight into the
@@ -78,14 +113,19 @@ while true; do
     cam=$(basename "$camdir")
     for day in $today $extra_day; do
       [ -d "$camdir$day" ] || continue
-      rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
-        --min-age 10s --transfers 3 -v --stats-one-line >>"$LOG" 2>&1 \
-        || log "!! fast lane failed for $cam/$day (no network/Drive?)"
+      if ! rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
+        --min-age 10s --transfers 3 -v --stats-one-line >>"$LOG" 2>&1; then
+        log "!! fast lane failed for $cam/$day (no network/Drive?)"
+        log_event "$cam" sync error "fast lane $day"
+        fast_ok=0; last_error="fast lane $cam/$day"; last_error_ts=$now
+      fi
     done
   done
-  # Health/metrics refresh: status.json & metrics.csv live at each camera's ROOT (depth 2 from
-  # CAMERAS_DIR); --max-depth keeps this from re-walking the whole dated tree every cycle.
-  rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.csv" --include "*.json" --max-depth 2 --transfers 3 >>"$LOG" 2>&1
+  [ "$fast_ok" = 1 ] && last_fast_ok=$now
+  # Health/metrics refresh: status.json, metrics.csv, events.jsonl & sync_status.json live at (or
+  # near) each camera's ROOT (depth 1-2 from CAMERAS_DIR); --max-depth keeps this from re-walking the
+  # whole dated tree every cycle. *.jsonl added so the global event log rides this same lane.
+  rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.csv" --include "*.json" --include "*.jsonl" --max-depth 2 --transfers 3 >>"$LOG" 2>&1
 
   # 2) SELF-HEAL (every HEAL_EVERY) — the only FULL-TREE upload pass left. Catches whatever the
   #    fast lane can't see: offline spells, partial/corrupt uploads, files outside today's folder.
@@ -94,9 +134,11 @@ while true; do
     uploaded_ok=0
     if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s \
          --transfers 3 --fast-list -v --stats-one-line >>"$LOG" 2>&1; then
-      uploaded_ok=1
+      uploaded_ok=1; last_heal_ok=$now
     else
       log "!! self-heal copy failed (no network/Drive?); NOT purging local"
+      log_event "" sync error "self-heal copy"
+      last_error="self-heal copy"; last_error_ts=$now
     fi
     last_heal=$now
 
@@ -129,10 +171,12 @@ while true; do
         rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" --fast-list >>"$LOG" 2>&1 || true
       fi
       log "cloud retention sweep (removed Drive files > ${CLOUD_KEEP_DAYS}d)"
-      last_retention=$now
+      last_retention=$now; last_retention_ok=$now
     fi
   fi
 
+  write_sync_status                                   # once per cycle: 'updated' + per-lane ok epochs + last error
   trim_log
+  trim_events
   sleep "$INTERVAL"
 done

@@ -65,6 +65,7 @@ DET_CROP="${DET_CROP:-210:360:226:0}"
 DIFF_TH="${DIFF_TH:-20}"
 YAVG_TH="${YAVG_TH:-0.4}"
 DEBOUNCE="${DEBOUNCE:-2}"
+DET_GRACE="${DET_GRACE:-3}"                     # after a detector (re)connect, ignore motion triggers for this many s (reconnect frames glitch -> false events)
 MIN_CLIP="${MIN_CLIP:-1.5}"
 METRIC_CROP="${METRIC_CROP:-760:1296:818:0}"
 LOG="${LOG:-$HOME/logs/cam1.motion.log}"
@@ -72,6 +73,7 @@ METRICS="${METRICS:-$OUT_DIR/metrics.csv}"
 MWIN="$RING_DIR/.motion_windows"                  # motion windows (epoch): "start end"
 REC_STATE="$RING_DIR/.rec_state"                  # segmenter -> keeper: "MODE DROPS1H" (recording-quality signal for status.json)
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
+EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
@@ -85,7 +87,18 @@ mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
 printf '2K 0\n' > "$REC_STATE" 2>/dev/null || true   # assume 2K until the segmenter says otherwise
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
+DOWN_SINCE=0                                       # epoch recording went down (0=up); surfaced in status.json + used for the 'up' dur_s
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+
+# Global event log (one short JSON object per line) at the CAMERAS_DIR root. cloud-sync uploads it
+# (via its *.jsonl refresh include) and is the ONLY writer that trims it. Never log URLs/creds. The
+# append is a single small line via >> (atomic), so it stays safe next to cloud-sync's appends.
+log_event(){ # $1=svc  $2=ev  $3=msg  $4=dur_s (optional)
+  local d=""
+  [ -n "${4:-}" ] && d=",\"dur_s\":$4"
+  printf '{"ts":%d,"cam":"%s","svc":"%s","ev":"%s"%s,"msg":"%s"}\n' \
+    "$(date +%s)" "$CAM_LABEL" "$1" "$2" "$d" "$3" >> "$EVENTS_LOG" 2>/dev/null || true
+}
 
 # Cap the (verbose, ffmpeg-fed) cam log so a long run can't fill the disk on its own — trims to the
 # newest half once it passes LOG_MAX_KB. Ported from cloud-sync.sh, which was the only log rotator.
@@ -206,6 +219,8 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   fi
   # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
   local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
+  # While recording is DOWN, surface WHEN it went down so the app can show the outage length live.
+  [ "$1" = 0 ] && [ "${DOWN_SINCE:-0}" -gt 0 ] && extra="${extra},\"down_since\":${DOWN_SINCE}"
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
@@ -340,24 +355,18 @@ segmenter_loop(){
     printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
+    log_event segmenter drop "mode $mode" "$ran"
     log "!! segmenter dropped (ran ${ran}s, produced=${produced}, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
   done
 }
 
 # 3) KEEPER/PRUNER ----------------------------------------------------------------
-build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to skip)
-  local clip_start="$1" clip_end="$2" newest="$3" list ss dseg se first_start offset dur ts dst segcount=0
-  list="$RING_DIR/.cat_$$_${clip_start}.txt"; : > "$list"; first_start=""
-  for seg in $(ls -1 "$RING_DIR"/seg_*.mp4 2>/dev/null); do
-    [ "$seg" = "$newest" ] && continue
-    ss=$(seg_epoch "$(basename "$seg" .mp4)"); [ -z "$ss" ] && continue
-    dseg=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$seg" 2>/dev/null)
-    se=$(awk "BEGIN{printf \"%d\", $ss + (${dseg:-0}+0)}")
-    if [ "$se" -ge "$clip_start" ] && [ "$ss" -le "$clip_end" ]; then
-      printf "file '%s'\n" "$seg" >> "$list"; [ -z "$first_start" ] && first_start=$ss; segcount=$((segcount+1))
-    fi
-  done
-  if [ "$segcount" -eq 0 ]; then rm -f "$list"; return 1; fi
+# Renders ONE contiguous run of segments (concat $list, already written) into a final clip covering
+# [clip_start, clip_end]: profile (one decode) -> tail-trim -> atomic re-encode -> thumb + metrics.
+# Split out of build_clip so a camera dropout INSIDE a motion window yields SEPARATE clips instead of
+# one clip that time-jumps across the missing footage (see build_clip's gap-split).
+render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcount
+  local list="$1" first_start="$2" clip_start="$3" clip_end="$4" segcount="$5" offset dur ts dst
   offset=$((clip_start - first_start)); [ "$offset" -lt 0 ] && offset=0
   dur=$((clip_end - clip_start)); [ "$dur" -lt 1 ] && dur=1
   ts=$(date -d "@$clip_start" "+%Y%m%d_%H%M%S" 2>/dev/null)
@@ -397,6 +406,47 @@ build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to s
   fi
 }
 
+build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to skip)
+  local clip_start="$1" clip_end="$2" newest="$3" ss dseg se gap_th cur
+  local -a segs=() starts=() ends=()
+  gap_th=$((2 * SEG_TIME + 4))                       # dropout > this (between consecutive seg starts) => split, don't concat across it
+  # Select every ring segment that overlaps the window, in chronological order (ls -1 sorts by name).
+  for seg in $(ls -1 "$RING_DIR"/seg_*.mp4 2>/dev/null); do
+    [ "$seg" = "$newest" ] && continue
+    ss=$(seg_epoch "$(basename "$seg" .mp4)"); [ -z "$ss" ] && continue
+    dseg=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$seg" 2>/dev/null)
+    se=$(awk "BEGIN{printf \"%d\", $ss + (${dseg:-0}+0)}")
+    if [ "$se" -ge "$clip_start" ] && [ "$ss" -le "$clip_end" ]; then
+      segs+=("$seg"); starts+=("$ss"); ends+=("$se")
+    fi
+  done
+  [ "${#segs[@]}" -eq 0 ] && return 1
+  # GAP-SPLIT: walk the selected segments and cut a new run whenever consecutive START times jump by
+  # more than gap_th (a camera dropout leaves a hole). Each run becomes its own clip via render_clip,
+  # with the window clamped to the footage actually present in that run (so no time-jump, and metrics
+  # /thumbnail are produced for every clip). No gap => one run => identical to the old single clip.
+  local i n="${#segs[@]}" list first_start prev_start run_end segcount rc=1 run_cstart run_cend
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    list="$RING_DIR/.cat_$$_${clip_start}_${starts[$i]}.txt"; : > "$list"   # unique per window ($$+clip_start) AND per run (first-seg start)
+    first_start="${starts[$i]}"; prev_start="${starts[$i]}"; run_end="${ends[$i]}"; segcount=0
+    while [ "$i" -lt "$n" ]; do
+      cur="${starts[$i]}"
+      if [ "$segcount" -gt 0 ] && [ "$((cur - prev_start))" -gt "$gap_th" ]; then
+        log "✂️ gap-split: $((cur - prev_start))s dropout (> ${gap_th}s); closing clip, starting a new one"
+        break
+      fi
+      printf "file '%s'\n" "${segs[$i]}" >> "$list"
+      prev_start="$cur"; run_end="${ends[$i]}"; segcount=$((segcount+1)); i=$((i+1))
+    done
+    # This run's window = the requested window clamped to the run's own footage span.
+    run_cstart="$clip_start"; [ "$first_start" -gt "$run_cstart" ] && run_cstart="$first_start"
+    run_cend="$clip_end"; [ "$run_end" -lt "$run_cend" ] && run_cend="$run_end"
+    render_clip "$list" "$first_start" "$run_cstart" "$run_cend" "$segcount" && rc=0
+  done
+  return $rc
+}
+
 # JPG thumbnail for the app: a representative frame (~4s, or midpoint for short clips).
 # Atomic write (.part + mv) just like the mp4, so rclone never uploads a half-written jpg.
 make_thumb(){ # $1=final mp4  $2=duration s
@@ -427,9 +477,15 @@ keeper_loop(){
       [ "$((now - started))" -lt "$STALE_SECS" ] && rec_ok=1 || rec_ok=0
     fi
     if [ "$rec_ok" = 1 ] && [ "$rec_state" != "ok" ]; then
+      # Recovery: if we were tracking an outage, emit the 'up' event with its duration, then clear it.
+      if [ "${DOWN_SINCE:-0}" -gt 0 ]; then
+        log_event recording up "recovered" "$((now - DOWN_SINCE))"; DOWN_SINCE=0
+      fi
       write_status 1; rec_state=ok; last_hb=$now; [ -n "$newest" ] && log "✅ recording (fresh segments)"
     elif [ "$rec_ok" = 0 ] && [ "$rec_state" != "down" ]; then
+      DOWN_SINCE=$now                                 # mark outage start (before write_status, so down_since is surfaced)
       write_status 0; rec_state=down; last_hb=$now
+      log_event recording down "no fresh segment >${STALE_SECS}s"
       log "⚠️ RECORDING DOWN (no new segment for >${STALE_SECS}s) -> $HEALTH_FILE"
     elif [ "$((now - last_hb))" -ge "$HEARTBEAT_SECS" ]; then
       write_status "$rec_ok" 1; last_hb=$now                # heartbeat: refresh updated + battery + history sample
@@ -496,16 +552,20 @@ while true; do
     -vf "fps=$DET_FPS,${DET_CROP:+crop=$DET_CROP,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
     -f null - 2>&1 >/dev/null |
   grep --line-buffered -F 'signalstats.YAVG=' |
-  ( in_evt=0; evt_start=0; evt_last=0
+  ( in_evt=0; evt_start=0; evt_last=0; conn_ts=0
     while true; do
       if IFS= read -r -t 2 line; then
-        [ "$connected" -eq 0 ] && { log "▶ detector connected (${RTSP_DETECT##*/})"; connected=1; }
+        [ "$connected" -eq 0 ] && { log "▶ detector connected (${RTSP_DETECT##*/})"; log_event detector up "reconnected"; connected=1; conn_ts=$(date +%s); }
         val=${line##*YAVG=}; val=${val%% *}
         if awk "BEGIN{exit !(${val}+0 > $YAVG_TH)}" 2>/dev/null; then over=$((over+1)); else over=0; fi
         if [ "$over" -ge "$DEBOUNCE" ]; then
           now=$(date +%s)
-          [ "$in_evt" -eq 0 ] && { in_evt=1; evt_start=$now; log "►► motion (event open)"; }
-          evt_last=$now
+          # Post-reconnect grace: the first frames after a (re)connect are glitchy and fire false
+          # motion; ignore triggers for DET_GRACE seconds after the stream came up.
+          if [ "$((now - conn_ts))" -ge "$DET_GRACE" ]; then
+            [ "$in_evt" -eq 0 ] && { in_evt=1; evt_start=$now; log "►► motion (event open)"; }
+            evt_last=$now
+          fi
         fi
       else
         [ "$?" -le 128 ] && {
@@ -540,5 +600,6 @@ while true; do
     [ "$dfails" -eq "$FAIL_THRESHOLD" ] && log "⚠️ detector (ch1) can't connect after $dfails tries"
     delay=$((dfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"
   fi
+  log_event detector drop "stream ended" "$det_ran"
   log "!! detector ended (ran ${det_ran}s, failure $dfails); retry in ${delay}s"; sleep "$delay"
 done
