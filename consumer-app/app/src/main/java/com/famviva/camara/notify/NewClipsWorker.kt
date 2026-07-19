@@ -15,10 +15,16 @@ import com.famviva.camara.auth.headlessDriveToken
 import com.famviva.camara.data.AwayMode
 import com.famviva.camara.data.AwayModeStore
 import com.famviva.camara.data.BatteryHistoryStore
+import com.famviva.camara.data.CameraHealth
+import com.famviva.camara.data.Clip
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.LocationProvider
 import com.famviva.camara.data.OfflineStore
+import com.famviva.camara.data.WidgetSummaryStore
+import com.famviva.camara.data.dateKeyOf
 import com.famviva.camara.data.motionIntensityLevel
+import com.famviva.camara.ui.widget.CameraWidget
+import androidx.glance.appwidget.updateAll
 import java.util.concurrent.TimeUnit
 
 /**
@@ -37,8 +43,14 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         var problem = false                            // a poll that saw an issue arms a faster re-check (R3)
 
+        // Captured for the home-screen widget summary written at the end of this poll. Null means the
+        // corresponding fetch failed this run, so we keep the previous value instead of clobbering it.
+        var widgetRecent: List<Clip>? = null
+        var widgetHealth: List<CameraHealth>? = null
+
         // 1) New clips (+ auto-download them, Wi-Fi only, if the user turned that on)
         runCatching { drive.recentClips(20) }.onSuccess { recent ->
+            widgetRecent = recent
             if (recent.isNotEmpty()) {
                 val newest = recent.first().name       // names in descending order
                 val last = store.lastNotified()
@@ -88,6 +100,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
 
         // 2) NVR health (status.json): recording down / not reporting / low battery
         runCatching { drive.fetchCameraHealth() }.onSuccess { health ->
+            widgetHealth = health
             // Record battery readings even while the app is closed, so the history (and the ETA fit)
             // stays dense. Deduped by the heartbeat's `updated`, so it won't double-count the app's
             // own foreground sampling.
@@ -117,10 +130,38 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
         }
 
+        // 3) Persist the home-screen widget summary and refresh any placed widgets. The widget does
+        //    no network work of its own — it only renders this snapshot — and stamps it with `now` so
+        //    it can show its own age honestly ("hace X min") rather than passing stale data off as live.
+        updateWidget(ctx, widgetRecent, widgetHealth)
+
         // R3: if this poll saw a problem, poll again soon (one-shot) instead of waiting the full
         // 15-min tick; cancel the follow-up once things are healthy again (back off).
         if (problem) scheduleFollowup(applicationContext) else cancelFollowup(applicationContext)
         return Result.success()
+    }
+
+    /** Merge this poll's fetches into the persisted widget summary (keeping the previous value for any
+     *  fetch that failed this run), then push it to the widget. */
+    private suspend fun updateWidget(ctx: Context, recent: List<Clip>?, health: List<CameraHealth>?) {
+        val store = WidgetSummaryStore(ctx)
+        val prev = store.read()
+        val now = System.currentTimeMillis() / 1000
+        val today = dateKeyOf(now)
+
+        val cam = health?.firstOrNull()
+        store.write(
+            recordingOk = cam?.ok ?: prev.recordingOk,
+            heartbeatUpdated = cam?.updated ?: prev.heartbeatUpdated,
+            battery = cam?.battery ?: prev.battery.takeIf { it >= 0 },
+            charging = cam?.charging ?: prev.charging,
+            recMode = cam?.recMode ?: prev.recMode,
+            todayCount = recent?.count { it.dateKey == today } ?: prev.todayCount,
+            newestClipTime = recent?.firstOrNull()?.time ?: prev.newestClipTime,
+            updatedEpoch = now,
+        )
+        // No-op if the user hasn't placed the widget; safe to always call.
+        runCatching { CameraWidget().updateAll(ctx) }
     }
 
     /**

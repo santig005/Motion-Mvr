@@ -292,6 +292,20 @@
     <string name="notif_digest_peak">peak %1$s</string>
     <string name="notif_digest_strongest">Strongest at %1$s</string>
 
+    <!-- Home-screen widget -->
+    <string name="widget_label">Camera status</string>
+    <string name="widget_description">Recording status, battery and recent clips at a glance.</string>
+    <string name="widget_recording_on">Recording</string>
+    <string name="widget_recording_sub">Recording (360p)</string>
+    <string name="widget_recording_off">Recording stopped</string>
+    <string name="widget_not_reporting">Not reporting</string>
+    <string name="widget_no_data">Open the app to load status</string>
+    <string name="widget_battery">%1$d%%</string>
+    <string name="widget_today_events">Today: %1$d</string>
+    <string name="widget_last_clip">Last: %1$s</string>
+    <string name="widget_updated">Updated %1$s</string>
+    <string name="widget_live">Live</string>
+
     <!-- Plurals -->
     <plurals name="events">
         <item quantity="one">%d event</item>

@@ -291,6 +291,20 @@
     <string name="notif_digest_peak">pico %1$s</string>
     <string name="notif_digest_strongest">Más fuerte a las %1$s</string>
 
+    <!-- Widget de pantalla de inicio -->
+    <string name="widget_label">Estado de la cámara</string>
+    <string name="widget_description">Estado de grabación, batería y clips recientes de un vistazo.</string>
+    <string name="widget_recording_on">Grabando</string>
+    <string name="widget_recording_sub">Grabando (360p)</string>
+    <string name="widget_recording_off">Grabación detenida</string>
+    <string name="widget_not_reporting">Sin reportar</string>
+    <string name="widget_no_data">Abre la app para cargar el estado</string>
+    <string name="widget_battery">%1$d%%</string>
+    <string name="widget_today_events">Hoy: %1$d</string>
+    <string name="widget_last_clip">Último: %1$s</string>
+    <string name="widget_updated">Actualizado %1$s</string>
+    <string name="widget_live">En vivo</string>
+
     <!-- Plurales -->
     <plurals name="events">
         <item quantity="one">%d evento</item>

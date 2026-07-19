@@ -82,4 +82,8 @@ dependencies {
 
     // Background polling to notify about new events
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    // Home-screen widget (Jetpack Glance). Renders the summary NewClipsWorker persists — the widget
+    // itself does no network work. Glance's minSdk is 23, comfortably under this app's minSdk 26.
+    implementation("androidx.glance:glance-appwidget:1.1.1")
 }

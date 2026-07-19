@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -1172,6 +1173,12 @@ private fun ClipsScreen(
                 )
             }
 
+            // Day storyboard: a chronological thumbnail scrub of the whole day (ignores the filters/
+            // sort above so it's always the full picture). Tap a frame to jump straight to its clip.
+            if (dayClips.isNotEmpty()) {
+                DayFilmstrip(dayClips, token) { clip -> nav.navigate("player/${clip.id}") }
+            }
+
             PullToRefreshBox(
                 isRefreshing = vm.loading,
                 onRefresh = { vm.load() },
@@ -1220,6 +1227,68 @@ private fun ClipsScreen(
             onToggleFavorite = { vm.toggleFavorite(clip) },
             onRemoveOffline = { vm.deleteOfflineCopy(clip) },
             onDismiss = { actionClip = null },
+        )
+    }
+}
+
+/**
+ * Horizontal thumbnail filmstrip for a day: one small frame per clip in chronological order, a quick
+ * visual scrub of the whole day. Reuses the exact Coil + Bearer-token thumbnail path the list rows
+ * use (Drive's own jpg via [Clip.thumbUrl]); a clip with no thumbnail yet shows its HH:MM instead.
+ * Tapping a frame opens that clip's player.
+ */
+@Composable
+private fun DayFilmstrip(clips: List<Clip>, token: String?, onClipClick: (Clip) -> Unit) {
+    val strip = remember(clips) { clips.sortedBy { it.name } }   // chronological, oldest -> newest
+    LazyRow(
+        Modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(strip, key = { it.id }) { clip ->
+            FilmstripFrame(clip, token) { onClipClick(clip) }
+        }
+    }
+}
+
+/** One filmstrip frame: a fixed 72x40 thumbnail (or a HH:MM placeholder) with the time caption. */
+@Composable
+private fun FilmstripFrame(clip: Clip, token: String?, onClick: () -> Unit) {
+    val hhmm = clip.time.take(5)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
+        Box(
+            Modifier.width(72.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            val thumb = clip.thumbUrl
+            if (thumb != null && token != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(thumb)
+                        .addHeader("Authorization", "Bearer $token")
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = hhmm,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    hhmm,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            hhmm,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
