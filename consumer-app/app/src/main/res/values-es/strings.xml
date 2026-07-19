@@ -229,6 +229,8 @@
     <string name="health_outage_span">🕐 %1$s</string>
     <string name="health_ev_drop">Caída breve</string>
     <string name="health_ev_error">Error</string>
+    <string name="health_cluster_drops">%1$d caídas de %2$s</string>
+    <string name="health_cluster_errors">%1$d errores de %2$s</string>
 
     <!-- Gráfico de historial de batería -->
     <string name="battery_title">Batería</string>
@@ -285,6 +287,8 @@
     <string name="health_not_reporting">%s: sin reportar (revisa el teléfono)</string>
     <string name="health_low_battery">%1$s: batería baja %2$d%% (conéctalo)</string>
     <string name="health_disk_low">%1$s: almacenamiento casi lleno (%2$.1f GB libres)</string>
+    <string name="health_sync_down">Subida a Drive caída (sin latido de sync)</string>
+    <string name="health_sync_failing">Los clips no están subiendo a Drive</string>
 
     <!-- Resumen diario -->
     <string name="notif_digest_title">📸 Resumen del día</string>

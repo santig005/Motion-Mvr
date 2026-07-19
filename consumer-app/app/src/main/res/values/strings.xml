@@ -230,6 +230,8 @@
     <string name="health_outage_span">🕐 %1$s</string>
     <string name="health_ev_drop">Brief drop</string>
     <string name="health_ev_error">Error</string>
+    <string name="health_cluster_drops">%1$d %2$s drops</string>
+    <string name="health_cluster_errors">%1$d %2$s errors</string>
 
     <!-- Battery history graph -->
     <string name="battery_title">Battery</string>
@@ -286,6 +288,8 @@
     <string name="health_not_reporting">%s: not reporting (check the phone)</string>
     <string name="health_low_battery">%1$s: low battery %2$d%% (plug it in)</string>
     <string name="health_disk_low">%1$s: storage almost full (%2$.1f GB free)</string>
+    <string name="health_sync_down">Cloud upload down (no sync heartbeat)</string>
+    <string name="health_sync_failing">Clips aren\'t uploading to Drive</string>
 
     <!-- Daily recap digest -->
     <string name="notif_digest_title">📸 Daily recap</string>

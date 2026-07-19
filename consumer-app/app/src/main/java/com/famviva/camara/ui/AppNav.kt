@@ -129,9 +129,12 @@ import com.famviva.camara.R
 import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.agoLabel
+import com.famviva.camara.data.BlipCluster
+import com.famviva.camara.data.BlipClusterEntry
 import com.famviva.camara.data.BlipEntry
 import com.famviva.camara.data.buildHealthTimeline
 import com.famviva.camara.data.Clip
+import com.famviva.camara.data.clusterHealthTimeline
 import com.famviva.camara.data.dateKeyOf
 import com.famviva.camara.data.DayPeriod
 import com.famviva.camara.data.formatDurationSec
@@ -2020,7 +2023,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
     LaunchedEffect(Unit) {
         loading = true
         val raw = runCatching { drive.fetchOutageEvents() }.getOrDefault(emptyList())
-        timeline = buildHealthTimeline(raw)
+        timeline = clusterHealthTimeline(buildHealthTimeline(raw))
         sync = runCatching { drive.fetchSyncStatus() }.getOrNull()
         loading = false
     }
@@ -2085,6 +2088,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                         when (entry) {
                             is OutageEntry -> OutageCard(entry.outage)
                             is BlipEntry -> BlipRow(entry.event)
+                            is BlipClusterEntry -> BlipClusterRow(entry.cluster)
                         }
                     }
                 }
@@ -2246,6 +2250,38 @@ private fun BlipRow(event: OutageEvent) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/** A collapsed reconnect storm: one card standing in for many same-kind blips ("87 detector drops ·
+ *  10:46–12:49"), so a flapping link doesn't bury the real outages. */
+@Composable
+private fun BlipClusterRow(cluster: BlipCluster) {
+    val isError = cluster.ev == "error"
+    val label = when (cluster.ev) {
+        "drop" -> stringResource(R.string.health_cluster_drops, cluster.count, serviceName(cluster.svc))
+        "error" -> stringResource(R.string.health_cluster_errors, cluster.count, serviceName(cluster.svc))
+        else -> "${cluster.count}× ${serviceName(cluster.svc)}"
+    }
+    val span = "${hourMinuteLabel(cluster.firstTs)} – ${hourMinuteLabel(cluster.lastTs)}"
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                label + (cluster.cam?.let { " · $it" } ?: ""),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                stringResource(R.string.health_outage_span, span),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

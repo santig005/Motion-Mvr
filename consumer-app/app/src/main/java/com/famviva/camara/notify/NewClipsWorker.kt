@@ -98,7 +98,9 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             }
         }
 
-        // 2) NVR health (status.json): recording down / not reporting / low battery
+        // 2) NVR health (status.json): recording down / not reporting / low battery — plus the sync
+        //    pipeline (sync_status.json). Fetched up front so it can join the same alert/dedup path.
+        val syncStatus = runCatching { drive.fetchSyncStatus() }.getOrNull()
         runCatching { drive.fetchCameraHealth() }.onSuccess { health ->
             widgetHealth = health
             // Record battery readings even while the app is closed, so the history (and the ETA fit)
@@ -118,7 +120,20 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     h.diskLow() -> ctx.getString(R.string.health_disk_low, h.camera, (h.diskFreeMb ?: 0) / 1024.0)
                     else -> null
                 }
-            }.sorted()
+            }.toMutableList()
+            // Sync pipeline: a dead uploader also stops status.json reaching Drive (caught above as
+            // "not reporting"), but an alive-but-not-uploading uploader is invisible there — recording
+            // looks fine while clips never leave the phone. Alert on a stale heartbeat OR a fast lane
+            // that hasn't succeeded in a while. Only when the uploader's own heartbeat is fresh do we
+            // trust "not uploading", so a total outage doesn't double-fire with "not reporting".
+            syncStatus?.let { s ->
+                when {
+                    s.isStale(now) -> ctx.getString(R.string.health_sync_down)
+                    now - s.lastFastOk > SYNC_LANE_STALE_SEC -> ctx.getString(R.string.health_sync_failing)
+                    else -> null
+                }?.let { issues += it }
+            }
+            issues.sort()
             if (issues.isNotEmpty()) problem = true
             val sig = issues.joinToString(" | ")
             val prev = store.lastHealthAlert()
@@ -187,6 +202,10 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
     companion object {
         private const val WORK_NAME = "new-clips-poll"
         private const val FOLLOWUP_NAME = "new-clips-followup"
+
+        // The fast lane runs every ~25 s and stamps last_fast_ok on every success (an empty upload
+        // still counts), so ~30 min without one means uploads are genuinely failing, not just idle.
+        private const val SYNC_LANE_STALE_SEC = 1800L
 
         private fun connectedConstraints() =
             Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()

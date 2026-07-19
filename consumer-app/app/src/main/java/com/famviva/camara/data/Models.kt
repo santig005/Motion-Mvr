@@ -304,6 +304,20 @@ data class BlipEntry(val event: OutageEvent) : HealthEvent {
     override val ts: Long get() = event.ts
 }
 
+/** Many same-kind blips (a reconnect storm) collapsed into one row, so a flapping link doesn't bury
+ *  the real outages under hundreds of near-identical lines. Its ts is the latest blip's. */
+data class BlipCluster(
+    val svc: String,
+    val cam: String?,
+    val ev: String,         // drop | error
+    val count: Int,
+    val firstTs: Long,
+    val lastTs: Long,
+)
+data class BlipClusterEntry(val cluster: BlipCluster) : HealthEvent {
+    override val ts: Long get() = cluster.lastTs
+}
+
 /**
  * Pairs down->up events per service (+camera) into [Outage] spans and keeps drop/error lines as
  * [BlipEntry]s. A down with no following up is an ongoing outage; an up with no matching down is
@@ -326,6 +340,41 @@ fun buildHealthTimeline(events: List<OutageEvent>): List<HealthEvent> {
     }
     for ((_, down) in open) out += OutageEntry(Outage(down.svc, down.cam, down.ts, null, null))
     return out.sortedByDescending { it.ts }
+}
+
+/**
+ * Collapses reconnect storms: runs of at least [minSize] same-(svc, ev, cam) blips within [gapSec]
+ * of each other on the same local day become a single [BlipClusterEntry] ("87 detector drops ·
+ * 10:46–12:49"). Outages and isolated blips pass through unchanged. Input and output are newest-first.
+ */
+fun clusterHealthTimeline(
+    timeline: List<HealthEvent>,
+    gapSec: Long = 900,        // <=15 min between adjacent blips keeps a storm as one run
+    minSize: Int = 3,          // fewer than this stays as individual rows (a real pair still reads fine)
+): List<HealthEvent> {
+    val result = mutableListOf<HealthEvent>()
+    result += timeline.filterIsInstance<OutageEntry>()
+    // Group blips by kind AND day so a cluster never straddles a day boundary (day-grouped below) or
+    // merges different services interleaved during the same storm.
+    val blips = timeline.filterIsInstance<BlipEntry>().map { it.event }
+    val groups = blips.groupBy { "${it.svc}|${it.ev}|${it.cam ?: ""}|${dateKeyOf(it.ts)}" }
+    for ((_, groupEvents) in groups) {
+        val sorted = groupEvents.sortedBy { it.ts }
+        var i = 0
+        while (i < sorted.size) {
+            var j = i + 1
+            while (j < sorted.size && sorted[j].ts - sorted[j - 1].ts <= gapSec) j++
+            val run = sorted.subList(i, j)
+            if (run.size >= minSize) {
+                val f = run.first()
+                result += BlipClusterEntry(BlipCluster(f.svc, f.cam, f.ev, run.size, f.ts, run.last().ts))
+            } else {
+                run.forEach { result += BlipEntry(it) }
+            }
+            i = j
+        }
+    }
+    return result.sortedByDescending { it.ts }
 }
 
 /** Sync-pipeline heartbeat, read from the NVR's sync_status.json. */
