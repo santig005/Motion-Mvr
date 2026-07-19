@@ -37,7 +37,8 @@ catches the same people and doorways. The detector emits **motion windows** `(st
 seconds to a small file.
 
 Detection only decides *what to keep*; it never gates recording, so a missed detection can't lose
-footage that's already in the ring.
+footage that's already in the ring. The first ~3 s after a (re)connect are ignored
+(`DET_GRACE`) — reconnect frames glitch and used to fire false motion events.
 
 ### 3. Keeper (trim + persist)
 A 5 s loop that:
@@ -47,6 +48,9 @@ A 5 s loop that:
 - **Builds clips.** For each *ready* motion window (its end is now in completed segments), it
   concatenates the overlapping segments and produces one clip:
   - **Pre/post-roll** come from including neighbouring segments.
+  - **Gap-split:** if a camera dropout left a hole between segments (consecutive segment starts more
+    than ~2 segment-lengths apart), the window is rendered as *separate* clips instead of one clip
+    that silently time-jumps across the missing footage.
   - **Content-based tail trim:** it profiles the concatenated 2K once to find the *last real motion*
     and cuts the clip at `last_motion + TAIL_PAD`. This removes the dead tail and is immune to the
     variable skew between the 360p detector clock and the 2K, so raising the merge gap never
@@ -107,9 +111,27 @@ Cameras/<cam>/status.json
 ## Health signalling
 
 The NVR writes `status.json` per camera: `recording_ok` (segment freshness), `updated` (a heartbeat
-every ~20 min, independent of whether there's motion), and optional `battery`/`charging` (via
-Termux:API). The app reads these and distinguishes three failure modes: **camera down** (not
-recording), **not reporting** (heartbeat stale ⇒ phone probably off/offline), and **low battery**.
+every ~20 min, independent of whether there's motion), `down_since` while recording is down, and
+optional `battery`/`charging` (via Termux:API). The app reads these and distinguishes three failure
+modes: **camera down** (not recording), **not reporting** (heartbeat stale ⇒ phone probably
+off/offline), and **low battery**.
+
+Two more files at the cameras root make outages *reconstructable after the fact*, not just visible
+live (they ride the same csv/json refresh lane):
+
+- **`events.jsonl`** — an append-only event log (one JSON object per line): recording `down`/`up`
+  with the outage duration, segmenter/detector drops with how long the run lasted, and sync
+  failures. Trimmed at line boundaries past ~256 KB by cloud-sync (its only trimmer). The app's
+  **Salud** screen renders it as an outage timeline: which service fell, when, and for how long.
+- **`sync_status.json`** — cloud-sync's own health, written once per cycle: per-lane last-success
+  epochs and the last error. The uploader can't report its own death, so the app infers "sync down"
+  from this file's `updated` going stale.
+
+On the app side, freshness is explicit: reopening from the background auto-refetches when in-memory
+data is older than ~60 s, a line under the health cards shows *when* the data was fetched, and the
+"not reporting" alarm only fires on **freshly fetched** data whose heartbeat is genuinely stale —
+in-memory data from hours ago is labelled "sin refrescar" instead of being judged against the
+current clock (that misjudgement once produced a false "5 h sin reportar" while the NVR was fine).
 
 While discharging, the same heartbeat also fits a linear regression over a rolling ~4h window of
 `(epoch, battery%)` samples (kept in a small local file, not uploaded) to derive a discharge rate
@@ -148,17 +170,22 @@ A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choice
   (`PixelCopy`, no player/Surface changes) and saves a JPEG to the gallery.
 - **Presence-aware alerts (away mode).** Motion notifications are gated by a Home/Away state: muted
   at Home, delivered when Away (health warnings are never gated). It can be set manually or
-  **automatically by location** — the background poll compares the current fix against a saved home
-  radius. No OS geofencing: the alerts are already poll-driven, so a 15-min location check is enough
-  and avoids a receiver + reboot re-registration.
+  **automatically by location**: an OS geofence (Play Services, ENTER/EXIT receiver, re-registered
+  on boot) keeps the state fresh between polls, and the 15-min poll's distance check stays on as a
+  fallback because the OS drops geofences. Alerts can additionally be gated by a **minimum motion
+  intensity** (all / medium+ / strong only, fail-open when a clip has no metric yet).
 - **Offline & storage.** New clips can auto-download for offline playback (off / Wi-Fi only / Wi-Fi
   + mobile data). A storage screen shows the on-device vs. Drive footprint as a per-day donut, and
   clips can be starred as **favorites** that survive batch deletes.
 - **Battery forecast.** For each camera the app charts the battery history and shows a "lasts until"
   ETA, cross-checking the NVR's own estimate against a local fit.
-- **Screens:** Days → Clips of a day → Player, plus Live, Away-mode setup, Storage, Favorites,
-  Battery, and the in-app live-log viewer. Day/period filters, unseen-clip tracking, pull-to-refresh,
-  long-press share/download, a motion-intensity meter, and per-clip upload latency run throughout.
+- **Screens:** a bottom NavigationBar with four tabs — Clips (days → day list → player), Live,
+  Favorites and **Salud** (health: current status, sync health, outage timeline) — plus Away-mode
+  setup, Storage (per-day donut with tappable slices), Battery, and the in-app live-log viewer.
+  Day/period filters, a chronological **thumbnail filmstrip** atop each day, unseen-clip tracking,
+  pull-to-refresh, long-press share/download, a motion-intensity meter, and per-clip upload latency
+  run throughout. A **Glance home-screen widget** shows camera health + today's clips from the
+  15-min poll's snapshot (no network of its own, and it shows the snapshot's age).
 - **Notifications.** A ~15-minute WorkManager poll compares the newest clip against the last one it
   announced and posts a **photo (BigPicture)** notification for new clips — tapping it jumps to the
   live view — plus separate health alerts. Motion alerts respect the away state above. (A future push

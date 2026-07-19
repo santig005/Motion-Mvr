@@ -72,10 +72,13 @@ gradlew :app:assembleDebug
 
 ## Roadmap
 
-- Instant push (FCM) instead of the ~15-min WorkManager poll.
-- Distinguish clips per camera (today it groups every `mt_`).
-- True OS geofencing for away mode (today it's a location check on the poll).
-- "Person" label once Frigate is in the loop.
+- Instant push (FCM) instead of the ~15-min WorkManager poll (needs a Firebase project).
+- Distinguish clips per camera (today it groups every `mt_`; premature with one camera).
+- "Person" label once Frigate is in the loop (needs an always-on host).
+
+Done since this list was written: OS geofencing for away mode (with the poll kept as fallback),
+bottom-tab navigation, Salud screen with the outage timeline, alert intensity gating, home-screen
+widget, and the per-day thumbnail filmstrip.
 
 Recorded-clip capture from the live view was considered and dropped: the NVR already records exactly
 the motion you'd want, so it added no value over the live snapshot.
