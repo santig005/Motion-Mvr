@@ -3,6 +3,17 @@ package com.famviva.camara.notify
 import android.content.Context
 import java.time.LocalTime
 
+/**
+ * Minimum motion intensity a new clip must reach to fire its alert. Levels map to
+ * [com.famviva.camara.data.motionIntensityLevel] (1..5): STRONG mirrors the clip-list "strong only"
+ * chip (>=4); MEDIUM_PLUS is moderate and up (>=3). ALL keeps the original behaviour.
+ */
+enum class AlertIntensity(val minLevel: Int) {
+    ALL(1),
+    MEDIUM_PLUS(3),
+    STRONG(4),
+}
+
 /** Remembers the most recent clip already notified, so alerts aren't repeated. */
 class NotifyStore(context: Context) {
     private val prefs = context.getSharedPreferences("notify", Context.MODE_PRIVATE)
@@ -16,6 +27,14 @@ class NotifyStore(context: Context) {
     var quietHours: Boolean
         get() = prefs.getBoolean(KEY_QUIET, false)
         set(value) = prefs.edit().putBoolean(KEY_QUIET, value).apply()
+
+    /** Minimum motion intensity a new clip must reach to fire its alert (ALL by default = current
+     *  behaviour). Read by the background poll; a clip whose intensity is unknown always passes
+     *  (fail-open — better to over-notify than silently drop a real event). */
+    var minAlertLevel: AlertIntensity
+        get() = runCatching { AlertIntensity.valueOf(prefs.getString(KEY_ALERT_LEVEL, null) ?: "") }
+            .getOrDefault(AlertIntensity.ALL)
+        set(value) = prefs.edit().putString(KEY_ALERT_LEVEL, value.name).apply()
 
     /** True if quiet-hours is enabled and [now] falls in the (possibly midnight-spanning) window. */
     fun inQuietHours(now: LocalTime = LocalTime.now()): Boolean {
@@ -42,6 +61,7 @@ class NotifyStore(context: Context) {
         const val KEY_HEALTH = "health_alert"
         const val KEY_DIGEST = "digest_day"
         const val KEY_QUIET = "quiet_hours"
+        const val KEY_ALERT_LEVEL = "alert_level"
         val QUIET_START: LocalTime = LocalTime.of(23, 0)   // 11 p.m.
         val QUIET_END: LocalTime = LocalTime.of(7, 0)      // 7 a.m.
     }

@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
@@ -65,6 +66,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
@@ -94,6 +97,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -111,9 +116,11 @@ import coil.request.ImageRequest
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.famviva.camara.DateFilter
 import com.famviva.camara.MainViewModel
@@ -145,11 +152,15 @@ import com.famviva.camara.data.relativeLabel
 import com.famviva.camara.data.uploadDelayLabel
 import com.famviva.camara.data.AwayMode
 import com.famviva.camara.data.AwayModeStore
+import com.famviva.camara.data.GeofenceManager
+import com.famviva.camara.notify.AlertIntensity
 import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
 import java.util.Locale
+import kotlin.math.atan2
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlinx.coroutines.launch
 
 @Composable
@@ -194,7 +205,25 @@ fun AppNav(
         }
     }
 
-    NavHost(navController = nav, startDestination = "days") {
+    // The bottom bar shows only on the four top-level destinations (not on player/storage/away/etc.).
+    val backStackEntry by nav.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+    val onTop = TopTab.entries.any { it.route == currentRoute }
+
+    Scaffold(
+        bottomBar = {
+            if (onTop) {
+                AppBottomBar(currentRoute) { route -> navigateTab(nav, route) }
+            }
+        },
+    ) { innerPadding ->
+        // Only the bottom inset matters here: each screen owns its own top bar / status-bar inset,
+        // so applying the full padding would double it. This inset keeps content clear of the bar.
+        NavHost(
+            navController = nav,
+            startDestination = "days",
+            modifier = Modifier.padding(bottom = innerPadding.calculateBottomPadding()),
+        ) {
         composable("days") { DaysScreen(vm, nav) }
         composable("health") { HealthScreen(vm, nav, drive) }
         composable("live") { LiveScreen(nav) }
@@ -224,14 +253,50 @@ fun AppNav(
             if (clip != null) PlayerScreen(clip, vm.localFileOrNull(clip), tokenProvider) { nav.popBackStack() }
             else CenteredText(stringResource(R.string.clip_not_found))
         }
+        }
     }
 }
 
 /**
- * Single overflow (⋮) menu for the home screen, so the top bar stays uncluttered: navigation
- * (Live / Favorites / Storage), the auto-download policy (Off / Wi-Fi only / Wi-Fi + mobile data),
- * and the language switch — each showing its current state inline with a checkmark. Refresh stays a
- * direct icon (it's the most frequent action).
+ * The four top-level destinations reachable from the bottom bar. Clips is the start destination
+ * (home); the other three were previously buried in the ⋮ menu / a top-bar icon.
+ */
+private enum class TopTab(val route: String, val labelRes: Int, val icon: ImageVector) {
+    CLIPS("days", R.string.tab_clips, Icons.Filled.VideoLibrary),
+    LIVE("live", R.string.live_title, Icons.Filled.Videocam),
+    FAVORITES("favorites", R.string.favorites_title, Icons.Filled.Star),
+    HEALTH("health", R.string.health_title, Icons.Filled.MonitorHeart),
+}
+
+/** Standard state-saving tab navigation: one entry per tab on the back stack, each tab's own state
+ *  saved/restored, and re-tapping the current tab is a no-op (single-top). */
+private fun navigateTab(nav: NavHostController, route: String) {
+    nav.navigate(route) {
+        popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+@Composable
+private fun AppBottomBar(currentRoute: String?, onSelect: (String) -> Unit) {
+    NavigationBar {
+        TopTab.entries.forEach { tab ->
+            NavigationBarItem(
+                selected = currentRoute == tab.route,
+                onClick = { onSelect(tab.route) },
+                icon = { Icon(tab.icon, contentDescription = null) },
+                label = { Text(stringResource(tab.labelRes)) },
+            )
+        }
+    }
+}
+
+/**
+ * Single overflow (⋮) menu for the home screen, so the top bar stays uncluttered. Live / Favoritos /
+ * Salud now live in the bottom bar; what remains here is the secondary settings: Storage, the
+ * auto-download policy, the motion-alert gate (away / quiet-hours / min intensity) and the language
+ * switch — each showing its current state inline with a checkmark. Refresh stays a direct icon.
  */
 @Composable
 private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayChanged: () -> Unit = {}) {
@@ -248,6 +313,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
     // store, so the menu toggles it there directly — same pattern as away/language.
     val notifyStore = remember { NotifyStore(context) }
     var quietHours by remember { mutableStateOf(notifyStore.quietHours) }
+    var alertLevel by remember { mutableStateOf(notifyStore.minAlertLevel) }
 
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
@@ -258,21 +324,12 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
             awayMode = awayStore.mode
             manualAway = awayStore.manualAway
             quietHours = notifyStore.quietHours
+            alertLevel = notifyStore.minAlertLevel
             expanded = true
         }) {
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.live_title)) },
-                leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null) },
-                onClick = { expanded = false; nav.navigate("live") },
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.favorites_title)) },
-                leadingIcon = { Icon(Icons.Filled.Star, contentDescription = null) },
-                onClick = { expanded = false; nav.navigate("favorites") },
-            )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.storage_title)) },
                 leadingIcon = { Icon(Icons.Filled.Storage, contentDescription = null) },
@@ -306,6 +363,8 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
                 awayStore.manualAway = target
                 awayMode = AwayMode.MANUAL
                 manualAway = target
+                // Leaving AUTO: tear down the OS geofence (MANUAL owns the state by hand).
+                GeofenceManager.remove(context)
                 onAwayChanged()
                 Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
             }
@@ -328,6 +387,28 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
                     context.getString(if (target) R.string.quiet_hours_on_toast else R.string.quiet_hours_off_toast),
                     Toast.LENGTH_SHORT,
                 ).show()
+            }
+            HorizontalDivider()
+
+            // Which motion strengths are worth a push. Uses the same 1..5 intensity classification as
+            // the clip-list "strong only" chip. Clips below the threshold still appear in the app.
+            MenuSectionLabel(stringResource(R.string.alert_level_title))
+            fun pickAlertLevel(target: AlertIntensity, toastRes: Int) {
+                expanded = false
+                if (notifyStore.minAlertLevel != target) {
+                    notifyStore.minAlertLevel = target
+                    alertLevel = target
+                    Toast.makeText(context, context.getString(toastRes), Toast.LENGTH_SHORT).show()
+                }
+            }
+            CheckableMenuItem(R.string.alert_level_all, selected = alertLevel == AlertIntensity.ALL) {
+                pickAlertLevel(AlertIntensity.ALL, R.string.alert_level_all_toast)
+            }
+            CheckableMenuItem(R.string.alert_level_medium, selected = alertLevel == AlertIntensity.MEDIUM_PLUS) {
+                pickAlertLevel(AlertIntensity.MEDIUM_PLUS, R.string.alert_level_medium_toast)
+            }
+            CheckableMenuItem(R.string.alert_level_strong, selected = alertLevel == AlertIntensity.STRONG) {
+                pickAlertLevel(AlertIntensity.STRONG, R.string.alert_level_strong_toast)
             }
             HorizontalDivider()
 
@@ -401,9 +482,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     actionIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 actions = {
-                    IconButton(onClick = { nav.navigate("health") }) {
-                        Icon(Icons.Filled.MonitorHeart, contentDescription = stringResource(R.string.health_open))
-                    }
+                    // Salud (health) is now a bottom-bar tab; Live/Favoritos likewise moved out of ⋮.
                     IconButton(onClick = { vm.load() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
                     }
@@ -540,8 +619,9 @@ private fun DayCard(day: String, clips: List<Clip>, newCount: Int, onClick: () -
  *  footprint. Passed through navigation to the day-detail screen, so it must be a stable name. */
 enum class StorageSection { LOCAL, DRIVE }
 
-/** One donut arc / legend entry. */
-private data class DonutSlice(val value: Long, val color: Color)
+/** One donut arc. [day] is the YYYYMMDD it maps to for tap-to-open, or null for the folded "Other"
+ *  wedge (which spans several days and so isn't individually navigable). */
+private data class DonutSlice(val value: Long, val color: Color, val day: String?)
 
 /**
  * Storage overview with two switchable sections:
@@ -568,8 +648,8 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
     val head = ranked.take(palette.size)
     val tailBytes = ranked.drop(palette.size).sumOf { it.second }
     val slices = buildList {
-        head.forEachIndexed { i, (_, bytes) -> add(DonutSlice(bytes, palette[i])) }
-        if (tailBytes > 0) add(DonutSlice(tailBytes, otherColor))
+        head.forEachIndexed { i, (day, bytes) -> add(DonutSlice(bytes, palette[i], day)) }
+        if (tailBytes > 0) add(DonutSlice(tailBytes, otherColor, null))
     }
 
     var confirmDeleteAll by remember { mutableStateOf(false) }
@@ -613,9 +693,25 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
                         centerBottom = stringResource(
                             if (isLocal) R.string.storage_section_local else R.string.storage_section_drive,
                         ),
+                        // A tapped slice opens that day's clips — same destination as its legend row.
+                        onSliceTap = { day -> nav.navigate("storage_day/${section.name}/$day") },
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+
+                // Honest headroom: average per day across the days shown, extrapolated to a month.
+                // Coarse on purpose (no fake precision) — it's a "roughly this much" sense of the rate.
+                val dayCount = ranked.size
+                if (dayCount > 0 && totalBytes > 0) {
+                    val avgPerDay = totalBytes / dayCount
+                    Text(
+                        stringResource(R.string.storage_headroom, humanSize(avgPerDay), humanSize(avgPerDay * 30)),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
 
                 // The donut folds days past the palette into a single "Other" wedge, but the legend
                 // lists every day individually (each tappable/deletable). Days beyond the palette
@@ -697,14 +793,49 @@ private fun StorageSectionSelector(section: StorageSection, onSelect: (StorageSe
 /** Donut of per-day slices with the total in the middle (Google-One style). Slices are separated
  *  by a small surface gap so adjacent days stay distinct even for colour-vision deficiencies. */
 @Composable
-private fun StorageDonut(slices: List<DonutSlice>, centerTop: String, centerBottom: String) {
+private fun StorageDonut(
+    slices: List<DonutSlice>,
+    centerTop: String,
+    centerBottom: String,
+    onSliceTap: (String) -> Unit,
+) {
+    // Same total the arcs are sized against, so hit-test boundaries line up with what's drawn.
+    val total = slices.sumOf { it.value }.coerceAtLeast(1L).toFloat()
     Box(Modifier.size(190.dp), contentAlignment = Alignment.Center) {
-        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        androidx.compose.foundation.Canvas(
+            Modifier.fillMaxSize().pointerInput(slices) {
+                // Map a tap to a slice: check it lands on the ring band (radius), then walk the same
+                // -90°-start / clockwise sweeps the draw uses and open the matching day.
+                detectTapGestures { pos ->
+                    val strokePx = 30.dp.toPx()
+                    val cx = size.width / 2f
+                    val cy = size.height / 2f
+                    val ringRadius = (minOf(size.width, size.height).toFloat() - strokePx) / 2f
+                    val dx = pos.x - cx
+                    val dy = pos.y - cy
+                    val r = sqrt(dx * dx + dy * dy)
+                    if (kotlin.math.abs(r - ringRadius) > strokePx / 2f + 8.dp.toPx()) return@detectTapGestures
+                    // atan2 gives degrees clockwise from 3 o'clock (screen y is down); the ring starts
+                    // at 12 o'clock (-90°), so rebase and normalise into [0,360).
+                    val deg = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
+                    var rel = (deg + 90f) % 360f
+                    if (rel < 0f) rel += 360f
+                    var acc = 0f
+                    for (s in slices) {
+                        val sweep = 360f * (s.value.toFloat() / total)
+                        if (rel >= acc && rel < acc + sweep) {
+                            s.day?.let(onSliceTap)
+                            break
+                        }
+                        acc += sweep
+                    }
+                }
+            },
+        ) {
             val strokePx = 30.dp.toPx()
             val d = size.minDimension - strokePx
             val topLeft = androidx.compose.ui.geometry.Offset((size.width - d) / 2f, (size.height - d) / 2f)
             val arcSize = androidx.compose.ui.geometry.Size(d, d)
-            val total = slices.sumOf { it.value }.coerceAtLeast(1L).toFloat()
             val gap = if (slices.size > 1) 3f else 0f
             var start = -90f
             slices.forEach { s ->
@@ -1112,16 +1243,11 @@ private fun FavoritesScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                // Top-level tab: no back arrow (the bottom bar is the way between tabs).
                 title = { Text(stringResource(R.string.favorites_title)) },
-                navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
             )
         },
@@ -1837,16 +1963,11 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
     Scaffold(
         topBar = {
             TopAppBar(
+                // Top-level tab (Salud): no back arrow — switch tabs from the bottom bar.
                 title = { Text(stringResource(R.string.health_title)) },
-                navigationIcon = {
-                    IconButton(onClick = { nav.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     titleContentColor = MaterialTheme.colorScheme.onPrimary,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
             )
         },

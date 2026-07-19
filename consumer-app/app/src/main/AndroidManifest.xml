@@ -7,6 +7,8 @@
          Background access lets it work while the app is closed (API 29+). -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Re-register the OS geofence after a reboot (the OS drops geofences on boot). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- osmdroid map tiles for the away-mode home picker. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -39,6 +41,20 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Away-mode OS geofence: receives ENTER/EXIT transitions (internal, never exported). -->
+        <receiver
+            android:name=".data.GeofenceBroadcastReceiver"
+            android:exported="false" />
+
+        <!-- Re-registers the geofence + pollers after a reboot. -->
+        <receiver
+            android:name=".data.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- AppCompat stores the user's in-app language choice and re-applies it on launch. -->
         <service

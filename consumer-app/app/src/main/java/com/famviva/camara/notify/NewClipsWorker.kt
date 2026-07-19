@@ -18,6 +18,7 @@ import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.LocationProvider
 import com.famviva.camara.data.OfflineStore
+import com.famviva.camara.data.motionIntensityLevel
 import java.util.concurrent.TimeUnit
 
 /**
@@ -52,12 +53,28 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         if (awayEffective(ctx, awayStore)) {
                             problem = true             // an intrusion while away: re-check sooner
                             if (!store.inQuietHours()) {
-                                val newestClip = recent.first()   // newest overall = newest of the new ones
-                                val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
-                                Notifications.notifyNewClips(
-                                    ctx, newOnes.size, newestClip.time, thumb,
-                                    Notifications.clipRoute(newestClip.id),
-                                )
+                                // Min-intensity gate: only clips at/above the chosen level fire an
+                                // alert (they all still appear in the app). recentClips() carries no
+                                // metrics, so fetch them only when a filter is active — and let a
+                                // clip with unknown intensity through (fail-open).
+                                val minLevel = store.minAlertLevel.minLevel
+                                val alertable = if (minLevel <= AlertIntensity.ALL.minLevel) {
+                                    newOnes
+                                } else {
+                                    val metrics = drive.recentMetrics()
+                                    newOnes.filter { clip ->
+                                        val lvl = motionIntensityLevel(metrics[clip.name.removeSuffix(".mp4")]?.yavgMax)
+                                        lvl == null || lvl >= minLevel
+                                    }
+                                }
+                                if (alertable.isNotEmpty()) {
+                                    val newestClip = alertable.first()   // list stays newest-first
+                                    val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
+                                    Notifications.notifyNewClips(
+                                        ctx, alertable.size, newestClip.time, thumb,
+                                        Notifications.clipRoute(newestClip.id),
+                                    )
+                                }
                             }
                         }
                         store.setLastNotified(newest)

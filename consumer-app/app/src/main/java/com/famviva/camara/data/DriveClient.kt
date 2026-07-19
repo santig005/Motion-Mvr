@@ -315,6 +315,12 @@ class DriveClient(
         best
     }
 
+    /** Public wrapper for the background poll: clip base-name -> metrics, so the alert-gating can
+     *  classify a new clip's motion intensity ([recentClips] omits metrics to stay lightweight). */
+    suspend fun recentMetrics(): Map<String, ClipMetric> = withContext(Dispatchers.IO) {
+        runCatching { fetchMetrics(tokenProvider()) }.getOrDefault(emptyMap())
+    }
+
     /** Downloads the metrics.csv files across the tree and returns: clip_name -> metrics (yavg_max, frames, dur_s). */
     private fun fetchMetrics(token: String): Map<String, ClipMetric> {
         val out = HashMap<String, ClipMetric>()

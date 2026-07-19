@@ -16,6 +16,9 @@
     <string name="lang_english">English</string>
     <string name="lang_spanish">Español</string>
 
+    <!-- Pestañas de la barra inferior -->
+    <string name="tab_clips">Clips</string>
+
     <!-- Filtros de fecha -->
     <string name="filter_all">Todo</string>
     <string name="filter_today">Hoy</string>
@@ -116,6 +119,7 @@
     <string name="storage_sort_size">Tamaño</string>
     <string name="storage_sort_time">Hora</string>
     <string name="storage_day_empty_local">No hay nada descargado de este día.</string>
+    <string name="storage_headroom">~%1$s/día en promedio · a este ritmo ~%2$s/mes</string>
 
     <!-- Overlay de la tarjeta -->
     <string name="overlay_new">NUEVO</string>
@@ -146,6 +150,14 @@
     <string name="quiet_hours">🌙 Silenciar de noche (23–7)</string>
     <string name="quiet_hours_on_toast">Alertas de movimiento en silencio de noche (23–7). Los avisos de salud siguen llegando.</string>
     <string name="quiet_hours_off_toast">Silencio nocturno desactivado: las alertas de movimiento suenan a cualquier hora.</string>
+    <!-- Intensidad mínima de movimiento que amerita aviso (misma escala 1..5 que los chips de filtro) -->
+    <string name="alert_level_title">Nivel de alerta</string>
+    <string name="alert_level_all">Todas</string>
+    <string name="alert_level_medium">Solo medianas y fuertes</string>
+    <string name="alert_level_strong">Solo fuertes</string>
+    <string name="alert_level_all_toast">Alertas para todo el movimiento.</string>
+    <string name="alert_level_medium_toast">Alertas solo para movimiento mediano y fuerte. Los clips más leves siguen apareciendo en la app.</string>
+    <string name="alert_level_strong_toast">Alertas solo para movimiento fuerte. Los clips más leves siguen apareciendo en la app.</string>
     <!-- Pantalla de ajustes del modo ausente -->
     <string name="away_settings_title">Modo ausente</string>
     <string name="away_settings_intro">El modo automático activa las alertas de movimiento cuando sales de casa y las silencia al volver. Revisa tu ubicación en cada actualización en segundo plano; no hay seguimiento en vivo.</string>
@@ -174,6 +186,7 @@
     <string name="away_state_home">En casa — en silencio</string>
     <string name="away_home_saved_toast">Ubicación de casa guardada.</string>
     <string name="away_home_failed_toast">No se pudo obtener tu ubicación. Inténtalo al aire libre.</string>
+    <string name="away_geofence_active">📍 Geofence activo — cambio instantáneo al llegar o salir</string>
 
     <!-- Salud de la cámara -->
     <string name="status_down_title">⚠️ %s sin señal</string>

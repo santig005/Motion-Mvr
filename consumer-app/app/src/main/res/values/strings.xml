@@ -16,6 +16,9 @@
     <string name="lang_english">English</string>
     <string name="lang_spanish">Español</string>
 
+    <!-- Bottom navigation tabs -->
+    <string name="tab_clips">Clips</string>
+
     <!-- Date filters (top of the Days screen) -->
     <string name="filter_all">All</string>
     <string name="filter_today">Today</string>
@@ -116,6 +119,7 @@
     <string name="storage_sort_size">Size</string>
     <string name="storage_sort_time">Time</string>
     <string name="storage_day_empty_local">Nothing downloaded for this day.</string>
+    <string name="storage_headroom">~%1$s/day on average · about %2$s/month at this rate</string>
 
     <!-- Clip card overlay -->
     <string name="overlay_new">NEW</string>
@@ -147,6 +151,14 @@
     <string name="quiet_hours">🌙 Mute at night (11pm–7am)</string>
     <string name="quiet_hours_on_toast">Motion alerts muted overnight (11pm–7am). Health warnings still notify.</string>
     <string name="quiet_hours_off_toast">Night muting off: motion alerts fire at any hour.</string>
+    <!-- Minimum motion strength worth a push (same 1..5 scale as the clip filter chips) -->
+    <string name="alert_level_title">Alert level</string>
+    <string name="alert_level_all">All motion</string>
+    <string name="alert_level_medium">Medium and strong only</string>
+    <string name="alert_level_strong">Strong only</string>
+    <string name="alert_level_all_toast">Alerts for all motion.</string>
+    <string name="alert_level_medium_toast">Alerts only for medium and strong motion. Fainter clips still show in the app.</string>
+    <string name="alert_level_strong_toast">Alerts only for strong motion. Weaker clips still show in the app.</string>
     <!-- Away-mode settings screen -->
     <string name="away_settings_title">Away mode</string>
     <string name="away_settings_intro">Automatic mode turns motion alerts on when you leave home and mutes them when you\'re back. It checks your location on each background update — no live tracking.</string>
@@ -175,6 +187,7 @@
     <string name="away_state_home">At home — muted</string>
     <string name="away_home_saved_toast">Home location saved.</string>
     <string name="away_home_failed_toast">Couldn\'t get your location. Try again outdoors.</string>
+    <string name="away_geofence_active">📍 Geofence active — instant switch on arrival/leaving</string>
 
     <!-- Camera health -->
     <string name="status_down_title">⚠️ %s no signal</string>

@@ -70,16 +70,7 @@ data class Clip(
      * Motion intensity level 1..5 from yavg_max (null if there's no metric):
      *  1 very faint/noise · 2 light (shadow/bug/background) · 3 moderate · 4 notable · 5 strong.
      */
-    val intensityLevel: Int?
-        get() = yavgMax?.let {
-            when {
-                it >= 28 -> 5
-                it >= 14 -> 4
-                it >= 6 -> 3
-                it >= 2 -> 2
-                else -> 1
-            }
-        }
+    val intensityLevel: Int? get() = motionIntensityLevel(yavgMax)
 
     /** "HH:MM:SS" to show the event time. */
     val time: String
@@ -138,6 +129,21 @@ data class Clip(
             val endInstant = end.atZone(ZoneId.systemDefault()).toInstant()
             return Duration.between(endInstant, created).seconds.coerceAtLeast(0)
         }
+}
+
+/**
+ * Motion intensity 1..5 from yavg_max (null if there's no metric). The single source of truth for
+ * the thresholds, shared by [Clip.intensityLevel] (clip list, filter chips) and the background
+ * alert-gating in [com.famviva.camara.notify.NewClipsWorker] so both classify identically.
+ */
+fun motionIntensityLevel(yavgMax: Double?): Int? = yavgMax?.let {
+    when {
+        it >= 28 -> 5
+        it >= 14 -> 4
+        it >= 6 -> 3
+        it >= 2 -> 2
+        else -> 1
+    }
 }
 
 private fun localHms(i: Instant): String {

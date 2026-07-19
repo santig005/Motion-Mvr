@@ -74,6 +74,12 @@ class AwayModeStore(context: Context) {
         get() = prefs.getBoolean(KEY_LAST_AUTO, true)
         set(value) = prefs.edit().putBoolean(KEY_LAST_AUTO, value).apply()
 
+    /** Whether an OS geofence is currently registered around home (best-effort UI hint only; the
+     *  poll works regardless). Set by [GeofenceManager] on register/remove. */
+    var geofenceActive: Boolean
+        get() = prefs.getBoolean(KEY_GEOFENCE, false)
+        set(value) = prefs.edit().putBoolean(KEY_GEOFENCE, value).apply()
+
     /** Distance in metres from [location] to the saved home, or null if home isn't set. */
     fun distanceFromHome(location: Location): Float? {
         val lat = homeLat ?: return null
@@ -91,6 +97,7 @@ class AwayModeStore(context: Context) {
         const val KEY_HOME_LNG = "home_lng"
         const val KEY_HOME_RADIUS = "home_radius_m"
         const val KEY_LAST_AUTO = "last_auto_away"
+        const val KEY_GEOFENCE = "geofence_active"
         const val DEFAULT_RADIUS_M = 150f
         const val LEGACY_AWAY = "away_mode"   // old key in the "notify" prefs
     }

@@ -18,6 +18,7 @@ import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.FavoritesStore
+import com.famviva.camara.data.GeofenceManager
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
 import com.famviva.camara.notify.DailyDigestWorker
@@ -56,6 +57,9 @@ class MainActivity : AppCompatActivity() {
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
         DailyDigestWorker.schedule(applicationContext)
+        // Re-assert the away-mode geofence (a no-op unless AUTO + home + permissions): the OS drops
+        // geofences on reboot / Play-services updates, so refresh it on every cold start too.
+        GeofenceManager.register(applicationContext)
 
         deepLink.value = intent?.getStringExtra(Notifications.EXTRA_DEST)
 

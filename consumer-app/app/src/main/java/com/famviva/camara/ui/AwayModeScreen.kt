@@ -55,6 +55,7 @@ import androidx.navigation.NavHostController
 import com.famviva.camara.R
 import com.famviva.camara.data.AwayMode
 import com.famviva.camara.data.AwayModeStore
+import com.famviva.camara.data.GeofenceManager
 import com.famviva.camara.data.LocationProvider
 import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
@@ -197,6 +198,8 @@ fun AwayModeScreen(nav: NavHostController) {
                             if (loc != null) {
                                 store.setHome(loc.latitude, loc.longitude)
                                 homePoint = GeoPoint(loc.latitude, loc.longitude)
+                                // Move the OS geofence to the new home if AUTO is already running.
+                                if (store.mode == AwayMode.AUTO) GeofenceManager.register(context)
                                 Toast.makeText(context, homeSavedToast, Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(context, homeFailedToast, Toast.LENGTH_SHORT).show()
@@ -262,6 +265,8 @@ fun AwayModeScreen(nav: NavHostController) {
                             onCheckedChange = { on ->
                                 auto = on
                                 store.mode = if (on) AwayMode.AUTO else AwayMode.MANUAL
+                                // Register/tear down the OS geofence to match the mode.
+                                if (on) GeofenceManager.register(context) else GeofenceManager.remove(context)
                             },
                         )
                     }
@@ -296,6 +301,15 @@ fun AwayModeScreen(nav: NavHostController) {
                                     stringResource(if (away) R.string.away_state_away else R.string.away_state_home),
                                 ),
                                 style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        // Instant transitions via an OS geofence (the poll is the fallback).
+                        if (auto && hasBackground && homeSet) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                stringResource(R.string.away_geofence_active),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
