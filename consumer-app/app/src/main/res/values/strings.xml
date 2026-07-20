@@ -246,6 +246,7 @@
     <string name="health_legend_degraded">360p (degraded)</string>
     <string name="health_legend_down">Down (no video)</string>
     <string name="health_legend_flap">Flapping (reconnects)</string>
+    <string name="health_legend_off">NVR off</string>
     <string name="health_lane_name_detector">Detector</string>
     <string name="health_lane_sub_recording">saved video</string>
     <string name="health_lane_sub_detector">motion detection</string>
@@ -260,6 +261,7 @@
     <string name="health_state_sync_warn">Transient failure</string>
     <string name="health_tap_hint">Tap a band to see its detail.</string>
     <string name="health_detail_flap">%1$d reconnects</string>
+    <string name="health_day_cover">%1$s of 24 h covered</string>
     <string name="health_sum_rec_outages">%1$d outages · worst %2$s</string>
     <string name="health_sum_rec_none">no outages</string>
     <string name="health_sum_flap_active">grouped reconnects</string>

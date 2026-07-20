@@ -614,6 +614,10 @@ data class DayCell(
     val partial: Boolean,
     val coveragePct: Double? = null,
     val metric: Int = 0,
+    /** Recording lane only: fraction of the full 24 h the NVR was actually alive that day (day_s /
+     *  86400). <1.0 means the phone was OFF part of the day — a real footage gap that must NOT be
+     *  disguised as OK coverage. 1.0 for other lanes and for a still-accumulating (partial) day. */
+    val coveredFrac: Double = 1.0,
 )
 
 /** A service's 30d lane as one cell per day. */
@@ -658,7 +662,12 @@ fun buildDailyTimeline(days: List<DailyHealth>): ServiceDailyTimeline {
             cov < 99.5 || subS.toDouble() / dayS >= 0.05 -> LaneState.DEGRADED
             else -> LaneState.OK
         }
-        rec.add(DayCell(date, recState, partial, coveragePct = cov, metric = rows.sumOf { it.recOutages }))
+        // How much of the full day the NVR was actually alive. For a FINALIZED day, day_s short of
+        // 86400 (per cam) means the phone was off part of the day — a real footage gap. A partial
+        // (today) day is naturally short because it isn't over, so it doesn't count as a gap.
+        val fullDay = 86_400L * rows.size
+        val coveredFrac = if (partial) 1.0 else (dayS.toDouble() / fullDay.toDouble()).coerceIn(0.0, 1.0)
+        rec.add(DayCell(date, recState, partial, coveragePct = cov, metric = rows.sumOf { it.recOutages }, coveredFrac = coveredFrac))
         val dDrops = rows.sumOf { it.detDrops }
         det.add(DayCell(date, flapStateForCount(dDrops), partial, metric = dDrops))
         val sDrops = rows.sumOf { it.segDrops }

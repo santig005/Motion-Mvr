@@ -2525,7 +2525,7 @@ private fun DailySwimlane(timeline: ServiceDailyTimeline) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            CoverageLegend()
+            CoverageLegend(showOff = true)
             HorizontalDivider(Modifier.padding(top = 12.dp, bottom = 8.dp))
             val cell = selCell
             val svc = selSvc
@@ -2674,6 +2674,8 @@ private fun DayLane(
 ) {
     val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     val outline = MaterialTheme.colorScheme.onSurface
+    val offColor = MaterialTheme.colorScheme.outline
+    val isRec = lane.svc == "recording"
     val cells = lane.cells
     androidx.compose.foundation.Canvas(
         modifier.height(26.dp).pointerInput(cells) {
@@ -2696,12 +2698,27 @@ private fun DayLane(
         cells.forEachIndexed { i, c ->
             val left = i * slot + gap / 2f
             val cw = (slot - gap).coerceAtLeast(1f)
-            drawRoundRect(
-                color = laneColor(c.state),
-                topLeft = Offset(left, top),
-                size = androidx.compose.ui.geometry.Size(cw, segH),
-                cornerRadius = corner,
-            )
+            val frac = c.coveredFrac.toFloat()
+            if (isRec && frac < 0.999f) {
+                // Grey base = the hours the NVR was OFF (no footage); the day's recording state fills
+                // up from the bottom in proportion to how much of the 24 h it was actually covering —
+                // so a night powered off reads as a half-empty cell, not a full green one.
+                drawRoundRect(offColor, topLeft = Offset(left, top), size = androidx.compose.ui.geometry.Size(cw, segH), cornerRadius = corner)
+                val ch = segH * frac.coerceIn(0f, 1f)
+                if (ch > 0f) drawRoundRect(
+                    color = laneColor(c.state),
+                    topLeft = Offset(left, top + (segH - ch)),
+                    size = androidx.compose.ui.geometry.Size(cw, ch),
+                    cornerRadius = corner,
+                )
+            } else {
+                drawRoundRect(
+                    color = laneColor(c.state),
+                    topLeft = Offset(left, top),
+                    size = androidx.compose.ui.geometry.Size(cw, segH),
+                    cornerRadius = corner,
+                )
+            }
             if (isFlapState(c.state)) drawHatch(left, top, cw, segH)
             if (selected == c) {
                 drawRoundRect(
@@ -2733,9 +2750,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHatch(
     }
 }
 
-/** Colour key so the segment encoding stays decodable (identity never by colour alone). */
+/** Colour key so the segment encoding stays decodable (identity never by colour alone). [showOff]
+ *  adds the grey "NVR off" key, only meaningful on the 30d recording lane. */
 @Composable
-private fun CoverageLegend() {
+private fun CoverageLegend(showOff: Boolean = false) {
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
         LegendKey(TL_OK, stringResource(R.string.health_legend_ok), hatched = false)
         Spacer(Modifier.width(14.dp))
@@ -2744,6 +2762,10 @@ private fun CoverageLegend() {
         LegendKey(TL_CRIT, stringResource(R.string.health_legend_down), hatched = false)
         Spacer(Modifier.width(14.dp))
         LegendKey(TL_SERIOUS, stringResource(R.string.health_legend_flap), hatched = true)
+        if (showOff) {
+            Spacer(Modifier.width(14.dp))
+            LegendKey(MaterialTheme.colorScheme.outline, stringResource(R.string.health_legend_off), hatched = false)
+        }
     }
 }
 
@@ -2787,8 +2809,14 @@ private fun SelectedDayDetail(svc: String, cell: DayCell) {
         "detector", "segmenter" -> if (cell.metric > 0) stringResource(R.string.health_detail_flap, cell.metric) else null
         else -> if (cell.metric > 0) stringResource(R.string.health_sum_sync_errors, cell.metric) else null
     }
+    // Recording: if the NVR was off part of the day, say how much of the 24 h it actually covered —
+    // an off stretch is a real footage gap, not "OK coverage".
+    val coverNote = if (svc == "recording" && cell.coveredFrac < 0.98)
+        stringResource(R.string.health_day_cover, formatDurationSec(context, (cell.coveredFrac * 86_400).toLong()))
+    else null
     DetailBody(laneColor(cell.state), isFlapState(cell.state), "${laneShortName(svc)} · ${stateLabel(svc, cell.state)}", buildString {
         append(prettyDate(context, cell.date))
+        if (coverNote != null) append(" · $coverNote")
         if (metricText != null) append(" · $metricText")
     })
 }

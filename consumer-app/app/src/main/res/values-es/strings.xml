@@ -245,6 +245,7 @@
     <string name="health_legend_degraded">360p (degradado)</string>
     <string name="health_legend_down">Caído (sin video)</string>
     <string name="health_legend_flap">Parpadeo (reconexiones)</string>
+    <string name="health_legend_off">NVR apagado</string>
     <string name="health_lane_name_detector">Detector</string>
     <string name="health_lane_sub_recording">video guardado</string>
     <string name="health_lane_sub_detector">detección mov.</string>
@@ -259,6 +260,7 @@
     <string name="health_state_sync_warn">Fallo transitorio</string>
     <string name="health_tap_hint">Toca una franja para ver el detalle.</string>
     <string name="health_detail_flap">%1$d reconexiones</string>
+    <string name="health_day_cover">cubrió %1$s de 24 h</string>
     <string name="health_sum_rec_outages">%1$d cortes · peor %2$s</string>
     <string name="health_sum_rec_none">sin cortes</string>
     <string name="health_sum_flap_active">reconexiones agrupadas</string>
