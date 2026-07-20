@@ -414,7 +414,13 @@ render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcoun
 build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to skip)
   local clip_start="$1" clip_end="$2" newest="$3" ss dseg se gap_th cur
   local -a segs=() starts=() ends=()
-  gap_th=$((2 * SEG_TIME + 4))                       # dropout > this (between consecutive seg starts) => split, don't concat across it
+  # A genuine camera dropout leaves a HOLE between one segment's END and the next segment's START.
+  # We compare end->start, NOT start->start: real segments last ~the camera GOP (~12s), not SEG_TIME,
+  # so consecutive HEALTHY segments' starts sit ~12-16s apart — the old `2*SEG_TIME+4` (12s) start-to-
+  # start test misread that normal spacing as a "dropout" and false-split ~1 in 5 events (a person's
+  # pre-roll/post-roll sliced into a separate 1-2s fragment). Contiguous segments abut (hole <1s, just
+  # strftime rounding) regardless of how long each one ran, so this is immune to GOP jitter.
+  gap_th=$((SEG_TIME + 2))                            # real hole (prev seg END -> next START) > this => dropout, split
   # Select every ring segment that overlaps the window, in chronological order (ls -1 sorts by name).
   for seg in $(ls -1 "$RING_DIR"/seg_*.mp4 2>/dev/null); do
     [ "$seg" = "$newest" ] && continue
@@ -426,23 +432,25 @@ build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to s
     fi
   done
   [ "${#segs[@]}" -eq 0 ] && return 1
-  # GAP-SPLIT: walk the selected segments and cut a new run whenever consecutive START times jump by
-  # more than gap_th (a camera dropout leaves a hole). Each run becomes its own clip via render_clip,
-  # with the window clamped to the footage actually present in that run (so no time-jump, and metrics
-  # /thumbnail are produced for every clip). No gap => one run => identical to the old single clip.
-  local i n="${#segs[@]}" list first_start prev_start run_end segcount rc=1 run_cstart run_cend
+  # GAP-SPLIT: walk the selected segments and cut a new run whenever the HOLE between the previous
+  # segment's END and the next segment's START exceeds gap_th (a real camera dropout leaves footage
+  # missing). Each run becomes its own clip via render_clip, with the window clamped to the footage
+  # actually present in that run (so no time-jump, and metrics/thumbnail are produced for every clip).
+  # No real hole => one run => one clip covering the whole event.
+  local i n="${#segs[@]}" list first_start run_end segcount rc=1 run_cstart run_cend hole
   i=0
   while [ "$i" -lt "$n" ]; do
     list="$RING_DIR/.cat_$$_${clip_start}_${starts[$i]}.txt"; : > "$list"   # unique per window ($$+clip_start) AND per run (first-seg start)
-    first_start="${starts[$i]}"; prev_start="${starts[$i]}"; run_end="${ends[$i]}"; segcount=0
+    first_start="${starts[$i]}"; run_end="${ends[$i]}"; segcount=0
     while [ "$i" -lt "$n" ]; do
       cur="${starts[$i]}"
-      if [ "$segcount" -gt 0 ] && [ "$((cur - prev_start))" -gt "$gap_th" ]; then
-        log "✂️ gap-split: $((cur - prev_start))s dropout (> ${gap_th}s); closing clip, starting a new one"
+      hole=$((cur - run_end))                          # gap between last kept segment's END and this one's START
+      if [ "$segcount" -gt 0 ] && [ "$hole" -gt "$gap_th" ]; then
+        log "✂️ gap-split: ${hole}s hole (> ${gap_th}s); closing clip, starting a new one"
         break
       fi
       printf "file '%s'\n" "${segs[$i]}" >> "$list"
-      prev_start="$cur"; run_end="${ends[$i]}"; segcount=$((segcount+1)); i=$((i+1))
+      run_end="${ends[$i]}"; segcount=$((segcount+1)); i=$((i+1))
     done
     # This run's window = the requested window clamped to the run's own footage span.
     run_cstart="$clip_start"; [ "$first_start" -gt "$run_cstart" ] && run_cstart="$first_start"
