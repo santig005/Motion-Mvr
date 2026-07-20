@@ -330,7 +330,37 @@ class MainViewModel(
         clips.filter { it.dateKey == dateKey }
 
     fun find(id: String): Clip? =
-        clips.firstOrNull { it.id == id } ?: favoriteClips().firstOrNull { it.id == id }
+        clips.firstOrNull { it.id == id }
+            ?: favoriteClips().firstOrNull { it.id == id }
+            // Fallback to the catalog so a locally-archived clip Drive has already purged is still
+            // playable from the History view (there's no live Clip for it). Matched by Drive id or by
+            // base name (History passes driveFileId ?: name); synthesized into a Clip whose local file
+            // the player picks up via [localFileOrNull].
+            ?: catalog.firstOrNull { it.driveFileId == id || it.name == id }?.let { clipFromRecord(it) }
+
+    /** A playable [Clip] synthesized from a catalog [ClipRecord]. The id is the Drive id when the clip
+     *  is still up there (so streaming works), else the base name; the name carries the `.mp4` so the
+     *  offline lookup resolves the archived local file. */
+    private fun clipFromRecord(r: ClipRecord): Clip = Clip(
+        id = r.driveFileId ?: r.name,
+        name = if (r.name.endsWith(".mp4")) r.name else "${r.name}.mp4",
+        sizeBytes = r.sizeBytes,
+        thumbFileId = r.thumbFileId,
+        yavgMax = r.yavgMax,
+        framesMov = r.framesMov,
+        durationSec = r.durationSec,
+    )
+
+    /** Bytes of full video currently archived on the device (the heavy tier's footprint). */
+    fun localVideoBytes(): Long { offlineVersion; return offline.totalSizeBytes() }
+
+    /** Average clip bytes per day across the days on Drive — the recording rate, for the archive
+     *  "N days ≈ X GB" projection. Null until there's a listing to measure. */
+    fun avgClipBytesPerDay(): Long? {
+        val byDay = clips.filter { it.dateKey != null }.groupBy { it.dateKey!! }
+        if (byDay.isEmpty()) return null
+        return byDay.values.sumOf { day -> day.sumOf { it.sizeBytes } } / byDay.size
+    }
 
     companion object {
         /** On resume, refetch only if the last good load is older than this (avoids hammering Drive

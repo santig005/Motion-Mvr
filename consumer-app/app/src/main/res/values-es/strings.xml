@@ -373,6 +373,18 @@
     <string name="cal_prev_month">Mes anterior</string>
     <string name="cal_next_month">Mes siguiente</string>
 
+    <!-- Archivo de video local + horizonte de retención (Fase B) -->
+    <string name="archive_section_title">Archivo en este teléfono</string>
+    <string name="archive_horizon_label">Guardar video completo por</string>
+    <string name="archive_off">Apagado</string>
+    <string name="archive_days">%1$d días</string>
+    <string name="archive_footprint">Video %1$s · miniaturas %2$s</string>
+    <string name="archive_projection">≈ %1$s para %2$d días a este ritmo</string>
+    <string name="archive_caveat">Descarga por Wi-Fi mientras carga. Cuando Drive borra un clip (30 días) esta pasa a ser su única copia — marca como favorito lo que no puedas perder (los favoritos nunca se podan).</string>
+    <string name="archive_now">Archivar ahora</string>
+    <string name="archive_now_toast">Archivando en segundo plano (Wi-Fi)</string>
+    <string name="archive_progress">Archivando %1$d/%2$d videos</string>
+
     <!-- Plurales -->
     <plurals name="events">
         <item quantity="one">%d evento</item>

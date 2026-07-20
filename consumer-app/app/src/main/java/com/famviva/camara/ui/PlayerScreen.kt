@@ -120,6 +120,13 @@ fun PlayerScreen(clip: Clip, localFile: File?, tokenProvider: suspend () -> Stri
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
+            Spacer(Modifier.weight(1f))
+            // Where the video is coming from: ⬇️ the local archive (offline) or ☁️ streamed from Drive.
+            Text(
+                if (localFile != null) "⬇️" else "☁️",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(end = 12.dp),
+            )
         }
     }
 }

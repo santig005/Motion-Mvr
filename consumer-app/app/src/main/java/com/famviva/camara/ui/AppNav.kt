@@ -67,6 +67,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -85,6 +86,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -127,9 +129,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.famviva.camara.DateFilter
 import com.famviva.camara.MainViewModel
 import com.famviva.camara.R
+import com.famviva.camara.data.ArchiveStore
 import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.agoLabel
@@ -176,6 +181,7 @@ import com.famviva.camara.data.AwayMode
 import com.famviva.camara.data.AwayModeStore
 import com.famviva.camara.data.GeofenceManager
 import com.famviva.camara.notify.AlertIntensity
+import com.famviva.camara.notify.ArchiveWorker
 import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
@@ -248,6 +254,7 @@ fun AppNav(
     ) { innerPadding ->
         // Only the bottom inset matters here: each screen owns its own top bar / status-bar inset,
         // so applying the full padding would double it. This inset keeps content clear of the bar.
+        Box(Modifier.fillMaxSize()) {
         NavHost(
             navController = nav,
             startDestination = "days",
@@ -283,6 +290,58 @@ fun AppNav(
             if (clip != null) PlayerScreen(clip, vm.localFileOrNull(clip), tokenProvider) { nav.popBackStack() }
             else CenteredText(stringResource(R.string.clip_not_found))
         }
+        }
+        // App-wide archive progress: a slim green bar just above the bottom bar while the archiver is
+        // downloading videos (from any screen). Tap it to jump to the Storage archive controls.
+        ArchiveProgressBar(
+            onClick = { nav.navigate("storage") },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = innerPadding.calculateBottomPadding()),
+        )
+        }
+    }
+}
+
+/**
+ * App-wide archive progress indicator: observes [ArchiveWorker]'s WorkManager progress and shows a
+ * slim green bar + "Archiving X/Y" while a run is actively downloading. Renders nothing when no
+ * archive is running (returns before drawing), so it only appears during a download burst. Tapping it
+ * opens the Storage archive controls.
+ */
+@Composable
+private fun ArchiveProgressBar(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val flow = remember { WorkManager.getInstance(context).getWorkInfosByTagFlow(ArchiveWorker.TAG) }
+    val infos by flow.collectAsState(initial = emptyList())
+    val running = infos.firstOrNull { it.state == WorkInfo.State.RUNNING } ?: return
+    val done = running.progress.getInt(ArchiveWorker.KEY_DONE, 0)
+    val total = running.progress.getInt(ArchiveWorker.KEY_TOTAL, 0)
+    if (total <= 0 || done >= total) return
+    val green = Color(0xFF2E7D32)
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            LinearProgressIndicator(
+                progress = { done.toFloat() / total },
+                color = green,
+                trackColor = green.copy(alpha = 0.20f),
+                modifier = Modifier.fillMaxWidth().height(4.dp),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Download, contentDescription = null, tint = green, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.archive_progress, done, total),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
         }
     }
 }
@@ -715,6 +774,13 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
             )
             Spacer(Modifier.height(12.dp))
 
+            // Local-archive retention (Phase B): pick how many days of full video to keep on this
+            // phone, see the footprint + projection, and trigger/prune the archive. On-device only.
+            if (isLocal) {
+                LocalArchiveCard(vm)
+                Spacer(Modifier.height(12.dp))
+            }
+
             val emptyMsg = if (isLocal) R.string.storage_empty else R.string.storage_drive_empty
             if (byDay.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -796,6 +862,103 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
             onConfirm = { vm.deleteOfflineDay(day); confirmDeleteDay = null },
             onDismiss = { confirmDeleteDay = null },
         )
+    }
+}
+
+/**
+ * Local-archive retention control (Phase B): a horizon picker (Off / 30..360 days) that governs how
+ * much full video [com.famviva.camara.notify.ArchiveWorker] keeps on this phone — independent of
+ * Drive's 30-day rotation — plus the current footprint (video + thumbnails), a rough size projection,
+ * an "archive now" trigger and the single-copy caveat. Reads/writes [ArchiveStore] directly (no VM
+ * plumbing), the same pattern the overflow menu uses for its own stores.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LocalArchiveCard(vm: MainViewModel) {
+    val context = LocalContext.current
+    val store = remember { ArchiveStore(context) }
+    var horizon by remember { mutableStateOf(store.horizonDays) }
+
+    fun pick(days: Int) {
+        if (days == horizon) return
+        store.horizonDays = days
+        horizon = days
+        if (days > 0) {
+            ArchiveWorker.schedule(context)   // periodic catch-up
+            ArchiveWorker.runNow(context)     // and start now
+        } else {
+            ArchiveWorker.cancel(context)     // off: stop archiving (existing local copies stay)
+        }
+    }
+
+    val videoBytes = vm.localVideoBytes()
+    val thumbBytes = vm.thumbArchiveBytes()
+    val avgPerDay = vm.avgClipBytesPerDay()
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                stringResource(R.string.archive_section_title),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                stringResource(R.string.archive_horizon_label),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FilterChip(
+                    selected = horizon == 0,
+                    onClick = { pick(0) },
+                    label = { Text(stringResource(R.string.archive_off)) },
+                )
+                Spacer(Modifier.width(8.dp))
+                ArchiveStore.HORIZONS.forEach { d ->
+                    FilterChip(
+                        selected = horizon == d,
+                        onClick = { pick(d) },
+                        label = { Text(stringResource(R.string.archive_days, d)) },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                stringResource(R.string.archive_footprint, humanSize(videoBytes), humanSize(thumbBytes)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (horizon > 0 && avgPerDay != null) {
+                Text(
+                    stringResource(R.string.archive_projection, humanSize(avgPerDay * horizon), horizon),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (horizon > 0) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    stringResource(R.string.archive_caveat),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = {
+                    ArchiveWorker.runNow(context)
+                    Toast.makeText(context, context.getString(R.string.archive_now_toast), Toast.LENGTH_SHORT).show()
+                }) {
+                    Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(stringResource(R.string.archive_now))
+                }
+            }
+        }
     }
 }
 
@@ -1527,8 +1690,12 @@ private fun HistoryScreen(
                             HistoryRow(
                                 record = record,
                                 token = token,
-                                onClick = record.driveFileId
-                                    ?.let { id -> { nav.navigate("player/$id") } },
+                                // Playable while the video is reachable — streamed from Drive (CLOUD)
+                                // or from the local archive (ARCHIVED), even after Drive purged it.
+                                // vm.find() resolves the Drive id or the base name to a playable clip.
+                                onClick = if (record.playable) {
+                                    { nav.navigate("player/${record.driveFileId ?: record.name}") }
+                                } else null,
                             )
                         }
                     }
@@ -2088,14 +2255,14 @@ private fun ClipCard(
                         modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                     )
                 }
-                if (isDownloaded) {
-                    OverlayChip(
-                        text = stringResource(R.string.overlay_offline),
-                        bg = Color.Black.copy(alpha = 0.6f),
-                        fg = Color.White,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-                    )
-                }
+                // Tier badge: ⬇️ archived on this phone · ☁️ on Drive only. Same ☁️/⬇️ language as the
+                // History view (a metadata-only clip never reaches this list — it lives in History).
+                OverlayChip(
+                    text = if (isDownloaded) "⬇️" else "☁️",
+                    bg = Color.Black.copy(alpha = 0.6f),
+                    fg = Color.White,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                )
                 if (isFavorite) {
                     Box(
                         Modifier.align(Alignment.BottomStart).padding(8.dp)

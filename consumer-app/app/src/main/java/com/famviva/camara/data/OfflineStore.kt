@@ -57,6 +57,28 @@ class OfflineStore(private val context: Context) {
 
     fun totalSizeBytes(): Long = dir.listFiles()?.sumOf { it.length() } ?: 0L
 
+    /**
+     * Local-retention purge (Phase B): deletes archived videos whose day is strictly before
+     * [cutoffDateKey] (YYYYMMDD), except [keep] (favorite base names). Returns bytes freed. Mirrors the
+     * NVR's fail-safe posture — only ever removes footage *past* the chosen horizon, never a recent
+     * single copy — and never touches favorites (their promise is to survive the purge). The catalog
+     * entry + thumbnail stay, so a pruned clip degrades to METADATA_ONLY rather than vanishing.
+     */
+    fun purgeVideosOlderThan(cutoffDateKey: String, keep: Set<String>): Long {
+        var freed = 0L
+        dir.listFiles()?.forEach { f ->
+            if (!f.isFile || !f.name.endsWith(".mp4")) return@forEach
+            val base = f.name.removeSuffix(".mp4")
+            if (base in keep) return@forEach
+            val dayKey = Regex("""mt_(\d{8})_""").find(base)?.groupValues?.get(1) ?: return@forEach
+            if (dayKey < cutoffDateKey) {          // lexicographic compare is chronological for YYYYMMDD
+                val len = f.length()
+                if (f.delete()) freed += len
+            }
+        }
+        return freed
+    }
+
     fun delete(clip: Clip) { localFile(clip).delete() }
 
     /** Frees all offline copies (device only — the Drive originals are untouched). */

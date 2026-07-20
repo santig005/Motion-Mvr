@@ -23,6 +23,8 @@ import com.famviva.camara.data.GeofenceManager
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
 import com.famviva.camara.data.ThumbArchive
+import com.famviva.camara.data.ArchiveStore
+import com.famviva.camara.notify.ArchiveWorker
 import com.famviva.camara.notify.DailyDigestWorker
 import com.famviva.camara.notify.NewClipsWorker
 import com.famviva.camara.ui.AppNav
@@ -61,6 +63,9 @@ class MainActivity : AppCompatActivity() {
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
         DailyDigestWorker.schedule(applicationContext)
+        // Keep the local-archive catch-up running only while a retention horizon is set (the Storage
+        // screen schedules/cancels it on change; this re-asserts it after a cold start).
+        if (ArchiveStore(applicationContext).enabled) ArchiveWorker.schedule(applicationContext)
         // Re-assert the away-mode geofence (a no-op unless AUTO + home + permissions): the OS drops
         // geofences on reboot / Play-services updates, so refresh it on every cold start too.
         GeofenceManager.register(applicationContext)

@@ -374,6 +374,18 @@
     <string name="cal_prev_month">Previous month</string>
     <string name="cal_next_month">Next month</string>
 
+    <!-- Local video archive + retention horizon (Phase B) -->
+    <string name="archive_section_title">Archive on this phone</string>
+    <string name="archive_horizon_label">Keep full video for</string>
+    <string name="archive_off">Off</string>
+    <string name="archive_days">%1$d days</string>
+    <string name="archive_footprint">Video %1$s · thumbnails %2$s</string>
+    <string name="archive_projection">≈ %1$s for %2$d days at this rate</string>
+    <string name="archive_caveat">Downloads on Wi-Fi while charging. Once Drive drops a clip (30 days) this becomes its only copy — favorite anything you can\'t lose (favorites are never pruned).</string>
+    <string name="archive_now">Archive now</string>
+    <string name="archive_now_toast">Archiving in the background (Wi-Fi)</string>
+    <string name="archive_progress">Archiving %1$d/%2$d videos</string>
+
     <!-- Plurals -->
     <plurals name="events">
         <item quantity="one">%d event</item>
