@@ -189,7 +189,7 @@
     <string name="away_geofence_active">📍 Geofence activo — cambio instantáneo al llegar o salir</string>
 
     <!-- Salud de la cámara -->
-    <string name="status_down_title">⚠️ %s sin señal</string>
+    <string name="status_down_title">⚠️ %s dejó de grabar</string>
     <string name="status_down_body">No está grabando. Reiníciala (desenchúfala ~10 s y vuelve a conectarla).</string>
     <string name="status_stale_title">📵 %s sin reportar</string>
     <string name="status_stale_body">Último reporte %s. Revisa el teléfono (¿apagado o sin red?).</string>
@@ -215,8 +215,8 @@
     <string name="health_current_section">Estado actual</string>
     <string name="health_no_camera_data">Aún no hay estado de la cámara — desliza para recargar en la pantalla principal.</string>
     <string name="health_sync_section">Sincronización</string>
-    <string name="health_sync_ok">Sync: OK (%1$s)</string>
-    <string name="health_sync_stale">Sync sin actualizar (%1$s)</string>
+    <string name="health_sync_ok">Respaldo al día (%1$s)</string>
+    <string name="health_sync_stale">El respaldo no se actualiza (%1$s)</string>
     <string name="health_sync_last_error">Último error: %1$s</string>
     <string name="health_sync_no_data">Aún no hay datos de sincronización.</string>
     <string name="health_timeline_section">Historial de cortes</string>
@@ -225,12 +225,23 @@
     <string name="health_svc_segmenter">Segmentador</string>
     <string name="health_svc_detector">Detector de movimiento</string>
     <string name="health_svc_sync">Sincronización</string>
-    <string name="health_outage_ongoing">En curso</string>
+    <string name="health_outage_ongoing">Pasando ahora</string>
     <string name="health_outage_span">🕐 %1$s</string>
     <string name="health_ev_drop">Caída breve</string>
     <string name="health_ev_error">Error</string>
-    <string name="health_cluster_drops">%1$d caídas de %2$s</string>
-    <string name="health_cluster_errors">%1$d errores de %2$s</string>
+    <string name="health_cluster_drops">%2$s se reconectó %1$d×</string>
+    <string name="health_cluster_errors">%2$s falló %1$d×</string>
+    <!-- Títulos de corte redactados como evento (qué pasó, no solo el nombre del servicio) -->
+    <string name="health_ev_recording_down_now">Dejó de grabar</string>
+    <string name="health_ev_recording_past">Grabación interrumpida</string>
+    <string name="health_ev_detector_down">Detector desconectado</string>
+    <string name="health_ev_segmenter_down">Captura 2K caída</string>
+    <string name="health_ev_sync_down">Respaldo interrumpido</string>
+    <!-- Por qué falla la sincronización (mapeado del código de razón del NVR) -->
+    <string name="health_sync_reason_full">Drive lleno — los clips no se están respaldando</string>
+    <string name="health_sync_reason_rate">Drive saturado — reintentando</string>
+    <string name="health_sync_reason_net">Sin conexión a Drive</string>
+    <string name="health_sync_reason_auth">Hay que volver a autorizar Drive</string>
 
     <!-- Pantalla Salud: línea de tiempo de cobertura por servicio ("swimlane") -->
     <string name="health_coverage_section">Cobertura por servicio</string>

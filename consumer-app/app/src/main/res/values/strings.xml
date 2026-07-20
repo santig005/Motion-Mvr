@@ -190,7 +190,7 @@
     <string name="away_geofence_active">📍 Geofence active — instant switch on arrival/leaving</string>
 
     <!-- Camera health -->
-    <string name="status_down_title">⚠️ %s no signal</string>
+    <string name="status_down_title">⚠️ %s stopped recording</string>
     <string name="status_down_body">Not recording. Restart it (unplug it ~10 s and plug it back in).</string>
     <string name="status_stale_title">📵 %s not reporting</string>
     <string name="status_stale_body">Last report %s. Check the phone (off or offline?).</string>
@@ -216,8 +216,8 @@
     <string name="health_current_section">Current status</string>
     <string name="health_no_camera_data">No camera status yet — pull to refresh on the main screen.</string>
     <string name="health_sync_section">Cloud sync</string>
-    <string name="health_sync_ok">Sync: OK (%1$s)</string>
-    <string name="health_sync_stale">Sync not updating (%1$s)</string>
+    <string name="health_sync_ok">Backup up to date (%1$s)</string>
+    <string name="health_sync_stale">Cloud backup not updating (%1$s)</string>
     <string name="health_sync_last_error">Last error: %1$s</string>
     <string name="health_sync_no_data">No sync data yet.</string>
     <string name="health_timeline_section">Outage history</string>
@@ -226,12 +226,23 @@
     <string name="health_svc_segmenter">Segmenter</string>
     <string name="health_svc_detector">Motion detector</string>
     <string name="health_svc_sync">Cloud sync</string>
-    <string name="health_outage_ongoing">Ongoing</string>
+    <string name="health_outage_ongoing">Happening now</string>
     <string name="health_outage_span">🕐 %1$s</string>
     <string name="health_ev_drop">Brief drop</string>
     <string name="health_ev_error">Error</string>
-    <string name="health_cluster_drops">%1$d %2$s drops</string>
-    <string name="health_cluster_errors">%1$d %2$s errors</string>
+    <string name="health_cluster_drops">%2$s reconnected %1$d×</string>
+    <string name="health_cluster_errors">%2$s failed %1$d×</string>
+    <!-- Event-phrased outage titles (say what happened, not just the service name) -->
+    <string name="health_ev_recording_down_now">Stopped recording</string>
+    <string name="health_ev_recording_past">Recording interrupted</string>
+    <string name="health_ev_detector_down">Motion detector dropped</string>
+    <string name="health_ev_segmenter_down">2K capture dropped</string>
+    <string name="health_ev_sync_down">Backup interrupted</string>
+    <!-- Why the cloud sync is failing (mapped from the NVR's reason code) -->
+    <string name="health_sync_reason_full">Drive full — clips aren\'t backing up</string>
+    <string name="health_sync_reason_rate">Drive busy — retrying</string>
+    <string name="health_sync_reason_net">No connection to Drive</string>
+    <string name="health_sync_reason_auth">Drive needs re-authorization</string>
 
     <!-- Health screen: per-service coverage timeline ("swimlane") -->
     <string name="health_coverage_section">Coverage by service</string>

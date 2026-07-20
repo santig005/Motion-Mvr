@@ -2179,52 +2179,72 @@ private fun HealthEmptyText(text: String) {
     )
 }
 
-/** Sync-pipeline heartbeat card: "OK (hace X)" or a stale warning, plus a recent error if any. */
+/** Sync-pipeline health card. Colour + headline reflect severity: a full Drive or a stalled uploader
+ *  reads red ("Drive full — clips aren't backing up"); a recent transient error reads amber; all good
+ *  reads calm. The generic "why" (the reason code from the NVR) is spelled out, not left as a code. */
 @Composable
 private fun SyncCard(sync: SyncStatus?, now: Long) {
     val context = LocalContext.current
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(14.dp)) {
-            if (sync == null) {
+    if (sync == null) {
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().padding(14.dp)) {
                 Text(
                     stringResource(R.string.health_sync_no_data),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                return@Column
             }
-            val stale = sync.isStale(now)
+        }
+        return
+    }
+    val hasErr = sync.hasRecentError(now)
+    val reason = if (hasErr) syncReasonText(sync.lastError) else null
+    val full = hasErr && sync.lastError == "storage_full"
+    val stale = sync.isStale(now)
+    val sev = when {
+        full || stale -> Sev.CRITICAL
+        reason != null -> Sev.WARNING
+        else -> Sev.GOOD
+    }
+    val fg = sevOn(sev)
+    // Headline = the most severe live condition. A full Drive is the loudest (backup is broken), so it
+    // takes the headline; otherwise a stalled uploader, otherwise the all-good line.
+    val headline = when {
+        full -> reason!!
+        stale -> stringResource(R.string.health_sync_stale, agoLabel(context, sync.updated, now))
+        else -> stringResource(R.string.health_sync_ok, agoLabel(context, sync.updated, now))
+    }
+    Surface(color = sevContainer(sev), shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Text(
-                text = if (stale) stringResource(R.string.health_sync_stale, agoLabel(context, sync.updated, now))
-                else stringResource(R.string.health_sync_ok, agoLabel(context, sync.updated, now)),
+                headline,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = if (stale) MaterialTheme.status.onWarningContainer else MaterialTheme.colorScheme.onSurface,
+                color = fg,
             )
-            if (sync.hasRecentError(now)) {
+            // If the reason isn't already the headline (i.e. not a full Drive), show it underneath.
+            if (reason != null && !full) {
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    stringResource(R.string.health_sync_last_error, sync.lastError.orEmpty()),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                Text(reason, style = MaterialTheme.typography.bodySmall, color = fg)
             }
         }
     }
 }
 
-/** A paired outage span. Ongoing (still-down) outages stand out in the error colour. */
+/** A paired outage span. Ongoing outages are critical (red); a resolved one still reads as notable
+ *  (amber), and the title says what happened ("Stopped recording") rather than just the service. */
 @Composable
 private fun OutageCard(outage: Outage) {
     val context = LocalContext.current
     val ongoing = outage.ongoing
-    val bg = if (ongoing) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (ongoing) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    val sev = if (ongoing) Sev.CRITICAL else Sev.WARNING
+    val bg = sevContainer(sev)
+    val fg = sevOn(sev)
     Surface(color = bg, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    serviceName(outage.svc) + (outage.cam?.let { " · $it" } ?: ""),
+                    outageTitle(outage.svc, ongoing) + (outage.cam?.let { " · $it" } ?: ""),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = fg,
@@ -2380,6 +2400,46 @@ private fun stateLabel(svc: String, state: LaneState): String = stringResource(
         else -> R.string.health_state_sync_warn
     },
 )
+
+/** Severity of a health card, so what needs attention reads at a glance by colour (not just text). */
+private enum class Sev { GOOD, WARNING, CRITICAL }
+
+@Composable private fun sevContainer(sev: Sev): Color = when (sev) {
+    Sev.CRITICAL -> MaterialTheme.colorScheme.errorContainer
+    Sev.WARNING -> MaterialTheme.status.warningContainer
+    Sev.GOOD -> MaterialTheme.colorScheme.surfaceVariant
+}
+@Composable private fun sevOn(sev: Sev): Color = when (sev) {
+    Sev.CRITICAL -> MaterialTheme.colorScheme.onErrorContainer
+    Sev.WARNING -> MaterialTheme.status.onWarningContainer
+    Sev.GOOD -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+/** Event-phrased outage title — says what HAPPENED ("Stopped recording"), not just the service name
+ *  ("Recording"), so the user grasps it at a glance. Ongoing vs resolved changes the wording. */
+@Composable
+private fun outageTitle(svc: String, ongoing: Boolean): String = stringResource(
+    when (svc) {
+        "recording" -> if (ongoing) R.string.health_ev_recording_down_now else R.string.health_ev_recording_past
+        "detector" -> R.string.health_ev_detector_down
+        "segmenter" -> R.string.health_ev_segmenter_down
+        "sync" -> R.string.health_ev_sync_down
+        else -> R.string.health_svc_recording
+    },
+)
+
+/** Maps the NVR's sync-failure reason CODE (sync_status.json last_error) to a clear message. Older
+ *  NVR builds wrote a descriptive string instead of a code — show that raw (else branch). */
+@Composable
+private fun syncReasonText(code: String?): String? = when (code) {
+    null, "" -> null
+    "storage_full" -> stringResource(R.string.health_sync_reason_full)
+    "rate_limit" -> stringResource(R.string.health_sync_reason_rate)
+    "network" -> stringResource(R.string.health_sync_reason_net)
+    "auth" -> stringResource(R.string.health_sync_reason_auth)
+    "error" -> null
+    else -> code
+}
 
 /**
  * The horizon selector + coverage swimlane + per-service summary. 24h/7d reconstruct live spans from
