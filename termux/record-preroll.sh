@@ -82,6 +82,11 @@ BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression wi
 BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"                                # cap on the cam log before it's trimmed to its newest half
 DISK_FREE_MIN_MB="${DISK_FREE_MIN_MB:-500}"                     # emergency floor: below this, prune oldest clips so recording never dies on a full disk
+DAILY_HEALTH="${DAILY_HEALTH:-$(dirname "$OUT_DIR")/daily_health.jsonl}"        # long-horizon rollup at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl refresh lane; keeper is its ONLY writer
+HEALTH_ACC="${HEALTH_ACC:-$HOME/.health_acc_$CAM_LABEL}"                        # local-only (NOT uploaded) running per-day accumulator; single writer = keeper, no concurrency
+SYNC_STATUS_FILE="${SYNC_STATUS_FILE:-$(dirname "$OUT_DIR")/sync_status.json}"  # cloud-sync's health file; keeper READS it to fold sync failures in (never shared-write)
+DAILY_REFRESH_SECS="${DAILY_REFRESH_SECS:-300}"                 # how often today's partial daily_health line is rewritten + the accumulator persisted
+DAILY_HEALTH_MAX_LINES="${DAILY_HEALTH_MAX_LINES:-800}"         # line cap on daily_health.jsonl (~365 lines/cam/year; keeps it from growing forever)
 
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
@@ -460,10 +465,133 @@ make_thumb(){ # $1=final mp4  $2=duration s
   fi
 }
 
+# ---- Long-horizon per-day health rollup (single writer = keeper) ----------------------------------
+# The keeper keeps a running per-day accumulator, persisted to $HEALTH_ACC (one space-separated line;
+# keeper is its ONLY writer, so no concurrency) so a watchdog restart doesn't lose the morning's tally,
+# and rolls it up into $DAILY_HEALTH — one JSON line per cam per LOCAL day — which the app reads for
+# 30-day / multi-month horizons WITHOUT depending on events.jsonl retention (that log gets trimmed).
+# Every field is guarded (${x:-0}); a missing/empty/short accumulator just starts fresh (fail-open).
+# Accumulator fields (in order): date day_start rec_down_s rec_outages rec_worst_s rec_sub_s
+#   det_drops seg_drops sync_errors ev_ts sync_err_ts last_tick
+acc_reset(){ # $1=date(YYYYMMDD, local)  $2=day_start(epoch)
+  ACC_DATE="$1"; ACC_DAY_START="$2"
+  ACC_DOWN_S=0; ACC_OUTAGES=0; ACC_WORST_S=0; ACC_SUB_S=0
+  ACC_DET=0; ACC_SEG=0; ACC_SYNCERR=0
+  ACC_EV_TS=$(date +%s); ACC_SYNCERR_TS=0; ACC_LAST_TICK="$2"
+}
+
+acc_save(){ # atomic tmp+mv, like the other state files
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s\n' \
+    "$ACC_DATE" "$ACC_DAY_START" "$ACC_DOWN_S" "$ACC_OUTAGES" "$ACC_WORST_S" "$ACC_SUB_S" \
+    "$ACC_DET" "$ACC_SEG" "$ACC_SYNCERR" "$ACC_EV_TS" "$ACC_SYNCERR_TS" "$ACC_LAST_TICK" \
+    > "$HEALTH_ACC.tmp" 2>/dev/null && mv -f "$HEALTH_ACC.tmp" "$HEALTH_ACC" 2>/dev/null || true
+}
+
+daily_line(){ # $1=date  $2=reference_epoch (now for the live line, last_tick/rollover for a finalized one)  $3=partial(true/false)
+  local d="$1" ref="$2" partial="$3" day_s
+  day_s=$(( ref - ACC_DAY_START )); [ "$day_s" -lt 0 ] && day_s=0
+  printf '{"date":"%s","cam":"%s","day_s":%d,"rec_down_s":%d,"rec_outages":%d,"rec_worst_s":%d,"rec_sub_s":%d,"det_drops":%d,"seg_drops":%d,"sync_errors":%d,"partial":%s}' \
+    "$d" "$CAM_LABEL" "$day_s" "$ACC_DOWN_S" "$ACC_OUTAGES" "$ACC_WORST_S" "$ACC_SUB_S" \
+    "$ACC_DET" "$ACC_SEG" "$ACC_SYNCERR" "$partial"
+}
+
+# Upsert a (date,cam) line into $DAILY_HEALTH: drop any existing line for the SAME date+cam (so today's
+# partial line is never duplicated on refresh, and finalizing replaces the partial), append the new
+# one, cap total lines. Atomic tmp+mv, preserving other cams' and other days' lines. $$ keeps each
+# camera process's tmp distinct.
+daily_upsert(){ # $1=full JSON line
+  local line="$1" dkey ckey tmp n
+  dkey=$(printf '%s' "$line" | grep -o '"date":"[0-9]*"' | head -1)
+  ckey="\"cam\":\"$CAM_LABEL\""
+  [ -n "$dkey" ] || return 0
+  tmp="$DAILY_HEALTH.tmp.$$"
+  { [ -f "$DAILY_HEALTH" ] && awk -v d="$dkey" -v c="$ckey" 'index($0,d)&&index($0,c){next}{print}' "$DAILY_HEALTH" 2>/dev/null
+    printf '%s\n' "$line"; } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  n=$(wc -l < "$tmp" 2>/dev/null || echo 0)
+  if [ "${n:-0}" -gt "$DAILY_HEALTH_MAX_LINES" ]; then
+    tail -n "$DAILY_HEALTH_MAX_LINES" "$tmp" > "$tmp.2" 2>/dev/null && mv -f "$tmp.2" "$tmp" 2>/dev/null
+  fi
+  mv -f "$tmp" "$DAILY_HEALTH" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+}
+
+# Fold detector/segmenter 'drop' events for THIS cam into the accumulator, INCREMENTALLY: only events
+# newer than the persisted watermark ($ACC_EV_TS) are counted, then the watermark advances. This is
+# NOT a recompute from events.jsonl (which cloud-sync trims) — the keeper scans every refresh, far more
+# often than the newest-half trim fires, so an unseen drop line can't be trimmed away before we see it.
+scan_drops(){
+  [ -r "$EVENTS_LOG" ] || return 0
+  local out nd ns nm
+  out=$(awk -v w="$ACC_EV_TS" -v cam="\"cam\":\"$CAM_LABEL\"" '
+    index($0,cam) && /"ev":"drop"/ {
+      ts=$0; sub(/.*"ts":/,"",ts); sub(/[^0-9].*/,"",ts); ts+=0
+      if (ts <= w) next
+      if (ts > mx) mx=ts
+      if (index($0,"\"svc\":\"detector\"")) det++
+      else if (index($0,"\"svc\":\"segmenter\"")) seg++
+    }
+    END{ printf "%d %d %d", det+0, seg+0, mx+0 }' "$EVENTS_LOG" 2>/dev/null)
+  [ -n "$out" ] || return 0
+  read -r nd ns nm <<<"$out"
+  ACC_DET=$(( ACC_DET + ${nd:-0} )); ACC_SEG=$(( ACC_SEG + ${ns:-0} ))
+  [ "${nm:-0}" -gt "$ACC_EV_TS" ] && ACC_EV_TS="$nm"
+}
+
+# Fold sync failures the keeper can OBSERVE (never a shared write): read cloud-sync's sync_status.json
+# and, when its last_error_ts is newer than the one we last saw, count one sync failure. Dedupe by ts
+# so repeated reads of the same failure don't inflate the count.
+fold_sync_errors(){
+  [ -r "$SYNC_STATUS_FILE" ] || return 0
+  local ts
+  ts=$(grep -o '"last_error_ts"[^,}]*' "$SYNC_STATUS_FILE" 2>/dev/null | grep -o '[0-9]\+' | head -1)
+  [ -n "${ts:-}" ] || return 0
+  if [ "$ts" -gt "$ACC_SYNCERR_TS" ]; then
+    ACC_SYNCERR=$(( ACC_SYNCERR + 1 )); ACC_SYNCERR_TS="$ts"
+  fi
+}
+
+# Startup: resume today's accumulator, or (if the persisted one is from an older day) finalize that
+# day into $DAILY_HEALTH (partial=false, coverage up to its last tick) and start fresh for today.
+acc_load(){
+  local dstr now2
+  dstr=$(date +%Y%m%d); now2=$(date +%s)
+  ACC_DATE=""
+  if [ -r "$HEALTH_ACC" ]; then
+    read -r ACC_DATE ACC_DAY_START ACC_DOWN_S ACC_OUTAGES ACC_WORST_S ACC_SUB_S \
+            ACC_DET ACC_SEG ACC_SYNCERR ACC_EV_TS ACC_SYNCERR_TS ACC_LAST_TICK \
+            < "$HEALTH_ACC" 2>/dev/null || ACC_DATE=""
+  fi
+  if [ -z "${ACC_DATE:-}" ]; then
+    acc_reset "$dstr" "$now2"; acc_save; return
+  fi
+  # Guard every field so a short/corrupt line degrades to sane values instead of unbound vars.
+  ACC_DAY_START="${ACC_DAY_START:-$now2}"; ACC_DOWN_S="${ACC_DOWN_S:-0}"; ACC_OUTAGES="${ACC_OUTAGES:-0}"
+  ACC_WORST_S="${ACC_WORST_S:-0}"; ACC_SUB_S="${ACC_SUB_S:-0}"; ACC_DET="${ACC_DET:-0}"; ACC_SEG="${ACC_SEG:-0}"
+  ACC_SYNCERR="${ACC_SYNCERR:-0}"; ACC_EV_TS="${ACC_EV_TS:-$now2}"; ACC_SYNCERR_TS="${ACC_SYNCERR_TS:-0}"
+  ACC_LAST_TICK="${ACC_LAST_TICK:-$ACC_DAY_START}"
+  if [ "$ACC_DATE" != "$dstr" ]; then
+    daily_upsert "$(daily_line "$ACC_DATE" "$ACC_LAST_TICK" false)"
+    acc_reset "$dstr" "$now2"; acc_save
+  fi
+}
+
+# Local day changed: finalize the day that just ended (partial=false) and open today's line.
+daily_rollover(){ # $1=new date(YYYYMMDD)
+  local now2; now2=$(date +%s)
+  scan_drops; fold_sync_errors
+  daily_upsert "$(daily_line "$ACC_DATE" "$now2" false)"
+  acc_reset "$1" "$now2"; acc_save
+  daily_upsert "$(daily_line "$ACC_DATE" "$now2" true)"
+}
+
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
   local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0
+  local last_daily=0 nd d _od
   started=$(date +%s)
+  acc_load                                     # resume today's accumulator or finalize a stale day + start fresh
+  scan_drops; fold_sync_errors; acc_save
+  daily_upsert "$(daily_line "$ACC_DATE" "$(date +%s)" true)"   # publish today's partial line promptly on startup
+  last_daily=$(date +%s)
   while true; do
     sleep 5
     now=$(date +%s)
@@ -479,7 +607,13 @@ keeper_loop(){
     if [ "$rec_ok" = 1 ] && [ "$rec_state" != "ok" ]; then
       # Recovery: if we were tracking an outage, emit the 'up' event with its duration, then clear it.
       if [ "${DOWN_SINCE:-0}" -gt 0 ]; then
-        log_event recording up "recovered" "$((now - DOWN_SINCE))"; DOWN_SINCE=0
+        _od=$((now - DOWN_SINCE))
+        log_event recording up "recovered" "$_od"; DOWN_SINCE=0
+        # Fold the just-closed outage into today's accumulator (down seconds, count, worst single one)
+        # and persist immediately — an outage is a rare, important event worth not losing to a crash.
+        ACC_DOWN_S=$((ACC_DOWN_S + _od)); ACC_OUTAGES=$((ACC_OUTAGES + 1))
+        [ "$_od" -gt "$ACC_WORST_S" ] && ACC_WORST_S="$_od"
+        acc_save
       fi
       write_status 1; rec_state=ok; last_hb=$now; [ -n "$newest" ] && log "✅ recording (fresh segments)"
     elif [ "$rec_ok" = 0 ] && [ "$rec_state" != "down" ]; then
@@ -494,8 +628,29 @@ keeper_loop(){
     # so the app learns promptly that we dropped to 360p or recovered the 2K.
     cur_mode=$(cut -d' ' -f1 "$REC_STATE" 2>/dev/null)
     if [ -n "$cur_mode" ] && [ "$cur_mode" != "$rec_mode_seen" ]; then
-      [ -n "$rec_mode_seen" ] && log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
+      if [ -n "$rec_mode_seen" ]; then
+        log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
+        # Also emit a quality event to events.jsonl so the app can reconstruct exact 360p (degraded)
+        # spans. Rare (only on a real transition) so it doesn't flood the log.
+        if [ "$cur_mode" = "SUB" ]; then log_event recording degraded "2K->SUB"
+        elif [ "$cur_mode" = "2K" ]; then log_event recording restored "SUB->2K"
+        fi
+      fi
       rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
+    fi
+    # --- Long-horizon daily health rollup: roll over at local midnight, accrue 360p (SUB) seconds, and
+    # --- periodically rewrite today's partial line + persist the accumulator (single writer = keeper).
+    nd=$(date +%Y%m%d)
+    if [ "$nd" != "$ACC_DATE" ]; then
+      daily_rollover "$nd"                       # local day changed: finalize yesterday, open today
+    else
+      d=$(( now - ACC_LAST_TICK )); [ "$d" -lt 0 ] && d=0; [ "$d" -gt 120 ] && d=120   # cap guards device-sleep gaps
+      [ "${cur_mode:-2K}" = "SUB" ] && ACC_SUB_S=$(( ACC_SUB_S + d ))
+    fi
+    ACC_LAST_TICK=$now
+    if [ "$(( now - last_daily ))" -ge "$DAILY_REFRESH_SECS" ]; then
+      scan_drops; fold_sync_errors; acc_save
+      daily_upsert "$(daily_line "$ACC_DATE" "$now" true)"; last_daily=$now
     fi
     # Housekeeping (~once a minute): reclaim space if the disk is critically low and cap the log.
     if [ "$((now - last_maint))" -ge 60 ]; then
