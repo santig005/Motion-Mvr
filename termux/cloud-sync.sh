@@ -78,6 +78,21 @@ write_sync_status(){
     > "$SYNC_STATUS.tmp" 2>/dev/null && mv -f "$SYNC_STATUS.tmp" "$SYNC_STATUS" 2>/dev/null
 }
 
+# Classify the most recent rclone failure from its captured output into a short reason CODE the app
+# maps to a clear message ("Drive full", "no connection", ...). The generic "fast lane <folder>"
+# string told the user WHERE it failed but not WHY (a full Drive read identically to a dropped link).
+# Fail-open to "error" for anything unrecognised.
+classify_sync_err(){ # $1 = file with the failed rclone's captured output
+  local t; t=$(tail -c 6000 "$1" 2>/dev/null)
+  case "$t" in
+    *storageQuotaExceeded*)                          echo storage_full ;;
+    *rateLimitExceeded*|*userRateLimitExceeded*|*"Quota exceeded"*) echo rate_limit ;;
+    *invalid_grant*|*"Error 401"*|*"token has been expired"*|*unauthorized*) echo auth ;;
+    *"no such host"*|*"dial tcp"*|*"connection refused"*|*"i/o timeout"*|*"network is unreachable"*|*"couldn't connect"*) echo network ;;
+    *)                                               echo error ;;
+  esac
+}
+
 # The -v upload log (below) makes this grow with real usage instead of staying a fixed-size
 # summary; nothing else on the phone rotates logs, so cap it here rather than let it grow forever.
 trim_log(){
@@ -108,16 +123,20 @@ while true; do
   today=$(date +%Y/%m/%d)
   extra_day=""
   [ "$(date +%H%M | sed 's/^0*//;s/^$/0/')" -lt 30 ] && extra_day=$(date -d "yesterday" +%Y/%m/%d 2>/dev/null)
+  tmperr="$LOG.err.$$"                                # this cycle's captured rclone output (for reason classification)
   for camdir in "$CAMERAS_DIR"/*/; do
     [ -d "$camdir" ] || continue
     cam=$(basename "$camdir")
     for day in $today $extra_day; do
       [ -d "$camdir$day" ] || continue
-      if ! rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
-        --min-age 10s --transfers 3 -v --stats-one-line >>"$LOG" 2>&1; then
-        log "!! fast lane failed for $cam/$day (no network/Drive?)"
-        log_event "$cam" sync error "fast lane $day"
-        fast_ok=0; last_error="fast lane $cam/$day"; last_error_ts=$now
+      rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
+        --min-age 10s --transfers 3 -v --stats-one-line >"$tmperr" 2>&1; rc=$?
+      cat "$tmperr" >>"$LOG" 2>/dev/null              # keep the -v "Copied (new)" lines latency-report needs
+      if [ "$rc" -ne 0 ]; then
+        reason=$(classify_sync_err "$tmperr")
+        log "!! fast lane failed for $cam/$day ($reason)"
+        log_event "$cam" sync error "fast lane $day: $reason"
+        fast_ok=0; last_error="$reason"; last_error_ts=$now
       fi
     done
   done
@@ -132,13 +151,16 @@ while true; do
   #    --fast-list: one recursive listing call instead of one LIST per directory (quota-friendly).
   if [ "$((now - last_heal))" -ge "$HEAL_EVERY" ]; then
     uploaded_ok=0
-    if rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s \
-         --transfers 3 --fast-list -v --stats-one-line >>"$LOG" 2>&1; then
+    rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s \
+         --transfers 3 --fast-list -v --stats-one-line >"$tmperr" 2>&1; rc=$?
+    cat "$tmperr" >>"$LOG" 2>/dev/null
+    if [ "$rc" -eq 0 ]; then
       uploaded_ok=1; last_heal_ok=$now
     else
-      log "!! self-heal copy failed (no network/Drive?); NOT purging local"
-      log_event "" sync error "self-heal copy"
-      last_error="self-heal copy"; last_error_ts=$now
+      reason=$(classify_sync_err "$tmperr")
+      log "!! self-heal copy failed ($reason); NOT purging local"
+      log_event "" sync error "self-heal copy: $reason"
+      last_error="$reason"; last_error_ts=$now
     fi
     last_heal=$now
 
@@ -178,5 +200,6 @@ while true; do
   write_sync_status                                   # once per cycle: 'updated' + per-lane ok epochs + last error
   trim_log
   trim_events
+  rm -f "$tmperr" 2>/dev/null                          # this cycle's captured rclone output
   sleep "$INTERVAL"
 done
