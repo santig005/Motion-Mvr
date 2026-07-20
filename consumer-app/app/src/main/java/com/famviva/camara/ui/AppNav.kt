@@ -98,6 +98,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
@@ -133,9 +134,21 @@ import com.famviva.camara.data.BlipCluster
 import com.famviva.camara.data.BlipClusterEntry
 import com.famviva.camara.data.BlipEntry
 import com.famviva.camara.data.buildHealthTimeline
+import com.famviva.camara.data.buildServiceTimeline
+import com.famviva.camara.data.buildDailyTimeline
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.clusterHealthTimeline
+import com.famviva.camara.data.DailyHealth
+import com.famviva.camara.data.DayCell
 import com.famviva.camara.data.dateKeyOf
+import com.famviva.camara.data.LaneState
+import com.famviva.camara.data.LaneSummary
+import com.famviva.camara.data.ServiceDayLane
+import com.famviva.camara.data.ServiceDailyTimeline
+import com.famviva.camara.data.ServiceLane
+import com.famviva.camara.data.ServiceTimeline
+import com.famviva.camara.data.SummaryTone
+import com.famviva.camara.data.TimelineSpan
 import com.famviva.camara.data.DayPeriod
 import com.famviva.camara.data.formatDurationSec
 import com.famviva.camara.data.HealthEvent
@@ -2017,13 +2030,19 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
     val dataFresh = vm.isDataFresh(now)
 
     var loading by remember { mutableStateOf(true) }
+    var rawEvents by remember { mutableStateOf<List<OutageEvent>>(emptyList()) }
     var timeline by remember { mutableStateOf<List<HealthEvent>>(emptyList()) }
+    var daily by remember { mutableStateOf<List<DailyHealth>>(emptyList()) }
     var sync by remember { mutableStateOf<SyncStatus?>(null) }
+    // Selected horizon for the coverage swimlane: 0 = 24h, 1 = 7d, 2 = 30d.
+    var horizon by rememberSaveable { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
         loading = true
         val raw = runCatching { drive.fetchOutageEvents() }.getOrDefault(emptyList())
+        rawEvents = raw
         timeline = clusterHealthTimeline(buildHealthTimeline(raw))
+        daily = runCatching { drive.fetchDailyHealth() }.getOrDefault(emptyList())
         sync = runCatching { drive.fetchSyncStatus() }.getOrNull()
         loading = false
     }
@@ -2059,6 +2078,28 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                         h,
                         dataFresh = dataFresh,
                         onClick = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null,
+                    )
+                }
+            }
+
+            // Per-service coverage swimlane (24h/7d from events.jsonl, 30d from daily_health.jsonl).
+            // Sits ABOVE the outage timeline; the timeline + sync card below are its drill-down.
+            item {
+                Spacer(Modifier.height(6.dp))
+                HealthSectionHeader(stringResource(R.string.health_coverage_section))
+            }
+            item {
+                if (loading) {
+                    Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else {
+                    ServiceCoverageSection(
+                        horizon = horizon,
+                        onHorizonChange = { horizon = it },
+                        events = rawEvents,
+                        daily = daily,
+                        nowSec = now,
                     )
                 }
             }
@@ -2283,6 +2324,556 @@ private fun BlipClusterRow(cluster: BlipCluster) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+// ==============================================================================================
+// "Cobertura por servicio" — the per-service health swimlane at the top of the Salud screen.
+// Fixed status hexes (identical in light & dark, from the approved mockup). MaterialTheme.status has
+// no dedicated saturated good/warn/crit fill trio, so these are used for the segment fills; the card
+// chrome (track, labels, dividers) uses MaterialTheme colours so it still respects light/dark.
+// ==============================================================================================
+private val TL_OK = Color(0xFF0CA30C)       // grabando 2K
+private val TL_WARN = Color(0xFFFAB219)     // 360p degradado / fallo transitorio
+private val TL_SERIOUS = Color(0xFFEC835A)  // parpadeo (moderado)
+private val TL_CRIT = Color(0xFFD03B3B)     // caído / parpadeo fuerte
+private val LANE_LABEL_W = 92.dp
+
+private fun laneColor(state: LaneState): Color = when (state) {
+    LaneState.OK -> TL_OK
+    LaneState.DEGRADED -> TL_WARN
+    LaneState.DOWN -> TL_CRIT
+    LaneState.FLAP_SERIOUS -> TL_SERIOUS
+    LaneState.FLAP_CRITICAL -> TL_CRIT
+    LaneState.SYNC_WARN -> TL_WARN
+}
+
+private fun isFlapState(state: LaneState): Boolean =
+    state == LaneState.FLAP_SERIOUS || state == LaneState.FLAP_CRITICAL
+
+/** Short lane label (fits the 92dp column). Reuses serviceName() except detector, whose full name
+ *  ("Detector de movimiento") is too long here. */
+@Composable
+private fun laneShortName(svc: String): String =
+    if (svc == "detector") stringResource(R.string.health_lane_name_detector) else serviceName(svc)
+
+@Composable
+private fun laneSub(svc: String): String = stringResource(
+    when (svc) {
+        "recording" -> R.string.health_lane_sub_recording
+        "detector" -> R.string.health_lane_sub_detector
+        "segmenter" -> R.string.health_lane_sub_segmenter
+        else -> R.string.health_lane_sub_sync
+    },
+)
+
+/** Localized state label; for the sync lane, OK reads "Subiendo a Drive" rather than "Grabando 2K". */
+@Composable
+private fun stateLabel(svc: String, state: LaneState): String = stringResource(
+    when {
+        state == LaneState.OK && svc == "sync" -> R.string.health_state_sync_ok
+        state == LaneState.OK -> R.string.health_state_ok
+        state == LaneState.DEGRADED -> R.string.health_state_degraded
+        state == LaneState.DOWN -> R.string.health_state_down
+        state == LaneState.FLAP_SERIOUS -> R.string.health_state_flap
+        state == LaneState.FLAP_CRITICAL -> R.string.health_state_flap_heavy
+        else -> R.string.health_state_sync_warn
+    },
+)
+
+/**
+ * The horizon selector + coverage swimlane + per-service summary. 24h/7d reconstruct live spans from
+ * events.jsonl; 30d aggregates daily_health.jsonl (honest empty state while the NVR side ships).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ServiceCoverageSection(
+    horizon: Int,
+    onHorizonChange: (Int) -> Unit,
+    events: List<OutageEvent>,
+    daily: List<DailyHealth>,
+    nowSec: Long,
+) {
+    Column {
+        val labels = listOf(R.string.health_horizon_24h, R.string.health_horizon_7d, R.string.health_horizon_30d)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            labels.forEachIndexed { i, res ->
+                SegmentedButton(
+                    selected = horizon == i,
+                    onClick = { onHorizonChange(i) },
+                    shape = SegmentedButtonDefaults.itemShape(index = i, count = labels.size),
+                ) { Text(stringResource(res)) }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        when (horizon) {
+            0, 1 -> {
+                val is24h = horizon == 0
+                val spanSec = if (is24h) 86_400L else 7L * 86_400L
+                val timeline = remember(events, horizon) {
+                    buildServiceTimeline(events, nowSec - spanSec, nowSec)
+                }
+                LiveSwimlane(timeline, is24h)
+            }
+            else -> {
+                val dailyTl = remember(daily) { buildDailyTimeline(daily) }
+                DailySwimlane(dailyTl)
+            }
+        }
+    }
+}
+
+/** The 24h/7d swimlane card (proportional Canvas spans) + its summary card. */
+@Composable
+private fun LiveSwimlane(timeline: ServiceTimeline, is24h: Boolean) {
+    var selSvc by remember(timeline) { mutableStateOf<String?>(null) }
+    var selSpan by remember(timeline) { mutableStateOf<TimelineSpan?>(null) }
+    val windowSpan = (timeline.windowEnd - timeline.windowStart).coerceAtLeast(1L)
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            Text(
+                stringResource(if (is24h) R.string.health_win_note_24h else R.string.health_win_note_7d),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(LANE_LABEL_W))
+                TimelineAxis(timeline.windowStart, windowSpan, is24h, Modifier.weight(1f))
+            }
+            timeline.lanes.forEach { lane ->
+                Spacer(Modifier.height(7.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LaneLabel(lane.svc, Modifier.width(LANE_LABEL_W))
+                    SpanLane(
+                        lane = lane,
+                        windowStart = timeline.windowStart,
+                        windowSpan = windowSpan,
+                        selected = if (selSvc == lane.svc) selSpan else null,
+                        modifier = Modifier.weight(1f),
+                    ) { svc, span -> selSvc = svc; selSpan = span }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            CoverageLegend()
+            HorizontalDivider(Modifier.padding(top = 12.dp, bottom = 8.dp))
+            val span = selSpan
+            val svc = selSvc
+            if (span != null && svc != null) {
+                SelectedSpanDetail(svc, span)
+            } else {
+                Text(
+                    stringResource(R.string.health_tap_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    SummaryCard(timeline.summaries, is30d = false)
+}
+
+/** The 30d swimlane card (one cell per day) + summary, or the honest empty state if the NVR hasn't
+ *  started writing daily_health.jsonl yet. */
+@Composable
+private fun DailySwimlane(timeline: ServiceDailyTimeline) {
+    if (timeline.dayCount == 0) {
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                Text(
+                    stringResource(R.string.health_win_note_30d),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    stringResource(R.string.health_30d_unavailable),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        return
+    }
+    var selSvc by remember(timeline) { mutableStateOf<String?>(null) }
+    var selCell by remember(timeline) { mutableStateOf<DayCell?>(null) }
+    val dates = timeline.lanes.firstOrNull()?.cells?.map { it.date } ?: emptyList()
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            Text(
+                stringResource(R.string.health_win_note_30d),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(LANE_LABEL_W))
+                DailyAxis(dates, Modifier.weight(1f))
+            }
+            timeline.lanes.forEach { lane ->
+                Spacer(Modifier.height(7.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LaneLabel(lane.svc, Modifier.width(LANE_LABEL_W))
+                    DayLane(
+                        lane = lane,
+                        selected = if (selSvc == lane.svc) selCell else null,
+                        modifier = Modifier.weight(1f),
+                    ) { svc, cell -> selSvc = svc; selCell = cell }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            CoverageLegend()
+            HorizontalDivider(Modifier.padding(top = 12.dp, bottom = 8.dp))
+            val cell = selCell
+            val svc = selSvc
+            if (cell != null && svc != null) {
+                SelectedDayDetail(svc, cell)
+            } else {
+                Text(
+                    stringResource(R.string.health_tap_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    SummaryCard(timeline.summaries, is30d = true)
+}
+
+/** Two-line lane label (name + faint sub-caption) filling the fixed left column. */
+@Composable
+private fun LaneLabel(svc: String, modifier: Modifier) {
+    Column(modifier.padding(end = 8.dp)) {
+        Text(
+            laneShortName(svc),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            laneSub(svc),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Time axis for the live horizons: evenly spaced ticks (HH:MM for 24h, DD/MM for 7d). */
+@Composable
+private fun TimelineAxis(windowStart: Long, windowSpan: Long, is24h: Boolean, modifier: Modifier) {
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val measurer = rememberTextMeasurer()
+    val ticks = if (is24h) 5 else 8
+    androidx.compose.foundation.Canvas(modifier.height(15.dp)) {
+        val w = size.width
+        val h = size.height
+        drawLine(gridColor, Offset(0f, h - 1f), Offset(w, h - 1f), strokeWidth = 1f)
+        for (i in 0 until ticks) {
+            val frac = i.toFloat() / (ticks - 1)
+            val ts = windowStart + (frac * windowSpan).toLong()
+            val tl = measurer.measure(axisTimeLabel(ts, longSpan = !is24h), style = TextStyle(color = labelColor, fontSize = 9.sp))
+            val cx = frac * w
+            val tx = (cx - tl.size.width / 2f).coerceIn(0f, (w - tl.size.width).coerceAtLeast(0f))
+            drawText(tl, topLeft = Offset(tx, 0f))
+            drawLine(gridColor, Offset(cx.coerceIn(0.5f, w - 0.5f), h - 4f), Offset(cx.coerceIn(0.5f, w - 0.5f), h), strokeWidth = 1f)
+        }
+    }
+}
+
+/** Day axis for the 30d horizon: first / middle / last date labels (DD/MM), aligned to cell centres. */
+@Composable
+private fun DailyAxis(dates: List<String>, modifier: Modifier) {
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val measurer = rememberTextMeasurer()
+    androidx.compose.foundation.Canvas(modifier.height(15.dp)) {
+        val w = size.width
+        val h = size.height
+        val n = dates.size.coerceAtLeast(1)
+        drawLine(gridColor, Offset(0f, h - 1f), Offset(w, h - 1f), strokeWidth = 1f)
+        listOf(0, n / 2, n - 1).distinct().forEach { i ->
+            val d = dates.getOrNull(i) ?: return@forEach
+            val label = if (d.length >= 8) "${d.substring(6, 8)}/${d.substring(4, 6)}" else d
+            val tl = measurer.measure(label, style = TextStyle(color = labelColor, fontSize = 9.sp))
+            val cx = (i + 0.5f) / n * w
+            val tx = (cx - tl.size.width / 2f).coerceIn(0f, (w - tl.size.width).coerceAtLeast(0f))
+            drawText(tl, topLeft = Offset(tx, 0f))
+        }
+    }
+}
+
+/** One live lane: proportional segments on a rounded track; flapping windows are diagonally hatched.
+ *  Tap a segment to select it (detail shown below the chart). */
+@Composable
+private fun SpanLane(
+    lane: ServiceLane,
+    windowStart: Long,
+    windowSpan: Long,
+    selected: TimelineSpan?,
+    modifier: Modifier,
+    onSelect: (String, TimelineSpan) -> Unit,
+) {
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    val outline = MaterialTheme.colorScheme.onSurface
+    val spans = lane.spans
+    androidx.compose.foundation.Canvas(
+        modifier.height(26.dp).pointerInput(spans, windowStart, windowSpan) {
+            detectTapGestures { off ->
+                val w = size.width.toFloat().coerceAtLeast(1f)
+                val frac = (off.x / w).coerceIn(0f, 1f)
+                val ts = windowStart + (frac * windowSpan).toLong()
+                (spans.firstOrNull { ts in it.startTs..it.endTs } ?: spans.lastOrNull())
+                    ?.let { onSelect(lane.svc, it) }
+            }
+        },
+    ) {
+        val w = size.width
+        val h = size.height
+        drawRoundRect(trackColor, cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx(), 6.dp.toPx()))
+        val top = 3.dp.toPx()
+        val segH = h - 2 * top
+        val minPx = 2.5.dp.toPx()
+        val corner = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx())
+        spans.forEach { s ->
+            val left0 = ((s.startTs - windowStart).toFloat() / windowSpan.toFloat()) * w
+            var segW = ((s.endTs - s.startTs).toFloat() / windowSpan.toFloat()) * w
+            if (segW < minPx) segW = minPx
+            val left = left0.coerceIn(0f, (w - segW).coerceAtLeast(0f))
+            drawRoundRect(
+                color = laneColor(s.state),
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(segW, segH),
+                cornerRadius = corner,
+            )
+            if (isFlapState(s.state)) drawHatch(left, top, segW, segH)
+            if (selected == s) {
+                drawRoundRect(
+                    color = outline,
+                    topLeft = Offset(left, top),
+                    size = androidx.compose.ui.geometry.Size(segW, segH),
+                    cornerRadius = corner,
+                    style = Stroke(1.5.dp.toPx()),
+                )
+            }
+        }
+    }
+}
+
+/** One 30d lane: a fixed grid of day cells (one per day), coloured by that day's worst state. */
+@Composable
+private fun DayLane(
+    lane: ServiceDayLane,
+    selected: DayCell?,
+    modifier: Modifier,
+    onSelect: (String, DayCell) -> Unit,
+) {
+    val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+    val outline = MaterialTheme.colorScheme.onSurface
+    val cells = lane.cells
+    androidx.compose.foundation.Canvas(
+        modifier.height(26.dp).pointerInput(cells) {
+            detectTapGestures { off ->
+                val w = size.width.toFloat().coerceAtLeast(1f)
+                val idx = ((off.x / w) * cells.size).toInt().coerceIn(0, cells.size - 1)
+                cells.getOrNull(idx)?.let { onSelect(lane.svc, it) }
+            }
+        },
+    ) {
+        val w = size.width
+        val h = size.height
+        drawRoundRect(trackColor, cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx(), 6.dp.toPx()))
+        val n = cells.size.coerceAtLeast(1)
+        val slot = w / n
+        val gap = (slot * 0.14f).coerceAtMost(2.dp.toPx())
+        val top = 3.dp.toPx()
+        val segH = h - 2 * top
+        val corner = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx())
+        cells.forEachIndexed { i, c ->
+            val left = i * slot + gap / 2f
+            val cw = (slot - gap).coerceAtLeast(1f)
+            drawRoundRect(
+                color = laneColor(c.state),
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(cw, segH),
+                cornerRadius = corner,
+            )
+            if (isFlapState(c.state)) drawHatch(left, top, cw, segH)
+            if (selected == c) {
+                drawRoundRect(
+                    color = outline,
+                    topLeft = Offset(left, top),
+                    size = androidx.compose.ui.geometry.Size(cw, segH),
+                    cornerRadius = corner,
+                    style = Stroke(1.5.dp.toPx()),
+                )
+            }
+        }
+    }
+}
+
+/** Diagonal 45° hatch fill inside a segment rect — the "flapping (reconnect storm)" texture. Clipped
+ *  to the rect so lines never bleed past it. Black at low alpha (fixed in both themes, as the mockup). */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHatch(
+    left: Float, top: Float, segW: Float, segH: Float,
+) {
+    val period = 5.dp.toPx()
+    val lw = 1.6.dp.toPx()
+    val hatch = Color.Black.copy(alpha = 0.30f)
+    clipRect(left, top, left + segW, top + segH) {
+        var x0 = left - segH
+        while (x0 < left + segW) {
+            drawLine(hatch, Offset(x0, top + segH), Offset(x0 + segH, top), strokeWidth = lw)
+            x0 += period
+        }
+    }
+}
+
+/** Colour key so the segment encoding stays decodable (identity never by colour alone). */
+@Composable
+private fun CoverageLegend() {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+        LegendKey(TL_OK, stringResource(R.string.health_legend_ok), hatched = false)
+        Spacer(Modifier.width(14.dp))
+        LegendKey(TL_WARN, stringResource(R.string.health_legend_degraded), hatched = false)
+        Spacer(Modifier.width(14.dp))
+        LegendKey(TL_CRIT, stringResource(R.string.health_legend_down), hatched = false)
+        Spacer(Modifier.width(14.dp))
+        LegendKey(TL_SERIOUS, stringResource(R.string.health_legend_flap), hatched = true)
+    }
+}
+
+@Composable
+private fun LegendKey(color: Color, label: String, hatched: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.foundation.Canvas(Modifier.size(13.dp)) {
+            drawRoundRect(color, cornerRadius = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx()))
+            if (hatched) drawHatch(0f, 0f, size.width, size.height)
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Detail line for a tapped live segment: coloured swatch + "service · state" and the time range /
+ *  duration (or reconnect count for flap windows). */
+@Composable
+private fun SelectedSpanDetail(svc: String, span: TimelineSpan) {
+    val context = LocalContext.current
+    val dur = span.endTs - span.startTs
+    val range = if (dur > 60) "${hourMinuteLabel(span.startTs)} – ${hourMinuteLabel(span.endTs)}" else hourMinuteLabel(span.startTs)
+    val extra = when {
+        isFlapState(span.state) -> stringResource(R.string.health_detail_flap, span.flapCount)
+        span.state == LaneState.DOWN || span.state == LaneState.DEGRADED -> formatDurationSec(context, dur)
+        else -> null
+    }
+    DetailBody(laneColor(span.state), isFlapState(span.state), "${laneShortName(svc)} · ${stateLabel(svc, span.state)}", buildString {
+        append(stringResource(R.string.health_outage_span, range))
+        if (extra != null) append(" · $extra")
+    })
+}
+
+/** Detail line for a tapped 30d day cell: coloured swatch + "service · state" and the date plus the
+ *  day's headline metric (coverage for recording, drop / error count otherwise). */
+@Composable
+private fun SelectedDayDetail(svc: String, cell: DayCell) {
+    val context = LocalContext.current
+    val metricText = when (svc) {
+        "recording" -> cell.coveragePct?.let { "%.1f%%".format(it) }
+        "detector", "segmenter" -> if (cell.metric > 0) stringResource(R.string.health_detail_flap, cell.metric) else null
+        else -> if (cell.metric > 0) stringResource(R.string.health_sum_sync_errors, cell.metric) else null
+    }
+    DetailBody(laneColor(cell.state), isFlapState(cell.state), "${laneShortName(svc)} · ${stateLabel(svc, cell.state)}", buildString {
+        append(prettyDate(context, cell.date))
+        if (metricText != null) append(" · $metricText")
+    })
+}
+
+@Composable
+private fun DetailBody(swatch: Color, hatched: Boolean, title: String, sub: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.foundation.Canvas(Modifier.size(14.dp)) {
+            drawRoundRect(swatch, cornerRadius = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx()))
+            if (hatched) drawHatch(0f, 0f, size.width, size.height)
+        }
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+            Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** Per-service summary card: one row per lane with a tone-coloured headline stat + a detail caption. */
+@Composable
+private fun SummaryCard(summaries: List<LaneSummary>, is30d: Boolean) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Text(
+                stringResource(R.string.health_summary_section),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
+            summaries.forEachIndexed { i, s ->
+                if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                SummaryRow(s, is30d)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SummaryRow(s: LaneSummary, is30d: Boolean) {
+    val context = LocalContext.current
+    val tone = when (s.tone) {
+        SummaryTone.GOOD -> TL_OK
+        SummaryTone.MID -> TL_SERIOUS
+        SummaryTone.BAD -> TL_CRIT
+    }
+    val stat: String
+    val detail: String
+    when (s.svc) {
+        "recording" -> {
+            stat = "%.1f%%".format(s.coveragePct ?: 100.0)
+            detail = when {
+                is30d && s.worstDate != null ->
+                    stringResource(R.string.health_sum_worst_day, prettyDate(context, s.worstDate!!), formatDurationSec(context, s.worstOutageSec))
+                s.outageCount > 0 ->
+                    stringResource(R.string.health_sum_rec_outages, s.outageCount, formatDurationSec(context, s.worstOutageSec))
+                else -> stringResource(R.string.health_sum_rec_none)
+            }
+        }
+        "detector", "segmenter" -> {
+            stat = s.flapDrops.toString()
+            detail = if (s.flapDrops > 0) stringResource(R.string.health_sum_flap_active) else stringResource(R.string.health_sum_flap_stable)
+        }
+        else -> {
+            stat = if (s.syncErrors > 0) s.syncErrors.toString() else stringResource(R.string.health_stat_ok)
+            detail = if (s.syncErrors > 0) stringResource(R.string.health_sum_sync_errors, s.syncErrors) else stringResource(R.string.health_sum_sync_ok)
+        }
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            laneShortName(s.svc),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.width(LANE_LABEL_W),
+        )
+        Text(stat, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = tone)
+        Spacer(Modifier.weight(1f))
+        Text(
+            detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+        )
     }
 }
 

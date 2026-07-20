@@ -233,6 +233,43 @@
     <string name="health_cluster_drops">%1$d %2$s drops</string>
     <string name="health_cluster_errors">%1$d %2$s errors</string>
 
+    <!-- Health screen: per-service coverage timeline ("swimlane") -->
+    <string name="health_coverage_section">Coverage by service</string>
+    <string name="health_summary_section">Period summary</string>
+    <string name="health_horizon_24h">24 h</string>
+    <string name="health_horizon_7d">7 days</string>
+    <string name="health_horizon_30d">30 days</string>
+    <string name="health_win_note_24h">Last 24 h · each band is proportional to its real duration.</string>
+    <string name="health_win_note_7d">Last 7 days · today\'s patch is the camera incident.</string>
+    <string name="health_win_note_30d">Last 30 days · daily rollup (one line per day).</string>
+    <string name="health_legend_ok">Recording 2K</string>
+    <string name="health_legend_degraded">360p (degraded)</string>
+    <string name="health_legend_down">Down (no video)</string>
+    <string name="health_legend_flap">Flapping (reconnects)</string>
+    <string name="health_lane_name_detector">Detector</string>
+    <string name="health_lane_sub_recording">saved video</string>
+    <string name="health_lane_sub_detector">motion detection</string>
+    <string name="health_lane_sub_segmenter">2K capture</string>
+    <string name="health_lane_sub_sync">upload to Drive</string>
+    <string name="health_state_ok">Recording 2K</string>
+    <string name="health_state_degraded">360p (degraded)</string>
+    <string name="health_state_down">Down — no video</string>
+    <string name="health_state_flap">Flapping</string>
+    <string name="health_state_flap_heavy">Heavy flapping</string>
+    <string name="health_state_sync_ok">Uploading to Drive</string>
+    <string name="health_state_sync_warn">Transient failure</string>
+    <string name="health_tap_hint">Tap a band to see its detail.</string>
+    <string name="health_detail_flap">%1$d reconnects</string>
+    <string name="health_sum_rec_outages">%1$d outages · worst %2$s</string>
+    <string name="health_sum_rec_none">no outages</string>
+    <string name="health_sum_flap_active">grouped reconnects</string>
+    <string name="health_sum_flap_stable">stable</string>
+    <string name="health_sum_sync_errors">%1$d transient failures</string>
+    <string name="health_sum_sync_ok">no backlog</string>
+    <string name="health_sum_worst_day">worst day: %1$s (%2$s)</string>
+    <string name="health_stat_ok">OK</string>
+    <string name="health_30d_unavailable">Not available yet — the NVR is still accumulating the daily rollup. The event log is trimmed as it fills, so fine-grained detail only goes back a few days. For months, the NVR keeps one summary line per day — cheap and enough for long horizons.</string>
+
     <!-- Battery history graph -->
     <string name="battery_title">Battery</string>
     <string name="battery_now">Now: %d%%</string>

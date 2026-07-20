@@ -232,6 +232,43 @@
     <string name="health_cluster_drops">%1$d caídas de %2$s</string>
     <string name="health_cluster_errors">%1$d errores de %2$s</string>
 
+    <!-- Pantalla Salud: línea de tiempo de cobertura por servicio ("swimlane") -->
+    <string name="health_coverage_section">Cobertura por servicio</string>
+    <string name="health_summary_section">Resumen del periodo</string>
+    <string name="health_horizon_24h">24 h</string>
+    <string name="health_horizon_7d">7 días</string>
+    <string name="health_horizon_30d">30 días</string>
+    <string name="health_win_note_24h">Últimas 24 h · cada franja es proporcional a su duración real.</string>
+    <string name="health_win_note_7d">Últimos 7 días · el parche de hoy es el incidente de la cámara.</string>
+    <string name="health_win_note_30d">Últimos 30 días · resumen diario (una línea por día).</string>
+    <string name="health_legend_ok">Grabando 2K</string>
+    <string name="health_legend_degraded">360p (degradado)</string>
+    <string name="health_legend_down">Caído (sin video)</string>
+    <string name="health_legend_flap">Parpadeo (reconexiones)</string>
+    <string name="health_lane_name_detector">Detector</string>
+    <string name="health_lane_sub_recording">video guardado</string>
+    <string name="health_lane_sub_detector">detección mov.</string>
+    <string name="health_lane_sub_segmenter">captura 2K</string>
+    <string name="health_lane_sub_sync">subida a Drive</string>
+    <string name="health_state_ok">Grabando 2K</string>
+    <string name="health_state_degraded">360p (degradado)</string>
+    <string name="health_state_down">Caído — sin video</string>
+    <string name="health_state_flap">Parpadeando</string>
+    <string name="health_state_flap_heavy">Parpadeo fuerte</string>
+    <string name="health_state_sync_ok">Subiendo a Drive</string>
+    <string name="health_state_sync_warn">Fallo transitorio</string>
+    <string name="health_tap_hint">Toca una franja para ver el detalle.</string>
+    <string name="health_detail_flap">%1$d reconexiones</string>
+    <string name="health_sum_rec_outages">%1$d cortes · peor %2$s</string>
+    <string name="health_sum_rec_none">sin cortes</string>
+    <string name="health_sum_flap_active">reconexiones agrupadas</string>
+    <string name="health_sum_flap_stable">estable</string>
+    <string name="health_sum_sync_errors">%1$d fallos transitorios</string>
+    <string name="health_sum_sync_ok">sin backlog</string>
+    <string name="health_sum_worst_day">peor día: %1$s (%2$s)</string>
+    <string name="health_stat_ok">OK</string>
+    <string name="health_30d_unavailable">Aún no disponible — el NVR está acumulando el resumen diario. El registro de eventos se recorta al llenarse, así que el detalle fino solo llega unos días atrás. Para meses, el NVR guarda una línea de resumen por día — barato y suficiente para horizontes largos.</string>
+
     <!-- Gráfico de historial de batería -->
     <string name="battery_title">Batería</string>
     <string name="battery_now">Ahora: %d%%</string>

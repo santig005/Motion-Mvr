@@ -284,6 +284,39 @@ class DriveClient(
         events
     }
 
+    /** Reads the NVR's daily_health.jsonl rollup(s) (one line per day per camera) for the 30-day
+     *  horizon of the service timeline. Merged across files, parsed defensively line-by-line. Absent
+     *  file / 404 / any failure yields an empty list (the 30d tab then shows the honest "not yet
+     *  available" note while the NVR side ships in parallel). */
+    suspend fun fetchDailyHealth(): List<DailyHealth> = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = 'daily_health.jsonl' and trashed = false")
+            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("pageSize", "100")
+            .build()
+        val ids = mutableListOf<String>()
+        http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?: return@withContext emptyList()
+                for (i in 0 until files.length()) ids += files.getJSONObject(i).getString("id")
+            }
+        val days = mutableListOf<DailyHealth>()
+        for (id in ids) {
+            val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
+            http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    resp.body?.string()?.lineSequence()?.forEach { line ->
+                        parseDailyHealthLine(line)?.let { days += it }
+                    }
+                }
+        }
+        days
+    }
+
     /** Reads the NVR's sync_status.json (the cloud-sync pipeline heartbeat). If several exist the
      *  freshest (highest `updated`) wins. Null on absence / 404 / parse failure. */
     suspend fun fetchSyncStatus(): SyncStatus? = withContext(Dispatchers.IO) {

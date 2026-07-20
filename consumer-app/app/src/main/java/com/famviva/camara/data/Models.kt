@@ -377,6 +377,330 @@ fun clusterHealthTimeline(
     return result.sortedByDescending { it.ts }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Per-service health timeline ("swimlane") — the "Cobertura por servicio" card on the Salud screen.
+// Two data sources feed it: events.jsonl (fine-grained, 24h/7d) reconstructs live state spans, and
+// daily_health.jsonl (one rollup line per day, 30d) gives long-horizon coverage without a fat log.
+// ---------------------------------------------------------------------------------------------
+
+/** Visual state of a swimlane segment. The concrete colour is chosen in the UI layer (fixed status
+ *  hexes), keeping this model UI-agnostic. FLAP_* are "reconnect storm" windows (hatched), not a
+ *  clean sustained state; SYNC_WARN is a transient sync error mark. */
+enum class LaneState { OK, DEGRADED, DOWN, FLAP_SERIOUS, FLAP_CRITICAL, SYNC_WARN }
+
+/** One contiguous coloured segment on a service lane, [startTs,endTs] in epoch seconds. Its width on
+ *  screen is proportional to (endTs-startTs). [flapCount] is the number of drops a FLAP_* span folds. */
+data class TimelineSpan(
+    val startTs: Long,
+    val endTs: Long,
+    val state: LaneState,
+    val flapCount: Int = 0,
+)
+
+/** A single service's reconstructed lane (recording | detector | segmenter | sync) as ordered spans. */
+data class ServiceLane(val svc: String, val spans: List<TimelineSpan>)
+
+/** Overall tone for a per-service summary stat (drives its colour: green / amber / red). */
+enum class SummaryTone { GOOD, MID, BAD }
+
+/** Per-service summary row for the selected horizon. Only the fields relevant to the service are set;
+ *  the UI formats them into a localized "stat + detail" line. */
+data class LaneSummary(
+    val svc: String,
+    val tone: SummaryTone,
+    val coveragePct: Double? = null,  // recording lane: % of the window not fully down
+    val outageCount: Int = 0,         // recording lane: number of down->up outages
+    val worstOutageSec: Long = 0,     // recording lane: longest single outage
+    val flapDrops: Int = 0,           // detector/segmenter: total reconnect drops in the window
+    val flapDurSec: Long = 0,         // detector/segmenter: total time spent flapping
+    val syncErrors: Int = 0,          // sync: number of transient errors
+    val worstDate: String? = null,    // 30d: YYYYMMDD of the worst day (recording), if any
+)
+
+/** The whole swimlane for a live horizon (24h/7d): the four lanes + their summaries. */
+data class ServiceTimeline(
+    val windowStart: Long,
+    val windowEnd: Long,
+    val lanes: List<ServiceLane>,
+    val summaries: List<LaneSummary>,
+)
+
+private data class LaneInterval(
+    val start: Long,
+    val end: Long,
+    val state: LaneState,
+    val priority: Int,       // higher wins on overlap (DOWN 3 > DEGRADED 2 > OK baseline)
+    val flapCount: Int = 0,
+)
+
+/** Flattens a set of (possibly overlapping, priority-ranked) intervals onto an OK baseline across
+ *  [windowStart,windowEnd], producing gap-free non-overlapping spans. Adjacent same-state spans are
+ *  coalesced (except distinct FLAP windows, which stay separate). Pure & cheap — run once per horizon,
+ *  never per Canvas frame. */
+private fun resolveLane(svc: String, windowStart: Long, windowEnd: Long, intervals: List<LaneInterval>): ServiceLane {
+    if (windowEnd <= windowStart) return ServiceLane(svc, emptyList())
+    val clamped = intervals.mapNotNull {
+        val s = it.start.coerceAtLeast(windowStart)
+        val e = it.end.coerceAtMost(windowEnd)
+        if (e > s) it.copy(start = s, end = e) else null
+    }
+    val bounds = sortedSetOf(windowStart, windowEnd)
+    clamped.forEach { bounds.add(it.start); bounds.add(it.end) }
+    val pts = bounds.toList()
+    val raw = ArrayList<TimelineSpan>(pts.size)
+    for (i in 0 until pts.size - 1) {
+        val a = pts[i]; val b = pts[i + 1]
+        val mid = (a + b) / 2
+        val top = clamped.filter { it.start <= mid && mid < it.end }.maxByOrNull { it.priority }
+        raw.add(TimelineSpan(a, b, top?.state ?: LaneState.OK, top?.flapCount ?: 0))
+    }
+    val merged = ArrayList<TimelineSpan>(raw.size)
+    for (s in raw) {
+        val last = merged.lastOrNull()
+        val isFlap = s.state == LaneState.FLAP_SERIOUS || s.state == LaneState.FLAP_CRITICAL
+        if (last != null && !isFlap && last.state == s.state && last.endTs == s.startTs) {
+            merged[merged.size - 1] = last.copy(endTs = s.endTs)
+        } else merged.add(s)
+    }
+    return ServiceLane(svc, merged)
+}
+
+/** Recording lane intervals: down->up pairs become DOWN (red, priority 3); degraded->restored become
+ *  DEGRADED (amber, priority 2). DOWN overrides DEGRADED on overlap. An unpaired down/degraded is
+ *  treated as ongoing (extends past the window; the caller clamps). */
+private fun recordingIntervals(events: List<OutageEvent>): List<LaneInterval> {
+    val rec = events.filter { it.svc == "recording" }.sortedBy { it.ts }
+    val out = mutableListOf<LaneInterval>()
+    var openDown: Long? = null
+    var openDeg: Long? = null
+    for (e in rec) {
+        when (e.ev) {
+            "down" -> if (openDown == null) openDown = e.ts
+            "up" -> openDown?.let { out.add(LaneInterval(it, e.ts, LaneState.DOWN, 3)); openDown = null }
+            "degraded" -> if (openDeg == null) openDeg = e.ts
+            "restored" -> openDeg?.let { out.add(LaneInterval(it, e.ts, LaneState.DEGRADED, 2)); openDeg = null }
+        }
+    }
+    openDown?.let { out.add(LaneInterval(it, Long.MAX_VALUE, LaneState.DOWN, 3)) }
+    openDeg?.let { out.add(LaneInterval(it, Long.MAX_VALUE, LaneState.DEGRADED, 2)) }
+    return out
+}
+
+/** Detector/segmenter lanes flap rather than cleanly go down. Cluster `drop` events within [gapSec]
+ *  into flap windows (>= [minSize] drops); severity by drop density (>=30/h or >=60 total = critical,
+ *  else serious). Mirrors [clusterHealthTimeline]'s idea but yields drawable spans. */
+private fun flapIntervals(
+    events: List<OutageEvent>,
+    svc: String,
+    windowStart: Long,
+    windowEnd: Long,
+    gapSec: Long = 900,
+    minSize: Int = 3,
+): List<LaneInterval> {
+    val drops = events.filter { it.svc == svc && it.ev == "drop" && it.ts in windowStart..windowEnd }
+        .sortedBy { it.ts }
+    val out = mutableListOf<LaneInterval>()
+    var i = 0
+    while (i < drops.size) {
+        var j = i + 1
+        while (j < drops.size && drops[j].ts - drops[j - 1].ts <= gapSec) j++
+        val run = drops.subList(i, j)
+        if (run.size >= minSize) {
+            val start = run.first().ts
+            val end = run.last().ts.coerceAtLeast(start + 1)
+            val hours = (end - start) / 3600.0
+            val perHour = if (hours > 0) run.size / hours else run.size.toDouble()
+            val state = if (perHour >= 30.0 || run.size >= 60) LaneState.FLAP_CRITICAL else LaneState.FLAP_SERIOUS
+            out.add(LaneInterval(start, end, state, 2, run.size))
+        }
+        i = j
+    }
+    return out
+}
+
+/** Sync lane: green baseline with a short amber mark at each transient `error`. */
+private fun syncIntervals(events: List<OutageEvent>, windowStart: Long, windowEnd: Long): List<LaneInterval> =
+    events.filter { it.svc == "sync" && it.ev == "error" && it.ts in windowStart..windowEnd }
+        .map { LaneInterval(it.ts, it.ts + 1, LaneState.SYNC_WARN, 2) }
+
+/**
+ * Reconstructs the four service lanes from events.jsonl over a live window and computes per-service
+ * summaries. Lane order matches the mockup: recording, detector, segmenter, sync.
+ */
+fun buildServiceTimeline(events: List<OutageEvent>, windowStart: Long, windowEnd: Long): ServiceTimeline {
+    val lanes = listOf(
+        resolveLane("recording", windowStart, windowEnd, recordingIntervals(events)),
+        resolveLane("detector", windowStart, windowEnd, flapIntervals(events, "detector", windowStart, windowEnd)),
+        resolveLane("segmenter", windowStart, windowEnd, flapIntervals(events, "segmenter", windowStart, windowEnd)),
+        resolveLane("sync", windowStart, windowEnd, syncIntervals(events, windowStart, windowEnd)),
+    )
+    val span = (windowEnd - windowStart).coerceAtLeast(1L)
+    val summaries = lanes.map { lane ->
+        when (lane.svc) {
+            "recording" -> {
+                val downs = lane.spans.filter { it.state == LaneState.DOWN }
+                val degraded = lane.spans.any { it.state == LaneState.DEGRADED }
+                val downTotal = downs.sumOf { it.endTs - it.startTs }
+                val cov = 100.0 * (span - downTotal) / span
+                val worst = downs.maxOfOrNull { it.endTs - it.startTs } ?: 0L
+                val tone = when {
+                    downs.isEmpty() && !degraded -> SummaryTone.GOOD
+                    cov >= 99.5 -> SummaryTone.GOOD
+                    cov >= 95.0 -> SummaryTone.MID
+                    else -> SummaryTone.BAD
+                }
+                LaneSummary(lane.svc, tone, coveragePct = cov, outageCount = downs.size, worstOutageSec = worst)
+            }
+            "detector", "segmenter" -> {
+                val flaps = lane.spans.filter { it.state == LaneState.FLAP_SERIOUS || it.state == LaneState.FLAP_CRITICAL }
+                val drops = flaps.sumOf { it.flapCount }
+                val dur = flaps.sumOf { it.endTs - it.startTs }
+                val heavy = flaps.any { it.state == LaneState.FLAP_CRITICAL }
+                val tone = if (drops == 0) SummaryTone.GOOD else if (heavy) SummaryTone.BAD else SummaryTone.MID
+                LaneSummary(lane.svc, tone, flapDrops = drops, flapDurSec = dur)
+            }
+            else -> {
+                val errs = lane.spans.count { it.state == LaneState.SYNC_WARN }
+                LaneSummary(lane.svc, if (errs == 0) SummaryTone.GOOD else SummaryTone.MID, syncErrors = errs)
+            }
+        }
+    }
+    return ServiceTimeline(windowStart, windowEnd, lanes, summaries)
+}
+
+/** One line of daily_health.jsonl — the NVR's cheap per-day, per-camera health rollup (30d horizon). */
+data class DailyHealth(
+    val date: String,     // YYYYMMDD
+    val cam: String,
+    val dayS: Int,        // seconds the day covered (usually 86400; less for a partial today)
+    val recDownS: Int,    // seconds recording was fully down
+    val recOutages: Int,  // number of recording outages
+    val recWorstS: Int,   // longest single outage (s)
+    val recSubS: Int,     // seconds recorded in the 360p sub-stream (degraded)
+    val detDrops: Int,    // detector reconnect drops
+    val segDrops: Int,    // segmenter reconnect drops
+    val syncErrors: Int,  // sync transient errors
+    val partial: Boolean, // the day's rollup is still accumulating (e.g. today)
+)
+
+/** Parses one daily_health.jsonl line; null for blanks / malformed / missing date (parse defensively). */
+fun parseDailyHealthLine(line: String): DailyHealth? {
+    val t = line.trim()
+    if (!t.startsWith("{")) return null
+    return runCatching {
+        val j = JSONObject(t)
+        val date = j.optString("date").ifBlank { return null }
+        DailyHealth(
+            date = date,
+            cam = j.optString("cam", "cam"),
+            dayS = j.optInt("day_s", 0),
+            recDownS = j.optInt("rec_down_s", 0),
+            recOutages = j.optInt("rec_outages", 0),
+            recWorstS = j.optInt("rec_worst_s", 0),
+            recSubS = j.optInt("rec_sub_s", 0),
+            detDrops = j.optInt("det_drops", 0),
+            segDrops = j.optInt("seg_drops", 0),
+            syncErrors = j.optInt("sync_errors", 0),
+            partial = j.optBoolean("partial", false),
+        )
+    }.getOrNull()
+}
+
+/** One day's cell on a 30d lane. [state] is the day's worst state; carries a couple of raw metrics so
+ *  the UI can show a localized tap detail (coverage for recording, drop/error counts for the rest). */
+data class DayCell(
+    val date: String,
+    val state: LaneState,
+    val partial: Boolean,
+    val coveragePct: Double? = null,
+    val metric: Int = 0,
+)
+
+/** A service's 30d lane as one cell per day. */
+data class ServiceDayLane(val svc: String, val cells: List<DayCell>)
+
+/** The whole 30d swimlane: day-cell lanes + per-service summaries. */
+data class ServiceDailyTimeline(
+    val lanes: List<ServiceDayLane>,
+    val summaries: List<LaneSummary>,
+    val dayCount: Int,
+)
+
+private fun flapStateForCount(drops: Int): LaneState = when {
+    drops >= 60 -> LaneState.FLAP_CRITICAL
+    drops >= 10 -> LaneState.FLAP_SERIOUS
+    else -> LaneState.OK
+}
+
+/**
+ * Builds the 30d day-cell lanes from daily_health.jsonl, aggregating across cameras per day. Recording
+ * colour is by coverage band (>=99.5% green, >=97% amber or notable sub-stream time, else red);
+ * detector/segmenter by drop count; sync by error presence. Empty input yields empty lanes (the UI
+ * then shows the honest "aún no disponible" note).
+ */
+fun buildDailyTimeline(days: List<DailyHealth>): ServiceDailyTimeline {
+    if (days.isEmpty()) return ServiceDailyTimeline(emptyList(), emptyList(), 0)
+    val byDate = days.groupBy { it.date }.toSortedMap()
+    val dates = byDate.keys.toList()
+    val rec = ArrayList<DayCell>(dates.size)
+    val det = ArrayList<DayCell>(dates.size)
+    val seg = ArrayList<DayCell>(dates.size)
+    val syn = ArrayList<DayCell>(dates.size)
+    for (date in dates) {
+        val rows = byDate[date]!!
+        val dayS = rows.sumOf { it.dayS }.coerceAtLeast(1)
+        val downS = rows.sumOf { it.recDownS }
+        val subS = rows.sumOf { it.recSubS }
+        val cov = 100.0 * (1.0 - downS.toDouble() / dayS)
+        val partial = rows.any { it.partial }
+        val recState = when {
+            cov < 97.0 -> LaneState.DOWN
+            cov < 99.5 || subS.toDouble() / dayS >= 0.05 -> LaneState.DEGRADED
+            else -> LaneState.OK
+        }
+        rec.add(DayCell(date, recState, partial, coveragePct = cov, metric = rows.sumOf { it.recOutages }))
+        val dDrops = rows.sumOf { it.detDrops }
+        det.add(DayCell(date, flapStateForCount(dDrops), partial, metric = dDrops))
+        val sDrops = rows.sumOf { it.segDrops }
+        seg.add(DayCell(date, flapStateForCount(sDrops), partial, metric = sDrops))
+        val sErr = rows.sumOf { it.syncErrors }
+        syn.add(DayCell(date, if (sErr > 0) LaneState.SYNC_WARN else LaneState.OK, partial, metric = sErr))
+    }
+    val lanes = listOf(
+        ServiceDayLane("recording", rec),
+        ServiceDayLane("detector", det),
+        ServiceDayLane("segmenter", seg),
+        ServiceDayLane("sync", syn),
+    )
+    // Summaries.
+    val avgCov = rec.mapNotNull { it.coveragePct }.average().let { if (it.isNaN()) 100.0 else it }
+    val worstDay = days.maxByOrNull { it.recWorstS }
+    val recTone = when {
+        avgCov >= 99.5 -> SummaryTone.GOOD
+        avgCov >= 97.0 -> SummaryTone.MID
+        else -> SummaryTone.BAD
+    }
+    val recSummary = LaneSummary(
+        "recording", recTone,
+        coveragePct = avgCov,
+        outageCount = days.sumOf { it.recOutages },
+        worstOutageSec = (worstDay?.recWorstS ?: 0).toLong(),
+        worstDate = worstDay?.takeIf { it.recWorstS > 0 }?.date,
+    )
+    fun flapSummary(svc: String, total: Int, heavyDays: Int) =
+        LaneSummary(svc, if (total == 0) SummaryTone.GOOD else if (heavyDays > 0) SummaryTone.BAD else SummaryTone.MID, flapDrops = total)
+    val detTotal = days.sumOf { it.detDrops }
+    val segTotal = days.sumOf { it.segDrops }
+    val syncTotal = days.sumOf { it.syncErrors }
+    val summaries = listOf(
+        recSummary,
+        flapSummary("detector", detTotal, det.count { it.state == LaneState.FLAP_CRITICAL }),
+        flapSummary("segmenter", segTotal, seg.count { it.state == LaneState.FLAP_CRITICAL }),
+        LaneSummary("sync", if (syncTotal == 0) SummaryTone.GOOD else SummaryTone.MID, syncErrors = syncTotal),
+    )
+    return ServiceDailyTimeline(lanes, summaries, dates.size)
+}
+
 /** Sync-pipeline heartbeat, read from the NVR's sync_status.json. */
 data class SyncStatus(
     val updated: Long,
