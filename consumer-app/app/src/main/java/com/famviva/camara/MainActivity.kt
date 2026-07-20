@@ -15,12 +15,14 @@ import androidx.core.content.ContextCompat
 import com.famviva.camara.notify.Notifications
 import com.famviva.camara.auth.AuthManager
 import com.famviva.camara.data.BatteryHistoryStore
+import com.famviva.camara.data.CatalogStore
 import com.famviva.camara.data.ClipListCache
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.FavoritesStore
 import com.famviva.camara.data.GeofenceManager
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
+import com.famviva.camara.data.ThumbArchive
 import com.famviva.camara.notify.DailyDigestWorker
 import com.famviva.camara.notify.NewClipsWorker
 import com.famviva.camara.ui.AppNav
@@ -53,6 +55,8 @@ class MainActivity : AppCompatActivity() {
         val clipListCache = ClipListCache(applicationContext)
         val batteryHistory = BatteryHistoryStore(applicationContext)
         val favoritesStore = FavoritesStore(applicationContext)
+        val catalogStore = CatalogStore(applicationContext)
+        val thumbArchive = ThumbArchive(applicationContext)
 
         maybeRequestNotificationPermission()
         NewClipsWorker.schedule(applicationContext)
@@ -74,6 +78,8 @@ class MainActivity : AppCompatActivity() {
                     clipListCache = clipListCache,
                     batteryHistory = batteryHistory,
                     favoritesStore = favoritesStore,
+                    catalogStore = catalogStore,
+                    thumbArchive = thumbArchive,
                     tokenProvider = { auth.token() },
                     deepLinkRoute = dest,
                     onDeepLinkHandled = { deepLink.value = null },

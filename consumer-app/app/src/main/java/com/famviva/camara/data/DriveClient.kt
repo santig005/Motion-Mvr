@@ -350,7 +350,12 @@ class DriveClient(
 
     /** Public wrapper for the background poll: clip base-name -> metrics, so the alert-gating can
      *  classify a new clip's motion intensity ([recentClips] omits metrics to stay lightweight). */
-    suspend fun recentMetrics(): Map<String, ClipMetric> = withContext(Dispatchers.IO) {
+    suspend fun recentMetrics(): Map<String, ClipMetric> = fetchAllMetrics()
+
+    /** Full metrics.csv (every clip's row) as base-name -> metric, for the local catalog seed. The
+     *  whole file is tiny (~3 MB/yr) and never purged, so this is the complete motion history — clips
+     *  long gone from Drive still contribute a metadata-only entry. */
+    suspend fun fetchAllMetrics(): Map<String, ClipMetric> = withContext(Dispatchers.IO) {
         runCatching { fetchMetrics(tokenProvider()) }.getOrDefault(emptyMap())
     }
 
@@ -388,10 +393,11 @@ class DriveClient(
             if (c.size >= 7) {
                 val name = c[0].trim()
                 val durSec = c[2].trim().toDoubleOrNull()
+                val sizeKb = c[3].trim().toDoubleOrNull()?.toLong()
                 val yavg = c[4].trim().toDoubleOrNull()
                 val frames = c[6].trim().toIntOrNull()
                 if (name.isNotEmpty() && yavg != null) {
-                    into[name] = ClipMetric(yavgMax = yavg, framesMov = frames ?: 0, durSec = durSec)
+                    into[name] = ClipMetric(yavgMax = yavg, framesMov = frames ?: 0, durSec = durSec, sizeKb = sizeKb)
                 }
             }
         }

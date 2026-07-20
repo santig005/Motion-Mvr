@@ -359,6 +359,20 @@
     <string name="widget_updated">Actualizado %1$s</string>
     <string name="widget_live">En vivo</string>
 
+    <!-- Archivo local / historial de metadatos (Fase A) -->
+    <string name="history_title">Historial</string>
+    <string name="history_intro">Todos los eventos de movimiento grabados — incluso después de que Drive borra el video. ☁️ en Drive · ⬇️ en el teléfono · 📊 solo metadatos.</string>
+    <string name="history_empty">Aún no hay historial. Se llena a medida que cargan los clips y las métricas.</string>
+    <string name="history_summary">%1$d eventos · %2$d solo-metadato</string>
+    <string name="history_thumbs_footprint">%1$s en miniaturas</string>
+    <string name="history_video_unavailable">Video ya no disponible</string>
+    <string name="clip_state_cloud">En Drive</string>
+    <string name="clip_state_archived">En el teléfono</string>
+    <string name="clip_state_metadata">Solo metadatos</string>
+    <string name="history_showing_day">Mostrando %1$s ·  quitar</string>
+    <string name="cal_prev_month">Mes anterior</string>
+    <string name="cal_next_month">Mes siguiente</string>
+
     <!-- Plurales -->
     <plurals name="events">
         <item quantity="one">%d evento</item>

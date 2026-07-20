@@ -360,6 +360,20 @@
     <string name="widget_updated">Updated %1$s</string>
     <string name="widget_live">Live</string>
 
+    <!-- Local archive / metadata history (Phase A) -->
+    <string name="history_title">History</string>
+    <string name="history_intro">Every motion event ever recorded — even after Drive drops the video. ☁️ on Drive · ⬇️ on this phone · 📊 metadata only.</string>
+    <string name="history_empty">No history yet. It fills in as clips and metrics load.</string>
+    <string name="history_summary">%1$d events · %2$d metadata-only</string>
+    <string name="history_thumbs_footprint">%1$s in thumbnails</string>
+    <string name="history_video_unavailable">Video no longer available</string>
+    <string name="clip_state_cloud">On Drive</string>
+    <string name="clip_state_archived">On phone</string>
+    <string name="clip_state_metadata">Metadata only</string>
+    <string name="history_showing_day">Showing %1$s ·  clear</string>
+    <string name="cal_prev_month">Previous month</string>
+    <string name="cal_next_month">Next month</string>
+
     <!-- Plurals -->
     <plurals name="events">
         <item quantity="one">%d event</item>

@@ -5,6 +5,7 @@ import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.os.LocaleListCompat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.clickable
@@ -32,11 +33,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MonitorHeart
@@ -137,6 +140,8 @@ import com.famviva.camara.data.buildHealthTimeline
 import com.famviva.camara.data.buildServiceTimeline
 import com.famviva.camara.data.buildDailyTimeline
 import com.famviva.camara.data.Clip
+import com.famviva.camara.data.ClipRecord
+import com.famviva.camara.data.ClipState
 import com.famviva.camara.data.clusterHealthTimeline
 import com.famviva.camara.data.DailyHealth
 import com.famviva.camara.data.DayCell
@@ -174,6 +179,11 @@ import com.famviva.camara.notify.AlertIntensity
 import com.famviva.camara.notify.NotifyStore
 import com.famviva.camara.media.ClipActions
 import com.famviva.camara.ui.theme.status
+import java.io.File
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.format.DateTimeFormatter
+import java.time.temporal.WeekFields
 import java.util.Locale
 import kotlin.math.atan2
 import kotlin.math.roundToInt
@@ -188,13 +198,15 @@ fun AppNav(
     clipListCache: com.famviva.camara.data.ClipListCache,
     batteryHistory: com.famviva.camara.data.BatteryHistoryStore,
     favoritesStore: com.famviva.camara.data.FavoritesStore,
+    catalogStore: com.famviva.camara.data.CatalogStore,
+    thumbArchive: com.famviva.camara.data.ThumbArchive,
     tokenProvider: suspend () -> String,
     deepLinkRoute: String? = null,
     onDeepLinkHandled: () -> Unit = {},
 ) {
     val nav = rememberNavController()
     val vm: MainViewModel = viewModel(
-        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, tokenProvider),
+        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, catalogStore, thumbArchive, tokenProvider),
     )
 
     // Returning to the foreground refetches when the in-memory data has gone stale. Without this,
@@ -248,6 +260,7 @@ fun AppNav(
         composable("camera_settings") { CameraSettingsScreen(nav) }
         composable("live_logs") { LiveLogScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
+        composable("history") { HistoryScreen(vm, nav, tokenProvider) }
         composable("storage") { StorageScreen(vm, nav) }
         composable("battery/{camera}") { entry ->
             BatteryScreen(vm, nav, entry.arguments?.getString("camera").orEmpty())
@@ -347,6 +360,11 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.history_title)) },
+                leadingIcon = { Icon(Icons.Filled.History, contentDescription = null) },
+                onClick = { expanded = false; nav.navigate("history") },
+            )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.storage_title)) },
                 leadingIcon = { Icon(Icons.Filled.Storage, contentDescription = null) },
@@ -1389,6 +1407,397 @@ private fun FavoritesScreen(
         )
     }
 }
+
+/**
+ * The full motion history from the local catalog — the UNION of Drive, the local archive and
+ * metadata-only entries whose video is gone everywhere. Grouped by day, newest first. Each entry
+ * carries a tier badge: ☁️ CLOUD (on Drive, streamable), ⬇️ ARCHIVED (video on this phone) or
+ * 📊 METADATA_ONLY (only metrics + maybe a thumbnail survive — shown, but not playable).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HistoryScreen(
+    vm: MainViewModel,
+    nav: NavHostController,
+    tokenProvider: suspend () -> String,
+) {
+    val context = LocalContext.current
+    var token by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { token = runCatching { tokenProvider() }.getOrNull() }
+
+    // The catalog is (re)built by load(); make sure at least one load has run so a cold start seeds it.
+    LaunchedEffect(Unit) { if (!vm.loadedOnce) vm.load() }
+
+    val days = vm.catalogByDay()
+    val totalEvents = days.sumOf { it.second.size }
+    val metaOnly = vm.catalogMetadataOnlyCount()
+    val thumbBytes = vm.thumbArchiveBytes()
+
+    // Per-day event counts feed the calendar heatmap. Recomputed only when the catalog changes.
+    val activity = remember(vm.catalog) {
+        vm.catalog.mapNotNull { it.dateKey }.groupingBy { it }.eachCount()
+    }
+    // Month shown in the calendar (default: the most recent day with activity, else this month) and
+    // the day tapped to filter the list below. Kept across rotation as plain strings.
+    var monthKey by rememberSaveable {
+        mutableStateOf((days.firstOrNull()?.first?.let { YearMonth.from(LocalDate.parse(it, DateTimeFormatter.BASIC_ISO_DATE)) } ?: YearMonth.now()).toString())
+    }
+    var selectedDay by rememberSaveable { mutableStateOf<String?>(null) }
+    val month = runCatching { YearMonth.parse(monthKey) }.getOrDefault(YearMonth.now())
+
+    val shownDays = selectedDay?.let { sel -> days.filter { it.first == sel } } ?: days
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.history_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        Column(Modifier.fillMaxSize().padding(pad)) {
+            if (days.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        stringResource(R.string.history_empty),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(32.dp),
+                    )
+                }
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item(key = "__calendar__") {
+                        MonthCalendar(
+                            month = month,
+                            activity = activity,
+                            selectedDay = selectedDay,
+                            // Changing month clears a stale selection so the list never shows a day
+                            // from a month the calendar isn't displaying.
+                            onPrev = { monthKey = month.minusMonths(1).toString(); selectedDay = null },
+                            onNext = { monthKey = month.plusMonths(1).toString(); selectedDay = null },
+                            onSelectDay = { day -> selectedDay = if (selectedDay == day) null else day },
+                        )
+                    }
+                    item(key = "__history_header__") {
+                        Column {
+                            Text(
+                                stringResource(R.string.history_intro),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                stringResource(R.string.history_summary, totalEvents, metaOnly) +
+                                    if (thumbBytes > 0) " · " + stringResource(R.string.history_thumbs_footprint, humanSize(thumbBytes)) else "",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    // A day tapped on the calendar filters the list to that day, with a clear chip.
+                    selectedDay?.let { sel ->
+                        item(key = "__filter_$sel") {
+                            AssistChip(
+                                onClick = { selectedDay = null },
+                                label = { Text(stringResource(R.string.history_showing_day, prettyDate(context, sel))) },
+                                trailingIcon = { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
+                    shownDays.forEach { (day, records) ->
+                        item(key = "day_$day") {
+                            Text(
+                                prettyDate(context, day),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                            )
+                        }
+                        items(records, key = { it.name }) { record ->
+                            HistoryRow(
+                                record = record,
+                                token = token,
+                                onClick = record.driveFileId
+                                    ?.let { id -> { nav.navigate("player/$id") } },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Compact month calendar / activity heatmap for the History screen: each day is shaded by how many
+ * motion events it had (deeper = busier), so the whole month's pattern reads at a glance. ‹ › page
+ * months; tapping a day with activity filters the list below to it. A brand-neutral single-hue ramp
+ * (the theme primary at increasing opacity) keeps it legible in light and dark; the day number stays
+ * the label so shading is never the only signal.
+ */
+@Composable
+private fun MonthCalendar(
+    month: YearMonth,
+    activity: Map<String, Int>,
+    selectedDay: String?,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onSelectDay: (String) -> Unit,
+) {
+    val firstDow = WeekFields.of(Locale.getDefault()).firstDayOfWeek
+    val today = LocalDate.now()
+    val monthLabel = month.month.getDisplayName(java.time.format.TextStyle.FULL, Locale.getDefault())
+        .replaceFirstChar { it.uppercase() } + " " + month.year
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onPrev) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = stringResource(R.string.cal_prev_month))
+                }
+                Text(
+                    monthLabel,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+                IconButton(onClick = onNext) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = stringResource(R.string.cal_next_month))
+                }
+            }
+            // Weekday header, ordered by the locale's first day of week.
+            Row(Modifier.fillMaxWidth()) {
+                for (i in 0..6) {
+                    val dow = firstDow.plus(i.toLong())
+                    Text(
+                        dow.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()).uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            val daysInMonth = month.lengthOfMonth()
+            val lead = ((month.atDay(1).dayOfWeek.value - firstDow.value) + 7) % 7
+            val rows = (lead + daysInMonth + 6) / 7
+            var dayNum = 1
+            for (week in 0 until rows) {
+                Row(Modifier.fillMaxWidth()) {
+                    for (col in 0..6) {
+                        val idx = week * 7 + col
+                        if (idx < lead || dayNum > daysInMonth) {
+                            Box(Modifier.weight(1f).aspectRatio(1f))
+                        } else {
+                            val d = dayNum
+                            val date = month.atDay(d)
+                            val dateKey = date.format(DateTimeFormatter.BASIC_ISO_DATE)
+                            val count = activity[dateKey] ?: 0
+                            CalendarDayCell(
+                                day = d,
+                                count = count,
+                                isToday = date == today,
+                                isSelected = dateKey == selectedDay,
+                                onClick = if (count > 0) ({ onSelectDay(dateKey) }) else null,
+                                modifier = Modifier.weight(1f),
+                            )
+                            dayNum++
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One calendar cell: primary-tinted by activity bucket, outlined if today, ringed if selected. */
+@Composable
+private fun CalendarDayCell(
+    day: Int,
+    count: Int,
+    isToday: Boolean,
+    isSelected: Boolean,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val alpha = when {
+        count == 0 -> 0f
+        count <= 2 -> 0.18f
+        count <= 6 -> 0.34f
+        count <= 15 -> 0.55f
+        else -> 0.80f
+    }
+    val shape = RoundedCornerShape(6.dp)
+    val primary = MaterialTheme.colorScheme.primary
+    Box(
+        modifier
+            .aspectRatio(1f)
+            .padding(2.dp)
+            .clip(shape)
+            .background(primary.copy(alpha = alpha))
+            .then(
+                when {
+                    isSelected -> Modifier.border(2.dp, primary, shape)
+                    isToday -> Modifier.border(1.dp, MaterialTheme.colorScheme.outline, shape)
+                    else -> Modifier
+                },
+            )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "$day",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
+            color = if (alpha >= 0.5f) Color.White else MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+/** One history entry: thumbnail (local archive → Drive preview → placeholder), time, intensity and a
+ *  tier badge. Tappable to play only when [onClick] is non-null (i.e. the video is still reachable);
+ *  a metadata-only entry shows a "video no disponible" caption and doesn't react to taps. */
+@Composable
+private fun HistoryRow(record: ClipRecord, token: String?, onClick: (() -> Unit)?) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it },
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.width(96.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                HistoryThumb(record, token)
+                if (onClick != null) {
+                    Box(
+                        Modifier.size(30.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.32f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = stringResource(R.string.action_play),
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        record.time,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    ClipStateBadge(record.state)
+                }
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    record.period?.let {
+                        Text(
+                            "${it.emoji} ${stringResource(it.labelRes)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    record.intensityLevel?.let { IntensityBars(it) }
+                }
+                Spacer(Modifier.height(3.dp))
+                if (record.state == ClipState.METADATA_ONLY) {
+                    Text(
+                        stringResource(R.string.history_video_unavailable),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else if (record.sizeBytes > 0) {
+                    Text(
+                        record.sizeMb + (record.durationLabel?.let { " · $it" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** History thumbnail: the archived local jpg first (survives Drive purges), else the Drive preview
+ *  while the clip is still up there, else a muted camera glyph. Reuses the Coil + Bearer-token path. */
+@Composable
+private fun HistoryThumb(record: ClipRecord, token: String?) {
+    val local = record.thumbLocalPath
+    val driveThumb = record.driveThumbUrl
+    when {
+        local != null -> AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(File(local))
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        driveThumb != null && token != null -> AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(driveThumb)
+                .addHeader("Authorization", "Bearer $token")
+                .crossfade(true)
+                .build(),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        else -> Icon(
+            Icons.Filled.Videocam,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+            modifier = Modifier.size(28.dp),
+        )
+    }
+}
+
+/** Small tier pill: ☁️ on Drive · ⬇️ on this phone · 📊 metadata only. */
+@Composable
+private fun ClipStateBadge(state: ClipState) {
+    val (emoji, labelRes, bg, fg) = when (state) {
+        ClipState.CLOUD -> Quad("☁️", R.string.clip_state_cloud, MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
+        ClipState.ARCHIVED -> Quad("⬇️", R.string.clip_state_archived, MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
+        ClipState.METADATA_ONLY -> Quad("📊", R.string.clip_state_metadata, MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    Surface(color = bg, shape = RoundedCornerShape(6.dp)) {
+        Text(
+            "$emoji ${stringResource(labelRes)}",
+            color = fg,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/** Tiny 4-tuple helper so [ClipStateBadge] can destructure its per-state styling. */
+private data class Quad(val emoji: String, val labelRes: Int, val bg: Color, val fg: Color)
 
 /** One hour bucket of a day: how many events happened and their average motion intensity (1..5). */
 private data class HourBin(val hour: Int, val count: Int, val avgIntensity: Int?)

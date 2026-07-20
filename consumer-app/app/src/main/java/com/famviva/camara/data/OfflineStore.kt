@@ -47,6 +47,14 @@ class OfflineStore(private val context: Context) {
 
     fun isDownloaded(clip: Clip): Boolean = localFile(clip).let { it.exists() && it.length() > 0L }
 
+    /** Absolute path of the downloaded video for a base name (no extension), or null if not cached —
+     *  the local-presence check the catalog uses to mark a clip ARCHIVED (clips are stored under
+     *  their `mt_*.mp4` name). */
+    fun downloadedPathForName(baseName: String): String? {
+        val f = File(dir, if (baseName.endsWith(".mp4")) baseName else "$baseName.mp4")
+        return f.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+    }
+
     fun totalSizeBytes(): Long = dir.listFiles()?.sumOf { it.length() } ?: 0L
 
     fun delete(clip: Clip) { localFile(clip).delete() }

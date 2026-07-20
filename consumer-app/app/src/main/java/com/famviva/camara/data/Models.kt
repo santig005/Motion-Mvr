@@ -184,8 +184,9 @@ fun estimateBatteryEtaMinutes(samples: List<BatterySample>): Int? {
     return ((remaining / ratePerHour) * 60.0).toInt()
 }
 
-/** Metrics of a clip read from the NVR's metrics.csv. */
-data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?)
+/** Metrics of a clip read from the NVR's metrics.csv. [sizeKb] backs the local catalog's size for
+ *  clips whose video is gone from Drive (so a metadata-only entry still knows how big it was). */
+data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?, val sizeKb: Long? = null)
 
 /** NVR/camera health, read from the status.json the NVR writes. */
 data class CameraHealth(

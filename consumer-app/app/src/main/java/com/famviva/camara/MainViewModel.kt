@@ -11,12 +11,16 @@ import com.famviva.camara.data.AutoDownloadMode
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.BatterySample
 import com.famviva.camara.data.CameraHealth
+import com.famviva.camara.data.CatalogStore
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.ClipListCache
+import com.famviva.camara.data.ClipRecord
+import com.famviva.camara.data.ClipState
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.FavoritesStore
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.SeenStore
+import com.famviva.camara.data.ThumbArchive
 import java.io.File
 import java.time.LocalDate
 import kotlinx.coroutines.launch
@@ -36,6 +40,8 @@ class MainViewModel(
     private val cache: ClipListCache,
     private val battery: BatteryHistoryStore,
     private val favorites: FavoritesStore,
+    private val catalogStore: CatalogStore,
+    private val thumbs: ThumbArchive,
     private val tokenProvider: suspend () -> String,
 ) : ViewModel() {
 
@@ -63,6 +69,12 @@ class MainViewModel(
     var autoDownloadMode by mutableStateOf(offline.autoDownloadMode)
         private set
     var favoriteIds by mutableStateOf(favorites.all())
+        private set
+
+    // The persistent local catalog: the UNION of Drive, the local archive and metadata-only history.
+    // Seeded from disk so the History view shows the whole timeline immediately on a cold start, then
+    // rebuilt on each successful load (see [load]).
+    var catalog by mutableStateOf<List<ClipRecord>>(catalogStore.load())
         private set
 
     // Bumped on every download/delete so Compose recomposes reads of offline state below — the
@@ -220,6 +232,7 @@ class MainViewModel(
                 syncFavoritesToDrive()
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
                 recordBatterySamples()
+                refreshCatalog()
                 loadedOnce = true
                 lastLoadOk = System.currentTimeMillis() / 1000
                 if (autoDownloadMode != AutoDownloadMode.OFF) downloadTodaysClips()
@@ -230,6 +243,55 @@ class MainViewModel(
             }
         }
     }
+
+    /** Rebuilds the local catalog from the fresh Drive listing + the full (permanent) metrics.csv,
+     *  merged with the local archive / thumbnail archive / favorites, persists it, then kicks off a
+     *  background thumbnail archive so the history stays visual after Drive purges the jpg. */
+    private suspend fun refreshCatalog() {
+        val metricRows = runCatching { drive.fetchAllMetrics() }.getOrDefault(emptyMap())
+        val merged = CatalogStore.merge(clips, metricRows, offline, favorites, thumbs)
+        catalog = merged
+        catalogStore.save(merged)
+        archiveThumbnails(merged)
+    }
+
+    /** Backfills the local thumbnail archive for clips still on Drive (the only place their jpg can
+     *  come from) — Wi-Fi only (~106 KB each adds up), sequentially and capped per load so a first
+     *  run over the whole Drive window trickles in over a few opens instead of one big burst. The
+     *  history still shows the live Drive preview meanwhile, so this is purely for post-purge survival. */
+    private fun archiveThumbnails(records: List<ClipRecord>) {
+        if (!offline.isOnUnmeteredNetwork()) return
+        val pending = records
+            .filter { it.onDrive && it.thumbFileId != null && it.thumbLocalPath == null }
+            .take(MAX_THUMB_ARCHIVE_PER_LOAD)
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            val token = runCatching { tokenProvider() }.getOrNull() ?: return@launch
+            var any = false
+            pending.forEach { r ->
+                if (runCatching { thumbs.archive(r.name, r.thumbFileId!!, token) }.getOrDefault(false)) any = true
+            }
+            if (any) {
+                // Point the in-memory catalog at the freshly-archived local jpgs and re-persist.
+                catalog = catalog.map { it.copy(thumbLocalPath = thumbs.localPathOrNull(it.name)) }
+                catalogStore.save(catalog)
+            }
+        }
+    }
+
+    /** Every catalog day (YYYYMMDD) -> that day's records, most recent first. The whole timeline,
+     *  including metadata-only entries whose video is gone everywhere. */
+    fun catalogByDay(): List<Pair<String, List<ClipRecord>>> =
+        catalog.filter { it.dateKey != null }
+            .groupBy { it.dateKey!! }
+            .toSortedMap(compareByDescending { it })
+            .map { it.key to it.value.sortedByDescending { r -> r.name } }
+
+    /** How many catalog entries are metadata-only (video gone everywhere) — for the History header. */
+    fun catalogMetadataOnlyCount(): Int = catalog.count { it.state == ClipState.METADATA_ONLY }
+
+    /** On-device footprint of the archived thumbnails (the History tier's storage cost). */
+    fun thumbArchiveBytes(): Long = thumbs.totalSizeBytes()
 
     /** Persist a battery point for each reporting camera (deduped by heartbeat timestamp). */
     private fun recordBatterySamples() {
@@ -277,6 +339,10 @@ class MainViewModel(
 
         /** Health data older than this is treated as "not refreshed" rather than judged live. */
         const val DATA_FRESH_MAX_AGE_SEC = 300L
+
+        /** Cap on thumbnails archived per load, so a first run over the whole Drive window trickles
+         *  in over a few opens instead of firing thousands of downloads at once. */
+        const val MAX_THUMB_ARCHIVE_PER_LOAD = 300
     }
 
     class Factory(
@@ -286,10 +352,12 @@ class MainViewModel(
         private val cache: ClipListCache,
         private val battery: BatteryHistoryStore,
         private val favorites: FavoritesStore,
+        private val catalogStore: CatalogStore,
+        private val thumbs: ThumbArchive,
         private val tokenProvider: suspend () -> String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            MainViewModel(drive, seen, offline, cache, battery, favorites, tokenProvider) as T
+            MainViewModel(drive, seen, offline, cache, battery, favorites, catalogStore, thumbs, tokenProvider) as T
     }
 }
