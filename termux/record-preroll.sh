@@ -76,6 +76,14 @@ HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (upl
 EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
+# Camera-level recovery. The segmenter can reconnect ffmpeg forever, but if the CAMERA's own RTSP
+# service is wedged (accepts TCP yet returns "Invalid data" on BOTH channels) no reconnect helps —
+# only a camera reboot clears it (verified 2026-07-27: a ~12h wedge, HTTP/ping alive, RTSP dead;
+# hammering the HTTP snapshot did NOT un-stick it; it cleared only on a real reboot). These gate the
+# wedged-camera classifier + reboot hook in the segmenter.
+WEDGE_AFTER_SECS="${WEDGE_AFTER_SECS:-360}"      # continuous produced=0 this long while the camera still pings => RTSP wedged (reboot candidate)
+REBOOT_EVERY_SECS="${REBOOT_EVERY_SECS:-600}"    # min gap between camera-reboot attempts (avoid reboot loops)
+CAM_HOST="${CAM_HOST:-$(printf '%s' "$RTSP_MAIN" | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')}"  # camera IP/host for ping + control
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
 BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
@@ -280,6 +288,28 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
              printf "%.3f %.3f %.3f %.3f %.3f %d", m0, m1, cut, mx, (c?s/c:0), cnt }'
 }
 
+# Camera-level recovery decision + action. Called by the segmenter when the camera has refused to
+# produce a single segment for WEDGE_AFTER_SECS. Ping first to SPLIT the two failure classes the app
+# should treat differently: "wedged" (host still pings — RTSP subsystem hung, a reboot fixes it) vs
+# "unreachable" (no ping — power loss / off the network / moved, nothing local can fix). Only the
+# former is a reboot candidate. The actual reboot command is the ONE thing still missing: this camera
+# (AJCloud/Wansview) exposes no HTTP/ONVIF reboot (all 404) — reboot goes over the proprietary P2P
+# channel the FAMVIVA app uses. Capture that once (PCAPdroid) and drop the command in below; until
+# then this raises a distinct, actionable alert so the outage is noticed in minutes, not hours.
+reboot_camera(){ # $1 = seconds we've been failing continuously
+  local downfor="$1"
+  if ! ping -c1 -W2 "$CAM_HOST" >/dev/null 2>&1; then
+    log "🔌 camera $CAM_HOST unreachable (${downfor}s no ping) — power/network, not a wedge"
+    log_event recording unreachable "no ping ${downfor}s"
+    return 0
+  fi
+  log "🩺 camera $CAM_HOST WEDGED (${downfor}s: pings but RTSP refuses both channels) — REBOOT REQUIRED"
+  log_event recording wedged "rtsp dead ${downfor}s, host up"
+  # --- TODO(reboot): issue the captured FAMVIVA reboot command here (P2P/UDP; see _private notes). ---
+  # e.g.  send_p2p_reboot "$CAM_HOST"   # once the capture confirms the exact packet/endpoint.
+  return 0
+}
+
 # 1) SEGMENTER (supervised) -------------------------------------------------------
 # Records the 2K (RTSP_MAIN) normally. When the 2K link is too degraded to hold, it drops to the much
 # lighter sub-stream (RTSP_DETECT, 360p) so we still capture SOMETHING instead of near-nothing, and
@@ -292,7 +322,7 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 # motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
   local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0 d1h="" d1hn=0
-  local fpid sustained newest produced
+  local fpid sustained newest produced firstfail=0 last_reboot=0
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -337,6 +367,17 @@ segmenter_loop(){
     newest=$(ls -t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -1)
     [ -n "$newest" ] && [ "$(stat -c %Y "$newest" 2>/dev/null || echo 0)" -ge "$t0" ] && produced=1
     if [ "$ran" -lt "$HEALTHY_SECS" ] || [ "$produced" = 0 ]; then sfails=$((sfails+1)); else sfails=0; fi
+    # Camera-wedged escalation: track how long we've gone WITHOUT producing a segment. A single good
+    # run clears it; a sustained produced=0 spell (both channels refusing) past WEDGE_AFTER_SECS means
+    # the camera itself is stuck, not the link — escalate to reboot_camera (rate-limited).
+    if [ "$produced" = 1 ]; then
+      firstfail=0
+    else
+      [ "$firstfail" = 0 ] && firstfail="$now"
+      if [ "$((now - firstfail))" -ge "$WEDGE_AFTER_SECS" ] && [ "$((now - last_reboot))" -ge "$REBOOT_EVERY_SECS" ]; then
+        reboot_camera "$((now - firstfail))"; last_reboot="$now"
+      fi
+    fi
     if [ "$ran" -ge "$SUSTAINED_2K_SECS" ]; then
       # Sustained run: flap history already cleared (and REC_STATE published) mid-run. (A stable 2K
       # holds minutes; a SUB run hits its RETRY_2K_SECS cap >= SUSTAINED_2K_SECS, so it lands here.)
