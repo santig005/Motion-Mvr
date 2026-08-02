@@ -334,6 +334,8 @@
     <string name="notif_channel_name">Motion events</string>
     <string name="notif_channel_desc">Alerts for new camera clips</string>
     <string name="notif_health_title">⚠️ %s</string>
+    <string name="notif_health_recovered_title">✅ %s</string>
+    <string name="notif_health_recovered">%s: recording again — all clear</string>
     <string name="health_no_signal">%s: no signal (not recording)</string>
     <string name="health_not_reporting">%s: not reporting (check the phone)</string>
     <string name="health_low_battery">%1$s: low battery %2$d%% (plug it in)</string>

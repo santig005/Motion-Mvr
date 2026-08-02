@@ -333,6 +333,8 @@
     <string name="notif_channel_name">Eventos de movimiento</string>
     <string name="notif_channel_desc">Avisos de nuevos clips de la cámara</string>
     <string name="notif_health_title">⚠️ %s</string>
+    <string name="notif_health_recovered_title">✅ %s</string>
+    <string name="notif_health_recovered">%s: grabando de nuevo — todo en orden</string>
     <string name="health_no_signal">%s: sin señal (no está grabando)</string>
     <string name="health_not_reporting">%s: sin reportar (revisa el teléfono)</string>
     <string name="health_low_battery">%1$s: batería baja %2$d%% (conéctalo)</string>

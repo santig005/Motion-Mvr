@@ -49,6 +49,13 @@ class NotifyStore(context: Context) {
     fun setHealthAlert(value: String?) =
         prefs.edit().apply { if (value == null) remove(KEY_HEALTH) else putString(KEY_HEALTH, value) }.apply()
 
+    /** Whether a camera was last seen DOWN (no signal / not reporting). Tracked apart from the general
+     *  alert so the "recovered / recording again" green-light fires only for the down->up transition the
+     *  user acts on (a reboot), not when a battery/sync/disk advisory clears. */
+    fun cameraWasDown(): Boolean = prefs.getBoolean(KEY_CAM_DOWN, false)
+
+    fun setCameraDown(down: Boolean) = prefs.edit().putBoolean(KEY_CAM_DOWN, down).apply()
+
     /** "YYYYMMDD" of the last day the daily recap was posted, so it isn't posted twice for one day. */
     fun lastDigestDay(): String? = prefs.getString(KEY_DIGEST, null)
 
@@ -59,6 +66,7 @@ class NotifyStore(context: Context) {
     private companion object {
         const val KEY = "last_clip"
         const val KEY_HEALTH = "health_alert"
+        const val KEY_CAM_DOWN = "camera_down"
         const val KEY_DIGEST = "digest_day"
         const val KEY_QUIET = "quiet_hours"
         const val KEY_ALERT_LEVEL = "alert_level"

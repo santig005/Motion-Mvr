@@ -158,4 +158,22 @@ object Notifications {
             .build()
         NotificationManagerCompat.from(context).notify(NOTIF_ID_HEALTH, notif)
     }
+
+    /**
+     * Green-light: a camera that had been down (no signal / not reporting) is recording again — the
+     * all-clear after a reboot. Reuses [NOTIF_ID_HEALTH] so it visually replaces the ⚠️ warning in the
+     * tray with a ✅ instead of leaving a stale alert behind.
+     */
+    fun notifyHealthRecovered(context: Context, camera: String) {
+        if (!canPost(context)) return
+        ensureChannel(context)
+        val notif = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setContentTitle(context.getString(R.string.notif_health_recovered_title, context.getString(R.string.app_name)))
+            .setContentText(context.getString(R.string.notif_health_recovered, camera))
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent(context))
+            .build()
+        NotificationManagerCompat.from(context).notify(NOTIF_ID_HEALTH, notif)
+    }
 }

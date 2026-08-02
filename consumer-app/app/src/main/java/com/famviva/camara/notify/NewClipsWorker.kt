@@ -143,6 +143,18 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             } else if (issues.isEmpty() && prev != null) {
                 store.setHealthAlert(null)             // all good: reset so we alert again if it recurs
             }
+
+            // Green-light recovery: a camera that had been DOWN (no signal / not reporting — the reboot
+            // scenario the user acts on) is healthy again → tell them it's recording once more. Tracked
+            // apart from the alert dedup so a battery/sync/disk advisory clearing doesn't fire it.
+            val downCam = health.firstOrNull { !it.ok || it.isStale(now) }
+            if (downCam != null) {
+                store.setCameraDown(true)
+            } else if (store.cameraWasDown()) {
+                val cam = health.firstOrNull()?.camera ?: ctx.getString(R.string.app_name)
+                Notifications.notifyHealthRecovered(ctx, cam)
+                store.setCameraDown(false)
+            }
         }
 
         // 3) Persist the home-screen widget summary and refresh any placed widgets. The widget does
