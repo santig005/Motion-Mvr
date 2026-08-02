@@ -221,6 +221,17 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     if eta=$(compute_battery_eta "$pct"); then
       extra="${extra},\"discharge_pct_per_h\":${eta% *},\"eta_minutes\":${eta#* }"
     fi
+    BATTERY_UNKNOWN=0
+  else
+    # The battery sensor CAN fail silently: Android may restrict/sleep the Termux:API app, the
+    # termux-api package may be missing, or the helper may hang past its timeout. Emitting nothing
+    # here is indistinguishable from a healthy NVR that simply has no battery field, so a dead
+    # sensor hides the very signal it exists to provide. Publish an explicit unknown instead, so
+    # the app can say "battery unreadable" rather than show a confident blank.
+    # (Seen live 2026-08-02: termux-api hung after a reboot and the app silently lost the gauge.)
+    extra="${extra},\"battery_unknown\":true"
+    [ "${BATTERY_UNKNOWN:-0}" = 1 ] || log "🔋 battery unreadable (termux-api not responding) — reporting battery_unknown"
+    BATTERY_UNKNOWN=1
   fi
   # Recording-quality signal (from the segmenter via REC_STATE): rec_mode = "2K" | "SUB",
   # rec_2k_drops_1h = how many times the 2K flapped in the last hour. Lets the app flag "recording in

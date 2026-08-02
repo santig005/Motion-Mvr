@@ -2550,6 +2550,15 @@ private fun CameraStatusCard(
             title = stringResource(R.string.status_2kflap_title),
             body = stringResource(R.string.status_2kflap_body, h.rec2kDropsLastHour ?: 0),
         )
+        // Ranked last among the warnings: recording is fine, but the battery gauge is dead, so the
+        // low-battery and ETA alarms above can never fire. Silence here would look identical to a
+        // healthy NVR, which is exactly how a drained phone went unnoticed before.
+        h.batteryUnknown -> StatusBanner(
+            bg = MaterialTheme.status.warningContainer,
+            fg = MaterialTheme.status.onWarningContainer,
+            title = stringResource(R.string.status_battunknown_title, h.camera),
+            body = stringResource(R.string.status_battunknown_body),
+        )
         else -> Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,

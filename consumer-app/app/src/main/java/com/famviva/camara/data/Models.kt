@@ -210,6 +210,10 @@ data class CameraHealth(
     /** Free space (MB) on the phone's recording filesystem. Lets the app warn before a full disk
      *  silently stops recording (the NVR emergency-prunes below its own floor). null if not reported. */
     val diskFreeMb: Int? = null,
+    /** The NVR reported that it *tried* to read the battery and failed (Termux:API restricted, asleep
+     *  or missing). Distinct from [battery] == null, which just means "not reported" — here we know
+     *  the gauge is broken, so low-battery alerts cannot fire and the blind spot must be surfaced. */
+    val batteryUnknown: Boolean = false,
 ) {
     /** true if there's been no report for more than [maxAgeSec] (default 3 h) -> phone probably off.
      *  The NVR heartbeat is every ~20 min and independent of whether there are videos, so "not

@@ -199,6 +199,8 @@
     <string name="status_sub_body">El enlace 2K está muy inestable ahora, así que bajó a la resolución baja. Vuelve al 2K automáticamente cuando el enlace se recupera.</string>
     <string name="status_2kflap_title">📶 2K inestable</string>
     <string name="status_2kflap_body">El enlace 2K se cayó %d veces en la última hora. Sigue grabando en 2K, pero revisa el Wi-Fi de la cámara si continúa.</string>
+    <string name="status_battunknown_title">🔋 %s: batería ilegible</string>
+    <string name="status_battunknown_body">El NVR no puede leer el nivel de batería, así que no saltarán los avisos de batería baja. Pon Termux, Termux:Boot y Termux:API en «Sin restricciones» en el teléfono del NVR.</string>
     <string name="status_critical_title">🔋 Batería crítica: quedan ~%s</string>
     <string name="status_critical_body">Conecta el teléfono antes de que se apague.</string>
     <string name="status_recording">✅ %s grabando</string>

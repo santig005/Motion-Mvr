@@ -245,6 +245,7 @@ class DriveClient(
                             recMode = if (j.has("rec_mode")) j.optString("rec_mode") else null,
                             rec2kDropsLastHour = if (j.has("rec_2k_drops_1h")) j.optInt("rec_2k_drops_1h") else null,
                             diskFreeMb = if (j.has("disk_free_mb")) j.optInt("disk_free_mb") else null,
+                            batteryUnknown = j.optBoolean("battery_unknown", false),
                         )
                     }
                 }
