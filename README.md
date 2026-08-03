@@ -14,6 +14,9 @@ Compose** app. There is an optional [Frigate](https://frigate.video/) path for r
 detection on a Raspberry Pi / mini-PC.
 
 > Full design rationale in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> Where the project stands and what comes next: [`ROADMAP.md`](ROADMAP.md).
+> Plans in progress: [`LOCAL_ARCHIVE_PLAN.md`](LOCAL_ARCHIVE_PLAN.md) (shipped),
+> [`MULTICAMERA_PLAN.md`](MULTICAMERA_PLAN.md) (draft, open questions).
 
 ---
 
