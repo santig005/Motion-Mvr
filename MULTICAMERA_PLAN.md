@@ -42,7 +42,10 @@ Multi-camera was partially designed in from the start:
 The real gaps are: nothing reads an enable/disable list, and the app collapses all cameras into one
 stream of clips (`DriveClient.listClips()` drops the per-camera path).
 
-## The three-state model (the core idea)
+## The three-state model (the core idea) — ✅ DECIDED 2026-08-02
+
+> Approved by the user. This section and the "I forgot to disable it" design below are **settled**;
+> they are no longer open for redesign. Everything else in this document remains a draft.
 
 Most of the noise the user is worried about comes from conflating two very different situations. The
 design should keep three states strictly separate:
@@ -102,13 +105,13 @@ The clean sequence for a test session — worth surfacing in the app's UI copy:
 
 Doing step 4 before step 5 is the whole trick: disable first, unplug second.
 
-### The "I forgot to disable it" problem
+### The "I forgot to disable it" problem — ✅ DECIDED 2026-08-02
 
 Step 4 will get skipped sometimes. The system must degrade gracefully without going deaf.
 
-Proposal: keep the normal alarm for the first window (a cut cable must still scream), but if an
-enabled camera stays silent for **N hours** (N ≈ 4–6, to be tuned), stop repeating the alarm and
-replace it with **one actionable notification**:
+Design (approved): keep the normal alarm for the first window (a cut cable must still scream), but if
+an enabled camera stays silent for **`SILENT_ASK_HOURS` (default 6 h, tunable)**, stop repeating the
+alarm and replace it with **one actionable notification**:
 
 > `cam2` has been silent for 6 h — did you unplug it?  → [ Disable ] [ It is still installed ]
 
@@ -180,8 +183,9 @@ install is not, on this hardware.
    unreachable for a long time — does the NVR keep the last cached list forever?
 2. **Disabled camera's `status.json`:** publish an explicit `"disabled": true`, or stop publishing
    entirely? Explicit is friendlier to the app but means the NVR still runs something for it.
-3. **Auto-disable prompt:** accept the "did you unplug it?" design? What is the right N hours before
-   the alarm converts into that question?
+3. ~~Auto-disable prompt design~~ — **settled 2026-08-02** (three-state model + never auto-disable +
+   the actionable prompt). Only `SILENT_ASK_HOURS` is left to tune, default 6 h; real usage during
+   the camera-2 test should confirm or move it.
 4. **Labels.** Friendly names ("Entrada", "Patio") — stored in `cameras.json`, or app-local only?
    They affect notification text, so probably shared.
 5. **Default view.** Does the app open on the merged stream or on a single camera? What happens to
