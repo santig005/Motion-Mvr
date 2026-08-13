@@ -1,7 +1,8 @@
 # Roadmap — where the project stands and what comes next
 
 Status: **strategic snapshot, 2026-08-02.** Written after auditing the July backlog against the code
-actually shipped. Percentages are honest estimates, not metrics.
+actually shipped, then extended the same day with a repository-quality audit (see *Engineering
+hardening*). Percentages are honest estimates, not metrics.
 
 ## Where we are
 
@@ -19,6 +20,7 @@ were never done: real multi-camera, two-way audio/PTZ, and object detection.
 | 7. Self-healing / resilience | 🟡 ~80% | camera auto-reboot still a hook |
 | 8. Intelligence (object detection) | ⬜ 0% | **next up** |
 | 9. Power resilience | ⬜ 0% | hardware, cheap |
+| —. Engineering hardening (tests, CI, structure) | ⬜ 0% | separate track, see below |
 
 Overall: **~90% of the original vision.** What remains is qualitatively different from what was
 built — it is not more of the same.
@@ -35,7 +37,91 @@ heuristics over pixel brightness — they cannot tell a person from a shadow.
 Everything built so far (archive, health, widget, timeline) is excellent infrastructure **in service
 of a list that is mostly noise.** The bottleneck is no longer engineering; it is signal-to-noise.
 
+## Engineering hardening — a separate track ⬅️ next session
+
+The feature list below is about what the system *does*. This section is about what the repository
+*is*, and it is deliberately kept apart: none of it changes behaviour for the user, and all of it
+changes how the work reads to anyone else — including a reviewer or an interviewer.
+
+The honest state, from an audit on 2026-08-02: 73 commits, ~9.4k lines of Kotlin, ~1.3k of bash,
+**zero tests and zero CI**. Every fix so far was validated by watching the phone. That has worked
+because there is one developer who remembers everything, and it stops working the moment that is no
+longer true. Three of the four items below cost less than a day each.
+
+Do them in this order — 1 and 2 are the ones that matter, 3 is cheap, 4 is the highest-value writing
+in the repo.
+
+### H1. Minimal CI on GitHub Actions (~1 h)
+
+A single workflow that, on push and PR:
+- runs `shellcheck termux/*.sh` — 1.3k lines of bash have been running 24/7 without a linter, and it
+  is the layer where a silent breakage costs actual footage;
+- runs `assembleDebug` for `consumer-app/`.
+
+Note the interaction with the offline-build constraint (`_private/build-and-deploy.md`): CI builds
+*online*, which is fine and in fact useful — it becomes the place that proves the dependency set
+still resolves from scratch, something the local `--offline` build can never tell us.
+
+Start with `continue-on-error` on shellcheck if the first run is noisy, then tighten. A green badge
+in the README is worth more than the workflow costs.
+
+### H2. Unit tests over the pure logic (~half a day)
+
+Not UI tests. The valuable, trivially testable surface is the decision logic that has already caused
+real incidents:
+
+- **gap-split** — the end→start hole rule (`9a8b916`); the bug it fixed was a *false* split, so the
+  test must cover both "real dropout → two clips" and "normal ~12 s GOP spacing → one clip".
+- **content-based tail trim** — `last_motion + TAIL_PAD`, including the 360p↔2K skew case.
+- **`BatteryForecast`** — the discharge regression and the ETA to `BATTERY_FLOOR_PCT`, plus the
+  `battery_unknown` path (`ab5a750`).
+- **`status.json` / `events.jsonl` parsing** — malformed, truncated and missing-field rows must
+  degrade, never crash.
+- **wedge classification** — the state machine that decides a camera is wedged rather than merely
+  reconnecting (`5de12b7`).
+
+⚠️ **Expect a blocker on anything ViewModel-shaped.** `MainViewModel` takes nine concrete
+collaborators (`DriveClient`, `SeenStore`, `OfflineStore`, `ClipListCache`, …) with no interfaces and
+no DI, so it cannot be faked. Do **not** start by fixing that — start with the pure functions above,
+which need none of it. Extracting interfaces (or introducing Hilt) is a real refactor and belongs in
+its own session, justified by the tests that then become possible.
+
+For the bash side, the cheapest useful thing is a handful of `bats` cases over the clip-boundary
+maths, not a full harness.
+
+### H3. Split `ui/AppNav.kt` (~2–3 h, mechanical)
+
+3,834 lines and 78 composables in one file — about **40 % of all the Kotlin in the app.** It holds
+navigation, the Days screen, Storage (donut, legend, per-day), Clips, the filmstrip, dialogs and the
+overflow menu.
+
+Split by screen into `ui/days/`, `ui/storage/`, `ui/clips/`, `ui/health/`, leaving `AppNav.kt` as
+just the nav graph and the bottom bar. Pure file movement, no behaviour change — but do it in its own
+commit, and ideally *after* H1 exists so the build check has something to say about it.
+
+### H4. `INCIDENTS.md` — the most valuable document not yet written
+
+The material already exists, scattered across project memory and commit messages. Collect it into one
+file, one entry per real incident, in a fixed shape: **symptom → hypotheses ruled out → root cause →
+fix (with commit) → what it changed about the design.**
+
+The ones worth writing up:
+
+| Date | Incident | Why it is worth writing |
+|---|---|---|
+| 2026-07-15 | Slow charge / RTSP reconnect storm | ~45 mA net charge; led to the flap guard |
+| 2026-07-16 | Upload lag = Drive 403 quota cascade | Produced the 3-lane sync design |
+| 2026-07-18 | "5 h without reporting" | **A false alarm** — an app-side re-fetch bug, not the NVR |
+| 2026-07-20 | Clips split in two | The split rule itself was wrong (`9a8b916`) |
+| 2026-07-27 | Camera wedged 12 h | HTTP-nudge investigated and *discarded*; wedge classifier shipped |
+| 2026-08-01 | 21 h outage | Not the battery: Android throttled Termux, so Termux:Boot never ran |
+
+Two of those entries are worth more than the other four: the one where the alarm was wrong, and the
+one where the obvious fix was investigated and rejected. Keep them.
+
 ## Next steps, in order
+
+*(product/feature track — the hardening track above runs alongside it)*
 
 ### 1. Object detection on the Pixel — NO new hardware ⬅️ start here
 
