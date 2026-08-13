@@ -72,6 +72,14 @@ LOG="${LOG:-$HOME/logs/cam1.motion.log}"
 METRICS="${METRICS:-$OUT_DIR/metrics.csv}"
 MWIN="$RING_DIR/.motion_windows"                  # motion windows (epoch): "start end"
 REC_STATE="$RING_DIR/.rec_state"                  # segmenter -> keeper: "MODE DROPS1H" (recording-quality signal for status.json)
+# Detector health, published separately from recording health. These are DIFFERENT failures and only
+# one of them was ever surfaced: the segmenter can hold a perfect 2K while the detector is locked out
+# of the sub-stream, and then we record continuously into the ring and build NOTHING, because clips
+# are motion-triggered. That is exactly the 2026-08-12 outage: 4h20m of healthy 2K, 978 detector
+# reconnects, zero motion events, zero clips — with status.json reporting ok:true the whole time.
+DET_STATE="$RING_DIR/.det_state"                  # detector -> keeper: "OK 0" | "DOWN <since_epoch>"
+DET_DOWN_SECS="${DET_DOWN_SECS:-180}"             # detector delivering no frames this long => report detector_ok:false
+WEDGE_STATE="$RING_DIR/.wedge_state"              # segmenter -> keeper: "1 <since_epoch>" while the camera is classified WEDGED
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
 EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
@@ -83,6 +91,7 @@ STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => 
 # wedged-camera classifier + reboot hook in the segmenter.
 WEDGE_AFTER_SECS="${WEDGE_AFTER_SECS:-360}"      # continuous produced=0 this long while the camera still pings => RTSP wedged (reboot candidate)
 REBOOT_EVERY_SECS="${REBOOT_EVERY_SECS:-600}"    # min gap between camera-reboot attempts (avoid reboot loops)
+WEDGE_RETRY_SECS="${WEDGE_RETRY_SECS:-60}"       # once classified wedged, retry at this slow cadence (the 5s dance changes nothing and costs battery)
 CAM_HOST="${CAM_HOST:-$(printf '%s' "$RTSP_MAIN" | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')}"  # camera IP/host for ping + control
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
@@ -99,6 +108,8 @@ DAILY_HEALTH_MAX_LINES="${DAILY_HEALTH_MAX_LINES:-800}"         # line cap on da
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
 printf '2K 0\n' > "$REC_STATE" 2>/dev/null || true   # assume 2K until the segmenter says otherwise
+printf 'OK 0\n' > "$DET_STATE" 2>/dev/null || true   # assume the detector is fine until it says otherwise
+printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true  # never inherit a stale wedge verdict; re-classify from scratch (~6 min)
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
 DOWN_SINCE=0                                       # epoch recording went down (0=up); surfaced in status.json + used for the 'up' dur_s
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
@@ -241,6 +252,28 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     read -r rmode rdrops < "$REC_STATE" 2>/dev/null
     [ -n "$rmode" ] && extra="${extra},\"rec_mode\":\"${rmode}\",\"rec_2k_drops_1h\":${rdrops:-0}"
   fi
+  # Detector health (from the detector via DET_STATE) — INDEPENDENT of recording_ok. "Recording" only
+  # means fresh segments are landing in the ring; a clip is only ever built when the detector opens a
+  # motion window. With the detector dead we record 24/7 and produce nothing, which is indistinguishable
+  # from "a quiet day" unless we say so explicitly. detector_down_since lets the app show how long
+  # detection has been dead and alert on it in its own right.
+  if [ -r "$DET_STATE" ]; then
+    local dstate dsince
+    read -r dstate dsince < "$DET_STATE" 2>/dev/null
+    if [ "${dstate:-OK}" = "DOWN" ]; then
+      extra="${extra},\"detector_ok\":false,\"detector_down_since\":${dsince:-0}"
+    else
+      extra="${extra},\"detector_ok\":true"
+    fi
+  fi
+  # Camera classified WEDGED (pings but RTSP refuses both channels): a distinct, actionable state that
+  # no amount of reconnecting fixes — it needs a power-cycle. Surfaced so the app can say exactly that
+  # instead of a generic "no signal" the user has learned to scroll past.
+  if [ -r "$WEDGE_STATE" ]; then
+    local wf wsince
+    read -r wf wsince < "$WEDGE_STATE" 2>/dev/null
+    [ "${wf:-0}" = 1 ] && extra="${extra},\"camera_wedged\":true,\"wedged_since\":${wsince:-0}"
+  fi
   # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
   local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
   # While recording is DOWN, surface WHEN it went down so the app can show the outage length live.
@@ -309,6 +342,7 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 # then this raises a distinct, actionable alert so the outage is noticed in minutes, not hours.
 reboot_camera(){ # $1 = seconds we've been failing continuously
   local downfor="$1"
+  local since; since=$(( $(date +%s) - downfor ))
   if ! ping -c1 -W2 "$CAM_HOST" >/dev/null 2>&1; then
     log "🔌 camera $CAM_HOST unreachable (${downfor}s no ping) — power/network, not a wedge"
     log_event recording unreachable "no ping ${downfor}s"
@@ -316,6 +350,10 @@ reboot_camera(){ # $1 = seconds we've been failing continuously
   fi
   log "🩺 camera $CAM_HOST WEDGED (${downfor}s: pings but RTSP refuses both channels) — REBOOT REQUIRED"
   log_event recording wedged "rtsp dead ${downfor}s, host up"
+  # Publish it for the keeper -> status.json -> app. Before this, the classifier's verdict lived ONLY
+  # in the local log: on 2026-08-12 it printed "REBOOT REQUIRED" 68 times over ~11h and nothing that
+  # could reach the user ever learned about it.
+  printf '1 %s\n' "$since" > "$WEDGE_STATE" 2>/dev/null || true
   # --- TODO(reboot): issue the captured FAMVIVA reboot command here (P2P/UDP; see _private notes). ---
   # e.g.  send_p2p_reboot "$CAM_HOST"   # once the capture confirms the exact packet/endpoint.
   return 0
@@ -365,6 +403,11 @@ segmenter_loop(){
         sustained=1; flaps=""; flapn=0
         d1h=$(printf '%s' "$d1h" | awk -v n="$(date +%s)" 'NF && (n-$1)<=3600'); d1hn=$(printf '%s' "$d1h" | grep -c .)
         printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
+        # Clear the wedge verdict here too, for the SAME reason the mode is published here: the
+        # post-run clear only runs when a run ENDS, and a healthy run never does — so a camera that
+        # came back stayed flagged "wedged, power-cycle me" in the app for as long as it stayed
+        # healthy. (Seen live 2026-08-12 right after the power-cycle fixed the camera.)
+        firstfail=0; printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true
         [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a sustained probe -> stay on 2K
       fi
     done
@@ -383,6 +426,7 @@ segmenter_loop(){
     # the camera itself is stuck, not the link — escalate to reboot_camera (rate-limited).
     if [ "$produced" = 1 ]; then
       firstfail=0
+      printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true    # a segment landed => not wedged (any more)
     else
       [ "$firstfail" = 0 ] && firstfail="$now"
       if [ "$((now - firstfail))" -ge "$WEDGE_AFTER_SECS" ] && [ "$((now - last_reboot))" -ge "$REBOOT_EVERY_SECS" ]; then
@@ -397,9 +441,15 @@ segmenter_loop(){
       # The 2K run dropped before it was ever sustained -> record a flap and keep only those within
       # the rolling window. Falls back to SUB on: a failed probe, FALLBACK_AFTER short runs, OR
       # FLAP_MAX_DROPS drops in the window (the ~10s-flapping case that sfails alone never catches).
-      flaps=$(printf '%s\n%s' "$flaps" "$now" | awk -v n="$now" -v w="$FLAP_WINDOW_SECS" 'NF && (n-$1)<=w')
-      flapn=$(printf '%s' "$flaps" | grep -c .)
-      d1h=$(printf '%s\n%s' "$d1h" "$now" | awk -v n="$now" 'NF && (n-$1)<=3600')   # 2K flap-drops in the last hour
+      # Only a run that actually WROTE something and then dropped early is a 2K *quality* flap. A run
+      # that never delivered a byte is a connection failure (or a wedged camera) and belongs to sfails
+      # / the wedge classifier, not to this counter. Conflating them made rec_2k_drops_1h — the number
+      # the app renders as "2K stable / unstable" — describe a camera that was serving nothing at all.
+      if [ "$produced" = 1 ]; then
+        flaps=$(printf '%s\n%s' "$flaps" "$now" | awk -v n="$now" -v w="$FLAP_WINDOW_SECS" 'NF && (n-$1)<=w')
+        flapn=$(printf '%s' "$flaps" | grep -c .)
+        d1h=$(printf '%s\n%s' "$d1h" "$now" | awk -v n="$now" 'NF && (n-$1)<=3600')   # 2K flap-drops in the last hour
+      fi
       if [ "$probe" = 1 ] || [ "$sfails" -ge "$FALLBACK_AFTER" ] || [ "$flapn" -ge "$FLAP_MAX_DROPS" ]; then
         log "⤵ 2K unstable (${sfails} short-run, ${flapn} drops/${FLAP_WINDOW_SECS}s); recording sub-stream (${RTSP_DETECT##*/}) for now"
         mode="SUB"; last_2k=$(date +%s); sfails=0; flaps=""; flapn=0
@@ -412,6 +462,10 @@ segmenter_loop(){
     printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
+    # Wedged camera: the 2K<->SUB fallback resets sfails on every switch, so the backoff kept
+    # restarting at 5s and we hammered a camera that answers nothing for 11h straight. Once the
+    # classifier has called it wedged, hold a slow steady cadence until a channel answers again.
+    if [ "$firstfail" != 0 ] && [ "$((now - firstfail))" -ge "$WEDGE_AFTER_SECS" ]; then delay="$WEDGE_RETRY_SECS"; fi
     log_event segmenter drop "mode $mode" "$ran"
     log "!! segmenter dropped (ran ${ran}s, produced=${produced}, failure $sfails, mode $mode); retry in ${delay}s"; sleep "$delay"
   done
@@ -645,7 +699,7 @@ daily_rollover(){ # $1=new date(YYYYMMDD)
 
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
-  local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0
+  local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0 det_seen="" cur_det wedge_seen="" cur_wedge
   local last_daily=0 nd d _od
   started=$(date +%s)
   acc_load                                     # resume today's accumulator or finalize a stale day + start fresh
@@ -697,6 +751,30 @@ keeper_loop(){
         fi
       fi
       rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
+    fi
+    # Detector up/down? Push status immediately too. This is the transition that had NO path to the
+    # user at all: "recording fine, detecting nothing" looked identical to "recording fine, quiet day",
+    # and the 20-minute heartbeat would have delayed even that.
+    cur_det=$(cut -d' ' -f1 "$DET_STATE" 2>/dev/null)
+    if [ -n "$cur_det" ] && [ "$cur_det" != "$det_seen" ]; then
+      if [ -n "$det_seen" ]; then
+        if [ "$cur_det" = "DOWN" ]; then
+          log "⚠️ DETECTOR DOWN — the ring keeps recording but NO clips can be built"
+          log_event detector down "no frames >${DET_DOWN_SECS}s"
+        else
+          log "✅ detector back up — clips will be built again"
+          log_event detector restored "frames again"
+        fi
+      fi
+      det_seen="$cur_det"; write_status "$rec_ok" 1; last_hb=$now
+    fi
+    # Wedge verdict changed? Push it too. Without this the flag would sit in .wedge_state until the
+    # next 20-minute heartbeat — and the whole point of the wedge classifier is that it fires within
+    # ~6 minutes, so the alert must not then wait another 20 to leave the phone.
+    cur_wedge=$(cut -d' ' -f1 "$WEDGE_STATE" 2>/dev/null)
+    if [ -n "$cur_wedge" ] && [ "$cur_wedge" != "$wedge_seen" ]; then
+      [ -n "$wedge_seen" ] && [ "$cur_wedge" = 1 ] && log "🩺 publishing camera_wedged to status.json (needs a power-cycle)"
+      wedge_seen="$cur_wedge"; write_status "$rec_ok" 1; last_hb=$now
     fi
     # --- Long-horizon daily health rollup: roll over at local midnight, accrue 360p (SUB) seconds, and
     # --- periodically rewrite today's partial line + persist the accumulator (single writer = keeper).
@@ -760,16 +838,17 @@ keeper_loop   & KEEP_PID=$!
 log "=== record-preroll starts | detect=${RTSP_DETECT##*/} record=${RTSP_MAIN##*/} | fps=$DET_FPS yavg=$YAVG_TH deb=$DEBOUNCE preroll=${PREROLL}s post(gap)=${POSTROLL}s tail_pad=${TAIL_PAD}s seg~GOP ring=${RING_KEEP_MIN}min ==="
 
 # 2) DETECTOR (foreground) — writes motion windows to $MWIN --------------------------
-over=0; connected=0; dfails=0
+over=0; connected=0; dfails=0; dfirstfail=0
 while true; do
   det_t0=$(date +%s)
   ffmpeg -nostdin -loglevel info -rtsp_transport tcp -timeout "$RTSP_TIMEOUT" -i "$RTSP_DETECT" -an \
     -vf "fps=$DET_FPS,${DET_CROP:+crop=$DET_CROP,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
     -f null - 2>&1 >/dev/null |
   grep --line-buffered -F 'signalstats.YAVG=' |
-  ( in_evt=0; evt_start=0; evt_last=0; conn_ts=0
+  ( in_evt=0; evt_start=0; evt_last=0; conn_ts=0; saw=0
     while true; do
       if IFS= read -r -t 2 line; then
+        saw=1                       # at least one real frame => this run actually detected something
         [ "$connected" -eq 0 ] && { log "▶ detector connected (${RTSP_DETECT##*/})"; log_event detector up "reconnected"; connected=1; conn_ts=$(date +%s); }
         val=${line##*YAVG=}; val=${val%% *}
         if awk "BEGIN{exit !(${val}+0 > $YAVG_TH)}" 2>/dev/null; then over=$((over+1)); else over=0; fi
@@ -793,7 +872,9 @@ while true; do
             log "■■ event force-closed on disconnect ($evt_start..$evt_last); preserving footage"
             in_evt=0
           fi
-          log "!! detector pipe closed"; break
+          # Exit status carries the ONE fact the parent loop cannot otherwise see (this is a pipeline
+          # subshell, so `saw` never propagates): did this run deliver any frames at all?
+          log "!! detector pipe closed"; exit $(( saw == 1 ? 0 : 3 ))
         }
       fi
       if [ "$in_evt" -eq 1 ]; then
@@ -805,16 +886,36 @@ while true; do
         fi
       fi
     done )
+  det_res=$?                       # 0 = the run delivered frames, 3 = it never did (see the subshell)
   connected=0
   det_ran=$(( $(date +%s) - det_t0 ))
-  if [ "$det_ran" -ge "$HEALTHY_SECS" ]; then
+  det_now=$(date +%s)
+  # HEALTH = the run actually DELIVERED FRAMES, not merely "lasted a while" — the same lesson the
+  # segmenter already learned the hard way (its `produced` check). A detector that hangs at RTSP open
+  # dies on the ~10s RTSP timeout, which CLEARS HEALTHY_SECS=8, so every failure was scored healthy:
+  # dfails never grew, the backoff never engaged, and the "can't connect" warning below never fired.
+  # On 2026-08-12 that hid 978 consecutive failed reconnects across 4h20m behind a log line that
+  # cheerfully read "failure 0" every single time, while not one clip was built.
+  if [ "$det_res" = 0 ] && [ "$det_ran" -ge "$HEALTHY_SECS" ]; then
+    if [ "$dfirstfail" != 0 ]; then
+      log "✅ detector recovered (motion detection was dead for $((det_now - dfirstfail))s)"
+      log_event detector up "recovered" "$((det_now - dfirstfail))"
+      dfirstfail=0
+    fi
+    printf 'OK 0\n' > "$DET_STATE" 2>/dev/null || true
     dfails=0; delay=5
   else
     dfails=$((dfails+1))
-    # Health/alerting is decided by the keeper via segment freshness; here we only back off the detector.
-    [ "$dfails" -eq "$FAIL_THRESHOLD" ] && log "⚠️ detector (ch1) can't connect after $dfails tries"
+    [ "$dfirstfail" = 0 ] && dfirstfail="$det_now"
+    [ "$dfails" -eq "$FAIL_THRESHOLD" ] && log "⚠️ detector (${RTSP_DETECT##*/}) can't connect after $dfails tries — NO motion detection, so no clips are being built"
+    # Publish detector-down for the keeper -> status.json -> app. Recording health (fresh segments)
+    # says nothing about this: the ring can be filling perfectly while nothing is ever promoted to a
+    # clip. Only report it past DET_DOWN_SECS so a routine reconnect doesn't raise a false alarm.
+    if [ "$((det_now - dfirstfail))" -ge "$DET_DOWN_SECS" ]; then
+      printf 'DOWN %s\n' "$dfirstfail" > "$DET_STATE" 2>/dev/null || true
+    fi
     delay=$((dfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"
   fi
   log_event detector drop "stream ended" "$det_ran"
-  log "!! detector ended (ran ${det_ran}s, failure $dfails); retry in ${delay}s"; sleep "$delay"
+  log "!! detector ended (ran ${det_ran}s, frames=$([ "$det_res" = 0 ] && echo 1 || echo 0), failure $dfails); retry in ${delay}s"; sleep "$delay"
 done
