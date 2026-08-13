@@ -337,6 +337,8 @@
     <string name="notif_health_title">⚠️ %s</string>
     <string name="notif_health_recovered_title">✅ %s</string>
     <string name="notif_health_recovered">%s: grabando de nuevo — todo en orden</string>
+    <string name="health_camera_wedged">%s: la cámara está colgada — desconéctala y vuelve a conectarla</string>
+    <string name="health_detector_down">%s: grabando pero SIN detección — no se están guardando videos</string>
     <string name="health_no_signal">%s: sin señal (no está grabando)</string>
     <string name="health_not_reporting">%s: sin reportar (revisa el teléfono)</string>
     <string name="health_low_battery">%1$s: batería baja %2$d%% (conéctalo)</string>

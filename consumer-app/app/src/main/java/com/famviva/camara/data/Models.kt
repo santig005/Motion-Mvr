@@ -214,7 +214,24 @@ data class CameraHealth(
      *  or missing). Distinct from [battery] == null, which just means "not reported" — here we know
      *  the gauge is broken, so low-battery alerts cannot fire and the blind spot must be surfaced. */
     val batteryUnknown: Boolean = false,
+    /** The NVR's motion detector is delivering no frames. Orthogonal to [ok]: recording can be
+     *  perfectly healthy while this is false, and then the ring fills but NO clip is ever built,
+     *  because clips are motion-triggered. That combination looks exactly like a quiet day, which is
+     *  why the 2026-08-12 outage went unreported for hours. null if the NVR doesn't report it. */
+    val detectorOk: Boolean? = null,
+    /** Epoch (s) the detector stopped delivering frames; 0/null if unknown or currently fine. */
+    val detectorDownSince: Long? = null,
+    /** The NVR classified the camera as WEDGED: it answers ping but refuses RTSP on both channels.
+     *  No amount of reconnecting fixes this — it needs a power-cycle — so it deserves its own,
+     *  explicitly actionable alert rather than a generic "no signal". */
+    val cameraWedged: Boolean = false,
+    /** Epoch (s) the wedge started; 0/null if unknown. */
+    val wedgedSince: Long? = null,
 ) {
+    /** Recording is fine but nothing is being detected, so no clips can be produced — the silent
+     *  failure mode. Deliberately narrow: only when we're recording AND the detector is reported
+     *  down, so a plain outage still reads as an outage rather than two competing alerts. */
+    val blindWhileRecording: Boolean get() = ok && detectorOk == false
     /** true if there's been no report for more than [maxAgeSec] (default 3 h) -> phone probably off.
      *  The NVR heartbeat is every ~20 min and independent of whether there are videos, so "not
      *  reporting" only happens if the phone/NVR actually stopped (not just for lack of motion). */

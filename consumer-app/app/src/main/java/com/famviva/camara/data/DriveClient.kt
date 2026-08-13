@@ -246,6 +246,10 @@ class DriveClient(
                             rec2kDropsLastHour = if (j.has("rec_2k_drops_1h")) j.optInt("rec_2k_drops_1h") else null,
                             diskFreeMb = if (j.has("disk_free_mb")) j.optInt("disk_free_mb") else null,
                             batteryUnknown = j.optBoolean("battery_unknown", false),
+                            detectorOk = if (j.has("detector_ok")) j.optBoolean("detector_ok") else null,
+                            detectorDownSince = if (j.has("detector_down_since")) j.optLong("detector_down_since") else null,
+                            cameraWedged = j.optBoolean("camera_wedged", false),
+                            wedgedSince = if (j.has("wedged_since")) j.optLong("wedged_since") else null,
                         )
                     }
                 }

@@ -114,6 +114,12 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val now = System.currentTimeMillis() / 1000
             val issues = health.mapNotNull { h ->
                 when {
+                    // Ordered most-specific first. A wedged camera and a blind-but-recording camera
+                    // are both "technically covered" by vaguer states, but the vague wording is what
+                    // made these outages easy to ignore — the user can't act on "no signal", they can
+                    // act on "unplug the camera" or "it's recording but detecting nothing".
+                    h.cameraWedged -> ctx.getString(R.string.health_camera_wedged, h.camera)
+                    h.blindWhileRecording -> ctx.getString(R.string.health_detector_down, h.camera)
                     !h.ok -> ctx.getString(R.string.health_no_signal, h.camera)
                     h.isStale(now) -> ctx.getString(R.string.health_not_reporting, h.camera)
                     h.lowBattery -> ctx.getString(R.string.health_low_battery, h.camera, h.battery ?: 0)
@@ -147,7 +153,10 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             // Green-light recovery: a camera that had been DOWN (no signal / not reporting — the reboot
             // scenario the user acts on) is healthy again → tell them it's recording once more. Tracked
             // apart from the alert dedup so a battery/sync/disk advisory clearing doesn't fire it.
-            val downCam = health.firstOrNull { !it.ok || it.isStale(now) }
+            // "Down" for the recovery notification includes the blind-but-recording case: from the
+            // user's side that outage is identical (no videos are arriving), so its recovery is just
+            // as worth announcing.
+            val downCam = health.firstOrNull { !it.ok || it.isStale(now) || it.blindWhileRecording }
             if (downCam != null) {
                 store.setCameraDown(true)
             } else if (store.cameraWasDown()) {
