@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Fastest job, so it fails first: pure-bash unit tests over the NVR's clip-boundary logic. No
+  # camera, no phone, no ffmpeg, nothing to install — seconds to run. The mutation check re-breaks
+  # each fixed bug in a scratch copy and asserts the suite rejects it, so a suite that has quietly
+  # stopped testing anything fails here rather than passing forever.
+  nvr-logic:
+    name: NVR logic tests (bash)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unit tests
+        run: bash termux/tests/run-tests.sh
+
+      - name: Mutation check
+        run: bash termux/tests/mutation-check.sh
+
+  shell:
+    name: Shellcheck (termux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # First pass is expected to be noisy — 1.3k lines of bash have run 24/7 without a linter.
+      # Tighten this (drop continue-on-error) once the backlog of findings is triaged.
+      - name: Run shellcheck on termux/*.sh
+        continue-on-error: true
+        run: shellcheck termux/*.sh
+
+  android:
+    name: Android build (assembleDebug)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: consumer-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Project targets Java 17 (compileOptions / kotlinOptions in app/build.gradle.kts); AGP 8.7.x
+      # is known to misbehave on newer JDKs (see _private/build-and-deploy.md).
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Accepts SDK licenses and makes sdkmanager available. The repo's local.properties (sdk.dir)
+      # is gitignored/machine-local, so AGP falls back to ANDROID_HOME/ANDROID_SDK_ROOT, which this
+      # action sets up.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # compileSdk/targetSdk = 36 (app/build.gradle.kts). Pre-fetch the platform explicitly; AGP
+      # auto-downloads matching build-tools during the build itself since licenses are accepted.
+      - name: Install Android platform 36
+        run: sdkmanager --install "platforms;android-36"
+
+      # There is no Gradle wrapper committed in this repo (no consumer-app/gradlew) — see
+      # _private/build-and-deploy.md, which documents building from a system/cached Gradle install
+      # instead. gradle/actions/setup-gradle provisions the exact version and caches ~/.gradle for us.
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # Deliberately ONLINE (unlike the local dev workflow, which builds --offline against a
+      # pre-warmed cache). CI is the place that proves the dependency set still resolves from
+      # scratch — see ROADMAP.md, H1.
+      - name: assembleDebug
+        run: gradle assembleDebug
