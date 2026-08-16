@@ -192,6 +192,14 @@ update_battery_history(){ # $1=pct  $2=charging(true/false)
 }
 
 # Prints "pct_per_h eta_minutes" or fails (nothing printed) if there isn't enough signal yet.
+# NOTE the "$BATTERY_HIST" argument and the </dev/null on the awk below — BOTH matter. This awk was
+# written without an input file, so it read STDIN and never once looked at the history it exists to
+# regress: every call fell straight through `if (n < 2) exit 1`, and `eta_minutes` has silently
+# never appeared in status.json since the feature shipped (2026-07-04). Worse, that only stayed
+# harmless because the NVR is started with its stdin already at EOF; from an interactive shell the
+# same awk BLOCKS on the terminal, and since write_status() calls this on every heartbeat, it would
+# wedge the keeper — and with it the whole health/status path — forever. The redirect makes that
+# failure mode impossible regardless of how the script is launched. Found by termux/tests/.
 compute_battery_eta(){ # $1=current pct
   [ -s "$BATTERY_HIST" ] || return 1
   awk -v cur="$1" -v floor="$BATTERY_FLOOR_PCT" '
@@ -214,7 +222,7 @@ compute_battery_eta(){ # $1=current pct
       eta = (cur - floor) / rate_h * 60
       if (eta < 0) eta = 0
       printf "%.2f %d", rate_h, eta
-    }'
+    }' "$BATTERY_HIST" </dev/null
 }
 
 write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
@@ -318,14 +326,29 @@ crop_for_width(){ # $1=frame width
 # Profiles the REAL motion over the window [offset, offset+dur] of the concat (the recorded video).
 # A single decode that serves to (a) find the last motion and (b) compute the metrics.
 # Prints "m0 m1 cut mx mean n" (times relative to offset, in s) or "NOMOTION".
+#
+# ⚠️ The `-ss` below sits AFTER `-i`, which makes it an OUTPUT seek: ffmpeg still decodes from the
+# start of the concat and feeds EVERY frame through the filtergraph, discarding them only at the
+# muxer. So `metadata=print` reports pts_time measured from the start of the CONCAT, not from the
+# start of the window — verified on the phone 2026-08-16: `-ss 10 -t 12` printed pts_time 0.167 →
+# 22.0, not 0 → 12. Two consequences, both of which used to be wrong here:
+#   (a) motion happening in [0, offset) — footage BEFORE this clip's window — was scored as if it
+#       belonged to the clip, and
+#   (b) `cut` came out on the concat's timeline while render_clip feeds it to `-t` as a DURATION,
+#       so the tail-trim overshot by exactly `offset` seconds and, more often than not, saturated
+#       at the full window — i.e. TAIL_PAD silently did nothing on any clip with pre-roll.
+# Rebasing onto the window here fixes both at once and keeps the printed values relative, exactly as
+# this function's contract already claimed.
 profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
   local list="$1" offset="$2" dur="$3" crop="$4"
   ffmpeg -nostdin -loglevel info -f concat -safe 0 -i "$list" -ss "$offset" -t "$dur" -an \
       -vf "fps=$DET_FPS,${crop:+crop=$crop,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
-      -f null - 2>&1 | awk -v th="$YAVG_TH" -v tp="$TAIL_PAD" '
+      -f null - 2>&1 | awk -v th="$YAVG_TH" -v tp="$TAIL_PAD" -v off="$offset" '
         /pts_time:/         { ln=$0; sub(/.*pts_time:/,"",ln); sub(/[^0-9.].*/,"",ln); t=ln+0 }
         /signalstats.YAVG=/ { v=$0; sub(/.*YAVG=/,"",v); sub(/ .*/,"",v); v=v+0;
-                              nf++; T[nf]=t; Y[nf]=v; if(v>th){ if(g==0){m0=t; g=1} m1=t } }
+                              if(t < off) next;            # frame precedes the window (see note above)
+                              rt=t-off;                    # rebase onto the window start
+                              nf++; T[nf]=rt; Y[nf]=v; if(v>th){ if(g==0){m0=rt; g=1} m1=rt } }
         END{ if(g==0){ print "NOMOTION"; exit }
              cut=m1+tp; mx=0; s=0; c=0; cnt=0;
              for(i=1;i<=nf;i++){ if(T[i]<=cut){ c++; s+=Y[i]; if(Y[i]>mx)mx=Y[i]; if(Y[i]>th)cnt++ } }
@@ -532,6 +555,17 @@ build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to s
     [ "$seg" = "$newest" ] && continue
     ss=$(seg_epoch "$(basename "$seg" .mp4)"); [ -z "$ss" ] && continue
     dseg=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$seg" 2>/dev/null)
+    # An UNREADABLE segment probes as empty — that is the segment ffmpeg was still writing when its
+    # run dropped, so it never got a moov atom ("moov atom not found"). We skip $newest, but a drop
+    # leaves that truncated file behind and the NEXT run's first segment immediately takes over as
+    # newest, so the orphan sailed straight into the concat. `${dseg:-0}` then made it a ZERO-length
+    # segment: end == start, which collapses the run's window to nothing and yields the 1-frame,
+    # ~1.8 KB "0-second clip" (mt_20260814_183941 and 17 siblings since July). It carries no usable
+    # footage either way, so drop it and let the gap-split treat it as the hole it really is.
+    if ! awk -v d="${dseg:-0}" 'BEGIN{exit !(d+0 > 0.1)}'; then
+      log "… skipping unreadable ring segment $(basename "$seg") (no duration — truncated by a segmenter drop)"
+      continue
+    fi
     se=$(awk "BEGIN{printf \"%d\", $ss + (${dseg:-0}+0)}")
     if [ "$se" -ge "$clip_start" ] && [ "$ss" -le "$clip_end" ]; then
       segs+=("$seg"); starts+=("$ss"); ends+=("$se")
@@ -561,6 +595,18 @@ build_clip(){ # $1=clip_start_epoch  $2=clip_end_epoch  $3=newest_seg(open, to s
     # This run's window = the requested window clamped to the run's own footage span.
     run_cstart="$clip_start"; [ "$first_start" -gt "$run_cstart" ] && run_cstart="$first_start"
     run_cend="$clip_end"; [ "$run_end" -lt "$run_cend" ] && run_cend="$run_end"
+    # MIN_CLIP floor. After a gap-split the trailing run can be a sliver — a segment that merely
+    # grazes the window's edge, or a run whose footage ends right where the window opens. render_clip
+    # used to floor such a window at 1 s and emit it anyway, so a dropout produced a real clip PLUS a
+    # 1-2 s stub with nothing in it. A window this short cannot contain a recognisable event: there
+    # is no footage to show, only a row in the gallery. MIN_CLIP has been declared (and documented in
+    # cam.env.example) since the beginning and was never actually read by anything — this is its
+    # first use. Note we drop the FRAGMENT, never the event: the run that holds the footage is a
+    # different iteration of this loop and is rendered normally.
+    if awk -v a="$run_cstart" -v b="$run_cend" -v m="$MIN_CLIP" 'BEGIN{exit !((b-a) < m)}'; then
+      log "… dropping $((run_cend - run_cstart))s fragment at $(date -d "@$run_cstart" '+%H:%M:%S' 2>/dev/null) (< MIN_CLIP=${MIN_CLIP}s; $segcount seg)"
+      rm -f "$list"; continue
+    fi
     render_clip "$list" "$first_start" "$run_cstart" "$run_cend" "$segcount" && rc=0
   done
   return $rc
@@ -828,6 +874,13 @@ keeper_loop(){
     done
   done
 }
+
+# Test hook. `RECORD_PREROLL_LIB=1 . record-preroll.sh` loads the config and every function above and
+# then stops HERE, before a single ffmpeg is spawned — which is what lets tests/ exercise the clip
+# boundary maths (gap-split, MIN_CLIP, the profiler's awk) on a laptop, with no camera and no phone.
+# It must stay the LAST line before the loops start, so that anything the tests can reach is real
+# production code rather than a copy that drifts.
+[ "${RECORD_PREROLL_LIB:-0}" = 1 ] && return 0
 
 cleanup(){ log "=== exiting ==="; kill "$SEG_PID" "$KEEP_PID" 2>/dev/null; pkill -P $$ 2>/dev/null; exit 0; }
 trap cleanup INT TERM
