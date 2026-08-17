@@ -862,6 +862,16 @@ keeper_loop(){
     fi
     if [ "$rec_ok" = 1 ] && [ "$rec_state" != "ok" ]; then
       # Recovery: if we were tracking an outage, emit the 'up' event with its duration, then clear it.
+      # First healthy tick of a FRESH process: close any 'down' the previous run left open. A restart
+      # (watchdog, boot, kick_blind_detector, or a human) starts with DOWN_SINCE=0, so the recovery
+      # branch below never fired and the down event stayed unpaired forever — the app reconstructs
+      # lanes by pairing down->up, so it kept drawing the outage as still in progress. Seen live
+      # 2026-08-17: recording had been healthy for 9h while the Salud screen showed "0.0% coverage,
+      # worst 6h 0m". This matters MORE now that kick_blind_detector restarts the session during an
+      # incident, which is exactly when the dashboard has to be trustworthy.
+      if [ -z "$rec_state" ] && [ "${DOWN_SINCE:-0}" -eq 0 ]; then
+        log_event recording up "started"
+      fi
       if [ "${DOWN_SINCE:-0}" -gt 0 ]; then
         _od=$((now - DOWN_SINCE))
         log_event recording up "recovered" "$_od"; DOWN_SINCE=0
@@ -891,6 +901,12 @@ keeper_loop(){
         if [ "$cur_mode" = "SUB" ]; then log_event recording degraded "2K->SUB"
         elif [ "$cur_mode" = "2K" ]; then log_event recording restored "SUB->2K"
         fi
+      elif [ "$cur_mode" = "2K" ]; then
+        # Same orphan-close as the recording lane above, for the quality lane. A restart while the
+        # previous run had emitted 'degraded' left it unpaired, so the app drew "recording in 360p"
+        # indefinitely — observed 2026-08-17: the lane showed degraded for 9h while status.json said
+        # rec_mode 2K. Sweeping the whole class, not just the instance that was noticed.
+        log_event recording restored "started in 2K"
       fi
       rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
     fi
@@ -907,6 +923,10 @@ keeper_loop(){
           log "✅ detector back up — clips will be built again"
           log_event detector restored "frames again"
         fi
+      elif [ "$cur_det" != "DOWN" ]; then
+        # Third member of the same class: a restart during a detector outage left 'detector down'
+        # unpaired, so the app kept showing detection as dead while it was working.
+        log_event detector restored "started"
       fi
       det_seen="$cur_det"; write_status "$rec_ok" 1; last_hb=$now
     fi
