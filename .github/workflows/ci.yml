@@ -16,8 +16,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Unit tests
+      - name: Unit tests — segmenter clip logic
         run: bash termux/tests/run-tests.sh
+
+      - name: Unit tests — watchdog recovery ladder
+        run: bash termux/tests/test-watchdog.sh
 
       - name: Mutation check
         run: bash termux/tests/mutation-check.sh

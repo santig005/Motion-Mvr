@@ -51,6 +51,7 @@ RING_KEEP_MIN="${RING_KEEP_MIN:-5}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-5}"           # consecutive connection failures before flagging the camera down
 HEALTHY_SECS="${HEALTHY_SECS:-8}"               # if a connection lasted >= this, count it as healthy (reset failures)
 RETRY_MAX="${RETRY_MAX:-60}"                     # cap of the retry backoff (s); avoids hammering the camera
+DET_RETRY_MAX="${DET_RETRY_MAX:-20}"             # the DETECTOR's own, lower cap (see the note at its backoff): no detector = no clips at all, so it must not be the one that waits longest
 FALLBACK_AFTER="${FALLBACK_AFTER:-3}"           # consecutive short (<HEALTHY_SECS) 2K runs before dropping to the sub-stream
 RETRY_2K_SECS="${RETRY_2K_SECS:-180}"           # while on the sub-stream, re-probe the 2K this often to switch back
 # Flapping guard: the FALLBACK_AFTER path only catches runs that can't even hold HEALTHY_SECS. A
@@ -967,7 +968,15 @@ while true; do
     if [ "$((det_now - dfirstfail))" -ge "$DET_DOWN_SECS" ]; then
       printf 'DOWN %s\n' "$dfirstfail" > "$DET_STATE" 2>/dev/null || true
     fi
-    delay=$((dfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"
+    # The detector backs off on its OWN cap, deliberately lower than the segmenter's RETRY_MAX. The
+    # two failures are not equally bad: losing the segmenter costs resolution, losing the detector
+    # costs EVERY clip. Yet the old shared cap punished the detector hardest exactly when it mattered
+    # — on 2026-08-16 it climbed to 60s between attempts while the segmenter, which was connecting
+    # fine, retried every 5s. If the camera is degraded and serving only a trickle, the component
+    # that waits a minute loses every race to the one that waits five seconds. Backing off still
+    # matters (a hard-down camera must not be hammered), so this lowers the ceiling rather than
+    # removing it.
+    delay=$((dfails*8)); [ "$delay" -gt "$DET_RETRY_MAX" ] && delay="$DET_RETRY_MAX"
   fi
   log_event detector drop "stream ended" "$det_ran"
   log "!! detector ended (ran ${det_ran}s, frames=$([ "$det_res" = 0 ] && echo 1 || echo 0), failure $dfails); retry in ${delay}s"; sleep "$delay"
