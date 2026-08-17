@@ -248,9 +248,11 @@
     <!-- Pantalla Salud: línea de tiempo de cobertura por servicio ("swimlane") -->
     <string name="health_coverage_section">Cobertura por servicio</string>
     <string name="health_summary_section">Resumen del periodo</string>
+    <string name="health_horizon_6h">6 h</string>
     <string name="health_horizon_24h">24 h</string>
     <string name="health_horizon_7d">7 días</string>
     <string name="health_horizon_30d">30 días</string>
+    <string name="health_win_note_6h">Últimas 6 h · ampliado, para separar las ráfagas de eventos.</string>
     <string name="health_win_note_24h">Últimas 24 h · cada franja es proporcional a su duración real.</string>
     <string name="health_win_note_7d">Últimos 7 días · el parche de hoy es el incidente de la cámara.</string>
     <string name="health_win_note_30d">Últimos 30 días · resumen diario (una línea por día).</string>
@@ -271,8 +273,10 @@
     <string name="health_state_flap_heavy">Parpadeo fuerte</string>
     <string name="health_state_sync_ok">Subiendo a Drive</string>
     <string name="health_state_sync_warn">Fallo transitorio</string>
-    <string name="health_tap_hint">Toca una franja para ver el detalle.</string>
+    <string name="health_tap_hint">Toca una franja para ver el detalle. Una muesca arriba indica varios eventos agrupados.</string>
     <string name="health_detail_flap">%1$d reconexiones</string>
+    <string name="health_cluster_title">%1$d eventos agrupados</string>
+    <string name="health_cluster_outages">%1$d cortes</string>
     <string name="health_day_cover">cubrió %1$s de 24 h</string>
     <string name="health_sum_rec_outages">%1$d cortes · peor %2$s</string>
     <string name="health_sum_rec_none">sin cortes</string>

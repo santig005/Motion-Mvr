@@ -36,6 +36,11 @@ android {
 }
 
 dependencies {
+    // JVM unit tests (app/src/test). Deliberately the ONLY test dependency: it is not in the local
+    // Gradle cache and the local build runs `--offline`, so `assembleDebug` never resolves this and
+    // keeps working offline, while CI — which builds online — actually runs `testDebugUnitTest`.
+    testImplementation("junit:junit:4.13.2")
+
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
 

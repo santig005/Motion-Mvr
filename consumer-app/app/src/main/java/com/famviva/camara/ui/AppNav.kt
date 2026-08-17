@@ -109,6 +109,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -3040,7 +3041,15 @@ private fun ServiceCoverageSection(
     nowSec: Long,
 ) {
     Column {
-        val labels = listOf(R.string.health_horizon_24h, R.string.health_horizon_7d, R.string.health_horizon_30d)
+        // 6h exists because clustering alone cannot separate a burst: at 24h a 3dp band is ~14 min of
+        // real time, so a reconnect storm stays one cluster however well it is drawn. Zooming in is
+        // the only thing that actually pulls those events apart.
+        val labels = listOf(
+            R.string.health_horizon_6h,
+            R.string.health_horizon_24h,
+            R.string.health_horizon_7d,
+            R.string.health_horizon_30d,
+        )
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
             labels.forEachIndexed { i, res ->
                 SegmentedButton(
@@ -3052,13 +3061,16 @@ private fun ServiceCoverageSection(
         }
         Spacer(Modifier.height(10.dp))
         when (horizon) {
-            0, 1 -> {
-                val is24h = horizon == 0
-                val spanSec = if (is24h) 86_400L else 7L * 86_400L
+            0, 1, 2 -> {
+                val spanSec = when (horizon) {
+                    0 -> 6L * 3_600L
+                    1 -> 86_400L
+                    else -> 7L * 86_400L
+                }
                 val timeline = remember(events, horizon) {
                     buildServiceTimeline(events, nowSec - spanSec, nowSec)
                 }
-                LiveSwimlane(timeline, is24h)
+                LiveSwimlane(timeline, horizon)
             }
             else -> {
                 val dailyTl = remember(daily) { buildDailyTimeline(daily) }
@@ -3070,15 +3082,23 @@ private fun ServiceCoverageSection(
 
 /** The 24h/7d swimlane card (proportional Canvas spans) + its summary card. */
 @Composable
-private fun LiveSwimlane(timeline: ServiceTimeline, is24h: Boolean) {
+private fun LiveSwimlane(timeline: ServiceTimeline, horizon: Int) {
+    // horizon: 0 = 6h, 1 = 24h, 2 = 7d. Only the 7d view needs day-stamped axis labels.
+    val is24h = horizon <= 1
     var selSvc by remember(timeline) { mutableStateOf<String?>(null) }
-    var selSpan by remember(timeline) { mutableStateOf<TimelineSpan?>(null) }
+    var selSpan by remember(timeline) { mutableStateOf<List<TimelineSpan>?>(null) }
     val windowSpan = (timeline.windowEnd - timeline.windowStart).coerceAtLeast(1L)
 
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(14.dp)) {
             Text(
-                stringResource(if (is24h) R.string.health_win_note_24h else R.string.health_win_note_7d),
+                stringResource(
+                    when (horizon) {
+                        0 -> R.string.health_win_note_6h
+                        1 -> R.string.health_win_note_24h
+                        else -> R.string.health_win_note_7d
+                    },
+                ),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3259,21 +3279,25 @@ private fun SpanLane(
     lane: ServiceLane,
     windowStart: Long,
     windowSpan: Long,
-    selected: TimelineSpan?,
+    selected: List<TimelineSpan>?,
     modifier: Modifier,
-    onSelect: (String, TimelineSpan) -> Unit,
+    onSelect: (String, List<TimelineSpan>) -> Unit,
 ) {
     val trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
     val outline = MaterialTheme.colorScheme.onSurface
     val spans = lane.spans
+    val density = LocalDensity.current
+    val minPx = with(density) { 3.dp.toPx() }
     androidx.compose.foundation.Canvas(
         modifier.height(26.dp).pointerInput(spans, windowStart, windowSpan) {
             detectTapGestures { off ->
                 val w = size.width.toFloat().coerceAtLeast(1f)
-                val frac = (off.x / w).coerceIn(0f, 1f)
-                val ts = windowStart + (frac * windowSpan).toLong()
-                (spans.firstOrNull { ts in it.startTs..it.endTs } ?: spans.lastOrNull())
-                    ?.let { onSelect(lane.svc, it) }
+                val bands = layoutBands(spans, windowStart, windowSpan, w, minPx)
+                // Hit-test the PAINTED geometry, then fall back to the nearest band: a 3dp target is
+                // far below the ~48dp a fingertip covers, so "nearest" is what makes the lane usable.
+                val hit = bands.firstOrNull { off.x >= it.left && off.x <= it.left + it.width }
+                    ?: bands.minByOrNull { kotlin.math.abs((it.left + it.width / 2f) - off.x) }
+                hit?.let { onSelect(lane.svc, it.spans) }
             }
         },
     ) {
@@ -3282,25 +3306,32 @@ private fun SpanLane(
         drawRoundRect(trackColor, cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx(), 6.dp.toPx()))
         val top = 3.dp.toPx()
         val segH = h - 2 * top
-        val minPx = 2.5.dp.toPx()
         val corner = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx(), 3.dp.toPx())
-        spans.forEach { s ->
-            val left0 = ((s.startTs - windowStart).toFloat() / windowSpan.toFloat()) * w
-            var segW = ((s.endTs - s.startTs).toFloat() / windowSpan.toFloat()) * w
-            if (segW < minPx) segW = minPx
-            val left = left0.coerceIn(0f, (w - segW).coerceAtLeast(0f))
+        layoutBands(spans, windowStart, windowSpan, w, minPx).forEach { b ->
             drawRoundRect(
-                color = laneColor(s.state),
-                topLeft = Offset(left, top),
-                size = androidx.compose.ui.geometry.Size(segW, segH),
+                color = laneColor(b.state),
+                topLeft = Offset(b.left, top),
+                size = androidx.compose.ui.geometry.Size(b.width, segH),
                 cornerRadius = corner,
             )
-            if (isFlapState(s.state)) drawHatch(left, top, segW, segH)
-            if (selected == s) {
+            if (isFlapState(b.state)) drawHatch(b.left, top, b.width, segH)
+            // A cluster gets a notch on top, so "this is several events" is visible without tapping.
+            if (b.spans.size > 1) {
+                val notch = minOf(b.width, 2.dp.toPx())
+                drawRoundRect(
+                    color = outline.copy(alpha = 0.75f),
+                    topLeft = Offset(b.left + (b.width - notch) / 2f, top - 2.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(notch, 2.dp.toPx()),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+                )
+            }
+            // Compare by first member, not by list identity: layoutBands rebuilds its lists on every
+            // draw pass, so the selected list is never the same object twice.
+            if (selected != null && selected.firstOrNull() == b.spans.firstOrNull()) {
                 drawRoundRect(
                     color = outline,
-                    topLeft = Offset(left, top),
-                    size = androidx.compose.ui.geometry.Size(segW, segH),
+                    topLeft = Offset(b.left, top),
+                    size = androidx.compose.ui.geometry.Size(b.width, segH),
                     cornerRadius = corner,
                     style = Stroke(1.5.dp.toPx()),
                 )
@@ -3429,8 +3460,30 @@ private fun LegendKey(color: Color, label: String, hatched: Boolean) {
 /** Detail line for a tapped live segment: coloured swatch + "service · state" and the time range /
  *  duration (or reconnect count for flap windows). */
 @Composable
-private fun SelectedSpanDetail(svc: String, span: TimelineSpan) {
+private fun SelectedSpanDetail(svc: String, spans: List<TimelineSpan>) {
     val context = LocalContext.current
+    val span = spans.first()
+    // A cluster is several events too close to draw apart. Report the whole group honestly — how many
+    // there were and the period they cover — instead of silently showing only the first one, which is
+    // the behaviour this replaced (and which made the other events unreachable altogether).
+    if (spans.size > 1) {
+        val worst = spans.maxByOrNull { severityRank(it.state) } ?: span
+        val from = spans.minOf { it.startTs }
+        val to = spans.maxOf { it.endTs }
+        val downCount = spans.count { it.state == LaneState.DOWN }
+        val flapDrops = spans.filter { isFlapState(it.state) }.sumOf { it.flapCount }
+        DetailBody(
+            laneColor(worst.state),
+            isFlapState(worst.state),
+            "${laneShortName(svc)} · " + stringResource(R.string.health_cluster_title, spans.size),
+            buildString {
+                append(stringResource(R.string.health_outage_span, "${hourMinuteLabel(from)} – ${hourMinuteLabel(to)}"))
+                if (downCount > 0) append(" · " + stringResource(R.string.health_cluster_outages, downCount))
+                if (flapDrops > 0) append(" · " + stringResource(R.string.health_detail_flap, flapDrops))
+            },
+        )
+        return
+    }
     val dur = span.endTs - span.startTs
     val range = if (dur > 60) "${hourMinuteLabel(span.startTs)} – ${hourMinuteLabel(span.endTs)}" else hourMinuteLabel(span.startTs)
     val extra = when {

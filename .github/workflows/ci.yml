@@ -83,3 +83,8 @@ jobs:
       # scratch — see ROADMAP.md, H1.
       - name: assembleDebug
         run: gradle assembleDebug
+
+      # JVM unit tests over the swimlane geometry (app/src/test). junit is not in the local --offline
+      # cache, so CI is the natural home for these even though they also run locally with network.
+      - name: Unit tests (JVM)
+        run: gradle testDebugUnitTest
