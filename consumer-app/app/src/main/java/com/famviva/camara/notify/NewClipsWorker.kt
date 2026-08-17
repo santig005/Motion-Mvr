@@ -138,6 +138,17 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     now - s.lastFastOk > SYNC_LANE_STALE_SEC -> ctx.getString(R.string.health_sync_failing)
                     else -> null
                 }?.let { issues += it }
+                // Drive headroom, warned at 90/95/100%. Separate from the failure above on purpose:
+                // "uploads are failing" only fires once clips are ALREADY being lost, while this
+                // fires while there's still room to act. Each step is its own message, so climbing
+                // 90 -> 95 -> 100 changes the alert signature and re-notifies instead of staying
+                // deduped behind the first warning.
+                when (s.quotaStep(now)) {
+                    100 -> ctx.getString(R.string.health_drive_full_100)
+                    95 -> ctx.getString(R.string.health_drive_95, s.drivePct, s.driveFreeMb / 1024.0)
+                    90 -> ctx.getString(R.string.health_drive_90, s.drivePct, s.driveFreeMb / 1024.0)
+                    else -> null
+                }?.let { issues += it }
             }
             issues.sort()
             if (issues.isNotEmpty()) problem = true

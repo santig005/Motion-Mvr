@@ -740,6 +740,12 @@ data class SyncStatus(
     val lastRetentionOk: Long,
     val lastError: String?,
     val lastErrorTs: Long,
+    /** Drive usage in percent from the NVR's last `rclone about` probe; -1 = never measured
+     *  (also what an older NVR that doesn't publish the field yet looks like). */
+    val drivePct: Int = -1,
+    val driveFreeMb: Long = 0,
+    val driveTotalMb: Long = 0,
+    val driveChecked: Long = 0,
 ) {
     /** No sync heartbeat for more than [maxAgeSec] (default 10 min) -> the sync loop may be stuck. */
     fun isStale(nowSec: Long, maxAgeSec: Long = 600): Boolean = updated > 0 && nowSec - updated > maxAgeSec
@@ -747,6 +753,20 @@ data class SyncStatus(
     /** A non-empty last_error recorded within [withinSec] (default 6 h) — recent enough to surface. */
     fun hasRecentError(nowSec: Long, withinSec: Long = 21_600): Boolean =
         !lastError.isNullOrBlank() && lastErrorTs > 0 && nowSec - lastErrorTs <= withinSec
+
+    /** Highest quota step crossed (100/95/90), or null below 90% / not measured. Warning BEFORE the
+     *  account fills is the whole point: on 2026-08-14 the only signal was an upload that had
+     *  already been lost. A probe older than [maxAgeSec] is ignored so a dead NVR can't keep
+     *  showing a reassuring number forever. */
+    fun quotaStep(nowSec: Long, maxAgeSec: Long = 7_200): Int? {
+        if (drivePct < 0 || driveChecked <= 0 || nowSec - driveChecked > maxAgeSec) return null
+        return when {
+            drivePct >= 100 -> 100
+            drivePct >= 95 -> 95
+            drivePct >= 90 -> 90
+            else -> null
+        }
+    }
 }
 
 /** Parses a sync_status.json body; null if it isn't valid JSON. */
@@ -759,6 +779,10 @@ fun parseSyncStatus(body: String): SyncStatus? = runCatching {
         lastRetentionOk = j.optLong("last_retention_ok", 0L),
         lastError = if (j.has("last_error") && !j.isNull("last_error")) j.optString("last_error").ifBlank { null } else null,
         lastErrorTs = j.optLong("last_error_ts", 0L),
+        drivePct = j.optInt("drive_pct", -1),
+        driveFreeMb = j.optLong("drive_free_mb", 0L),
+        driveTotalMb = j.optLong("drive_total_mb", 0L),
+        driveChecked = j.optLong("drive_checked", 0L),
     )
 }.getOrNull()
 

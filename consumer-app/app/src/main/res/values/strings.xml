@@ -350,6 +350,9 @@
     <string name="health_disk_low">%1$s: storage almost full (%2$.1f GB free)</string>
     <string name="health_sync_down">Cloud upload down (no sync heartbeat)</string>
     <string name="health_sync_failing">Clips aren\'t uploading to Drive</string>
+    <string name="health_drive_90">Drive %1$d%% full (%2$.1f GB free) — free up space soon</string>
+    <string name="health_drive_95">Drive %1$d%% full (%2$.1f GB free) — uploads will stop soon</string>
+    <string name="health_drive_full_100">Drive full — new clips are NOT being backed up</string>
 
     <!-- Daily recap digest -->
     <string name="notif_digest_title">📸 Daily recap</string>
