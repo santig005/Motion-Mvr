@@ -23,7 +23,16 @@
 #   RETENTION_EVERY   seconds between retention sweeps (default: 28800 = 8h, ~3x/day). The
 #                     local-purge + Drive `rclone delete` are decoupled from the upload cycle: a
 #                     fast upload cadence must NOT run a recursive Drive delete-listing every cycle.
+#   QUOTA_EVERY       seconds between `rclone about` quota probes (default: 900 = 15 min). One cheap
+#                     API call; 15 min so a threshold crossing reaches the app within 30 min (the
+#                     app's own health worker runs every 15 min).
 #   LOG_MAX_KB        cap on cloud-sync.log before it's trimmed to its newest half (default: 2048)
+#
+# TRASH (2026-08-14): the Drive backend defaults to --drive-use-trash=true, i.e. `rclone delete`
+# only MOVES files to the trash — and trashed bytes still count against the quota. The 30-day sweep
+# was running correctly for weeks while freeing zero bytes: 4.8 GiB of purged clips piled up in the
+# trash until the 15 GiB account filled and uploads died mid-morning with storageQuotaExceeded.
+# Both deletes below pass --drive-use-trash=false so a purge actually reclaims space.
 #
 # QUOTA (why the fast lane is scoped to today): rclone's default shared client_id has a tiny
 # per-minute Drive query quota. Re-listing every dated dir of the whole tree each ${SYNC_INTERVAL}s
@@ -41,6 +50,7 @@ CLOUD_KEEP_DAYS="${CLOUD_KEEP_DAYS:-30}"
 INTERVAL="${SYNC_INTERVAL:-25}"
 HEAL_EVERY="${HEAL_EVERY:-3600}"
 RETENTION_EVERY="${RETENTION_EVERY:-28800}"
+QUOTA_EVERY="${QUOTA_EVERY:-900}"
 LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 SYNC_STATUS="${SYNC_STATUS:-$CAMERAS_DIR/sync_status.json}"   # per-cycle sync health (depth 1; uploaded by the refresh lane); app infers "sync caído" from a stale 'updated'
@@ -72,10 +82,46 @@ trim_events(){
 }
 
 # Sync health for the app (atomic tmp+mv), written once per cycle. A stale 'updated' => sync is down.
+# drive_* are the last successful quota probe (see probe_quota); drive_pct = -1 until the first one
+# lands, so the app can tell "not measured yet" from "measured at 0%".
 write_sync_status(){
-  printf '{"updated":%d,"last_fast_ok":%d,"last_heal_ok":%d,"last_retention_ok":%d,"last_error":"%s","last_error_ts":%d}\n' \
+  printf '{"updated":%d,"last_fast_ok":%d,"last_heal_ok":%d,"last_retention_ok":%d,"last_error":"%s","last_error_ts":%d,"drive_pct":%d,"drive_free_mb":%d,"drive_total_mb":%d,"drive_checked":%d}\n' \
     "$(date +%s)" "$last_fast_ok" "$last_heal_ok" "$last_retention_ok" "$last_error" "$last_error_ts" \
+    "$drive_pct" "$drive_free_mb" "$drive_total_mb" "$drive_checked" \
     > "$SYNC_STATUS.tmp" 2>/dev/null && mv -f "$SYNC_STATUS.tmp" "$SYNC_STATUS" 2>/dev/null
+}
+
+# Drive quota probe (one `rclone about --json` call every QUOTA_EVERY). The point is to warn BEFORE
+# uploads start failing: on 2026-08-14 the only signal that the account was full was
+# storageQuotaExceeded on an upload that had ALREADY been lost, ~5 h before anyone noticed.
+# Crossing UP through 90/95/100% logs one event per bucket; the bucket resets when usage drops back
+# below a step, so a purge that frees space re-arms the warning instead of going quiet forever.
+probe_quota(){
+  local out total used free
+  out=$(rclone about "$ROOT_REMOTE" --json 2>/dev/null) || return 1
+  # No jq on the phone: pull the bare integers out of rclone's pretty-printed JSON.
+  total=$(printf '%s' "$out" | tr -d ' \t' | sed -n 's/^"total":\([0-9]*\),*$/\1/p' | head -1)
+  used=$(printf  '%s' "$out" | tr -d ' \t' | sed -n 's/^"used":\([0-9]*\),*$/\1/p'  | head -1)
+  free=$(printf  '%s' "$out" | tr -d ' \t' | sed -n 's/^"free":\([0-9]*\),*$/\1/p'  | head -1)
+  [ -n "${total:-}" ] && [ -n "${used:-}" ] && [ "${total:-0}" -gt 0 ] 2>/dev/null || return 1
+  drive_total_mb=$((total / 1048576))
+  drive_free_mb=$(( ${free:-0} / 1048576 ))
+  drive_pct=$(( used * 100 / total ))
+  drive_checked=$(date +%s)
+
+  # Highest threshold currently crossed (0 = below 90%).
+  local bucket=0
+  [ "$drive_pct" -ge 90 ]  && bucket=90
+  [ "$drive_pct" -ge 95 ]  && bucket=95
+  [ "$drive_pct" -ge 100 ] && bucket=100
+  if [ "$bucket" -gt "$quota_bucket" ]; then
+    log "⚠️ Drive at ${drive_pct}% (${drive_free_mb} MB free of ${drive_total_mb} MB) — crossed the ${bucket}% mark"
+    log_event "" sync quota "drive ${bucket}% (${drive_pct}% used, ${drive_free_mb} MB free)"
+  elif [ "$bucket" -lt "$quota_bucket" ]; then
+    log "✅ Drive back down to ${drive_pct}% (${drive_free_mb} MB free) — ${quota_bucket}% warning re-armed"
+  fi
+  quota_bucket=$bucket
+  return 0
 }
 
 # Classify the most recent rclone failure from its captured output into a short reason CODE the app
@@ -105,8 +151,11 @@ trim_log(){
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | fast lane (today) every ${INTERVAL}s, self-heal every ${HEAL_EVERY}s, retention every ${RETENTION_EVERY}s ==="
 last_heal=0
 last_retention=0
+last_quota=0
 last_fast_ok=0; last_heal_ok=0; last_retention_ok=0    # epochs of the last successful pass of each lane (for sync_status.json)
 last_error=""; last_error_ts=0                          # most recent sync error (short, JSON-safe) + when
+drive_pct=-1; drive_free_mb=0; drive_total_mb=0; drive_checked=0   # last quota probe (-1 = never measured)
+quota_bucket=0                                          # highest 90/95/100 step already warned about
 while true; do
   now=$(date +%s)
   fast_ok=1                                             # cleared if any fast-lane copy fails this cycle
@@ -187,17 +236,27 @@ while true; do
         printf '%s.*\n' $favs > "$fav_excl" 2>/dev/null    # one "mt_YYYYMMDD_HHMMSS.*" rule per favourite (mp4 + jpg)
         log "cloud retention: sparing $(printf '%s\n' "$favs" | grep -c .) favourite(s) from the >${CLOUD_KEEP_DAYS}d purge"
       fi
+      # --drive-use-trash=false: delete for real. Without it the sweep only moves clips to the Drive
+      # trash, whose bytes STILL count against the quota — see the TRASH note in the header.
       if [ -n "$fav_excl" ]; then
-        rclone delete "$REMOTE" --exclude-from "$fav_excl" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" --fast-list >>"$LOG" 2>&1 || true
+        rclone delete "$REMOTE" --exclude-from "$fav_excl" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" --fast-list --drive-use-trash=false >>"$LOG" 2>&1 || true
       else
-        rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" --fast-list >>"$LOG" 2>&1 || true
+        rclone delete "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age "${CLOUD_KEEP_DAYS}d" --fast-list --drive-use-trash=false >>"$LOG" 2>&1 || true
       fi
       log "cloud retention sweep (removed Drive files > ${CLOUD_KEEP_DAYS}d)"
       last_retention=$now; last_retention_ok=$now
     fi
   fi
 
-  write_sync_status                                   # once per cycle: 'updated' + per-lane ok epochs + last error
+  # 4) QUOTA PROBE (every QUOTA_EVERY) — independent of the heal/retention timers so the headroom
+  #    reading stays fresh even during a long offline spell (it just fails and keeps the old value).
+  #    Runs AFTER retention in the same pass, so a purge that frees space re-measures immediately.
+  if [ "$((now - last_quota))" -ge "$QUOTA_EVERY" ]; then
+    probe_quota || true
+    last_quota=$now
+  fi
+
+  write_sync_status                                   # once per cycle: 'updated' + per-lane ok epochs + last error + quota
   trim_log
   trim_events
   rm -f "$tmperr" 2>/dev/null                          # this cycle's captured rclone output
