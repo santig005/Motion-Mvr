@@ -80,6 +80,18 @@ REC_STATE="$RING_DIR/.rec_state"                  # segmenter -> keeper: "MODE D
 # reconnects, zero motion events, zero clips — with status.json reporting ok:true the whole time.
 DET_STATE="$RING_DIR/.det_state"                  # detector -> keeper: "OK 0" | "DOWN <since_epoch>"
 DET_DOWN_SECS="${DET_DOWN_SECS:-180}"             # detector delivering no frames this long => report detector_ok:false
+# --- Fallback detector over the RING (see ring_detector_loop) --------------------------------------
+# The RTSP detector is a single point of failure that has now caused two total outages (2026-08-12,
+# 4h20m; 2026-08-16, 13h40m). In both, the ring was filling perfectly with the very footage we needed
+# — we simply had no one looking at it, because detection only ever ran over a second RTSP session.
+# This scans the segments already on disk instead, so a dead detector degrades to "clips arrive ~15s
+# late" rather than "no clips at all". Measured on the phone (12s 2K segment, 8 cores): 1.33s scaled
+# to 360p vs 3.39s at full 2K vs 1.03s to merely decode — i.e. ~11% of ONE core, and it only ever runs
+# while the RTSP detector is down, so steady-state cost is exactly zero.
+RING_DET="${RING_DET:-1}"                         # 0 disables the fallback entirely
+RING_DET_POLL="${RING_DET_POLL:-10}"              # how often to look for new segments to scan (s)
+RING_DET_SCALE="${RING_DET_SCALE:-640:360}"       # downscale before analysis: 2.5x cheaper, same crop/threshold as the RTSP detector
+RING_DET_STATE="$RING_DIR/.ring_det"              # ring detector -> log/status: "1 <since>" while it is the one detecting
 WEDGE_STATE="$RING_DIR/.wedge_state"              # segmenter -> keeper: "1 <since_epoch>" while the camera is classified WEDGED
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
 EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
@@ -495,6 +507,89 @@ segmenter_loop(){
   done
 }
 
+# 2b) FALLBACK DETECTOR OVER THE RING ---------------------------------------------
+# Scans ONE ring segment and prints "m0 m1" — the first and last motion, in seconds relative to the
+# segment's own start — or nothing when the segment is quiet or unreadable. Deliberately reuses
+# DET_FPS / DET_CROP / DIFF_TH / YAVG_TH / DEBOUNCE, so the fallback has the SAME sensitivity as the
+# RTSP detector: the point is to keep detecting, not to detect differently. The scale filter runs
+# first so the 360p DET_CROP lines up exactly as it does on the sub-stream.
+ring_scan_segment(){ # $1=segment file
+  ffmpeg -nostdin -loglevel info -i "$1" -an \
+      -vf "fps=$DET_FPS,scale=$RING_DET_SCALE,${DET_CROP:+crop=$DET_CROP,}tblend=all_mode=difference,format=gray,lut=y=if(gt(val\,$DIFF_TH)\,255\,0),signalstats,metadata=print" \
+      -f null - 2>&1 | awk -v th="$YAVG_TH" -v deb="$DEBOUNCE" '
+        /pts_time:/         { ln=$0; sub(/.*pts_time:/,"",ln); sub(/[^0-9.].*/,"",ln); t=ln+0 }
+        /signalstats.YAVG=/ { v=$0; sub(/.*YAVG=/,"",v); sub(/ .*/,"",v); v=v+0
+                              # Same debounce as the live detector: a lone hot frame is noise, not motion.
+                              if (v > th) { run++; if (run >= deb) { if (g==0) { m0=t; g=1 } m1=t } }
+                              else run=0 }
+        END{ if (g==1) printf "%.3f %.3f", m0, m1 }'
+}
+
+# Turns per-segment detections into motion WINDOWS in $MWIN, merging across segments with the same
+# POSTROLL gap rule the RTSP detector uses — otherwise every 12s segment would become its own clip.
+# Only runs while $DET_STATE says DOWN; the moment the real detector recovers it closes any open
+# event and goes back to sleep, so the two can never both be writing windows.
+ring_detector_loop(){
+  [ "$RING_DET" = 1 ] || { log "ring-detector disabled (RING_DET=0)"; return 0; }
+  local st last_scanned="" newest seg base ss hit m0 m1 abs0 abs1 now
+  local in_evt=0 evt_start=0 evt_last=0 active=0 scanned=0
+  printf '0 0\n' > "$RING_DET_STATE" 2>/dev/null || true
+  while true; do
+    sleep "$RING_DET_POLL"
+    now=$(date +%s)
+    read -r st _ < "$DET_STATE" 2>/dev/null || st=OK
+    if [ "${st:-OK}" != "DOWN" ]; then
+      if [ "$active" = 1 ]; then
+        [ "$in_evt" = 1 ] && { echo "$evt_start $evt_last" >> "$MWIN"; in_evt=0; }
+        log "🔎 ring-detector standing down: the RTSP detector is back (scanned $scanned segment(s))"
+        log_event ring_detector down "rtsp detector recovered"
+        printf '0 0\n' > "$RING_DET_STATE" 2>/dev/null || true
+        active=0; scanned=0
+      fi
+      last_scanned=""            # forget the watermark: on the next outage, start from what's fresh
+      continue
+    fi
+    if [ "$active" = 0 ]; then
+      active=1
+      printf '1 %s\n' "$now" > "$RING_DET_STATE" 2>/dev/null || true
+      log "🔎 ring-detector ENGAGED — detecting from the ring while the RTSP detector is down"
+      log_event ring_detector up "rtsp detector down; scanning ring"
+    fi
+    # Skip the newest segment: ffmpeg is still writing it (no moov yet) — the same trap that produced
+    # the 0-second clips. Names are seg_YYYYMMDD_HHMMSS, so lexical order IS chronological order.
+    newest=$(ls -1t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -1)
+    for seg in $(ls -1 "$RING_DIR"/seg_*.mp4 2>/dev/null); do
+      [ "$seg" = "$newest" ] && continue
+      base=$(basename "$seg" .mp4)
+      [ -n "$last_scanned" ] && [ ! "$base" \> "$last_scanned" ] && continue
+      ss=$(seg_epoch "$base"); [ -z "$ss" ] && continue
+      last_scanned="$base"; scanned=$((scanned+1))
+      hit=$(ring_scan_segment "$seg")
+      [ -z "$hit" ] && continue
+      read -r m0 m1 <<<"$hit"
+      abs0=$(awk "BEGIN{printf \"%d\", $ss + $m0}")
+      abs1=$(awk "BEGIN{printf \"%d\", $ss + $m1}")
+      if [ "$in_evt" = 1 ] && [ "$((abs0 - evt_last))" -le "$POSTROLL" ]; then
+        evt_last="$abs1"                                  # same event continuing across segments
+      else
+        [ "$in_evt" = 1 ] && echo "$evt_start $evt_last" >> "$MWIN"
+        in_evt=1; evt_start="$abs0"; evt_last="$abs1"
+        log "►► ring-detector: motion at $(date -d "@$abs0" '+%H:%M:%S' 2>/dev/null)"
+      fi
+    done
+    # Close an event once the footage has gone quiet for POSTROLL. Measured against the last SCANNED
+    # segment, not against wall-clock, so a slow scan cannot split one event into two.
+    if [ "$in_evt" = 1 ] && [ -n "$last_scanned" ]; then
+      local last_end; last_end=$(seg_epoch "$last_scanned")
+      if [ -n "$last_end" ] && [ "$((last_end - evt_last))" -gt "$POSTROLL" ]; then
+        echo "$evt_start $evt_last" >> "$MWIN"
+        log "■■ ring-detector: event closed ($evt_start..$evt_last)"
+        in_evt=0
+      fi
+    fi
+  done
+}
+
 # 3) KEEPER/PRUNER ----------------------------------------------------------------
 # Renders ONE contiguous run of segments (concat $list, already written) into a final clip covering
 # [clip_start, clip_end]: profile (one decode) -> tail-trim -> atomic re-encode -> thumb + metrics.
@@ -883,11 +978,12 @@ keeper_loop(){
 # production code rather than a copy that drifts.
 [ "${RECORD_PREROLL_LIB:-0}" = 1 ] && return 0
 
-cleanup(){ log "=== exiting ==="; kill "$SEG_PID" "$KEEP_PID" 2>/dev/null; pkill -P $$ 2>/dev/null; exit 0; }
+cleanup(){ log "=== exiting ==="; kill "$SEG_PID" "$KEEP_PID" "${RINGDET_PID:-}" 2>/dev/null; pkill -P $$ 2>/dev/null; exit 0; }
 trap cleanup INT TERM
 
-segmenter_loop & SEG_PID=$!
-keeper_loop   & KEEP_PID=$!
+segmenter_loop     & SEG_PID=$!
+keeper_loop        & KEEP_PID=$!
+ring_detector_loop & RINGDET_PID=$!
 
 log "=== record-preroll starts | detect=${RTSP_DETECT##*/} record=${RTSP_MAIN##*/} | fps=$DET_FPS yavg=$YAVG_TH deb=$DEBOUNCE preroll=${PREROLL}s post(gap)=${POSTROLL}s tail_pad=${TAIL_PAD}s seg~GOP ring=${RING_KEEP_MIN}min ==="
 

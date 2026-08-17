@@ -201,6 +201,27 @@ eq "offset=0 is unchanged (m1)"   "6.000"  "$m1"
 eq "offset=0 is unchanged (cut)"  "8.500"  "$cut"
 
 # =============================================================================================
+describe "ring_scan_segment — the fallback detector's sensitivity"
+# =============================================================================================
+# It must behave like the RTSP detector, not merely "detect something": same DEBOUNCE, so a single
+# hot frame is noise rather than an event. Otherwise a fallback that engages during an outage would
+# flood the gallery with clips of nothing at exactly the worst moment.
+DEBOUNCE=2
+ffmpeg(){ fake_frames 12 3 6; }                 # sustained motion, 3s -> 6s
+read -r m0 m1 <<<"$(ring_scan_segment /dev/null)"
+eq "reports first motion (after debounce)"  "3.167" "$m0"
+eq "reports last motion"                    "6.000" "$m1"
+
+ffmpeg(){ fake_frames 12 99 99; }               # nothing over threshold at all
+eq "a quiet segment reports nothing"        ""      "$(ring_scan_segment /dev/null)"
+
+# One frame over threshold: below DEBOUNCE=2, so it must NOT open an event.
+ffmpeg(){ awk 'BEGIN{ for(i=0;i<=72;i++){ t=i/6
+    printf "[m] frame:0 pts:0 pts_time:%.6f\n", t
+    printf "[m] lavfi.signalstats.YAVG=%.3f\n", (i==30 ? 9.5 : 0.0) } }'; }
+eq "a single hot frame is noise, not motion" ""     "$(ring_scan_segment /dev/null)"
+
+# =============================================================================================
 describe "compute_battery_eta — regression + the running-minimum filter"
 # =============================================================================================
 # 10 %/h discharge from 80 %: the ETA to BATTERY_FLOOR_PCT=5 must be (80-5)/10 h = 450 min.
