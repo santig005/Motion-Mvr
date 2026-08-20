@@ -17,12 +17,15 @@ import com.famviva.camara.data.AwayModeStore
 import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.CameraHealth
 import com.famviva.camara.data.Clip
+import com.famviva.camara.data.ClipClassifier
 import com.famviva.camara.data.DriveClient
+import com.famviva.camara.data.LabelStore
 import com.famviva.camara.data.LocationProvider
 import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.WidgetSummaryStore
 import com.famviva.camara.data.dateKeyOf
 import com.famviva.camara.data.motionIntensityLevel
+import com.famviva.camara.data.passesLabelGate
 import com.famviva.camara.ui.widget.CameraWidget
 import androidx.glance.appwidget.updateAll
 import java.util.concurrent.TimeUnit
@@ -59,6 +62,26 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 } else {
                     val newOnes = recent.filter { it.name > last }
                     if (newOnes.isNotEmpty()) {
+                        // Phase-1 people detection — LABELLING, run independently of any alert setting so
+                        // every new clip's card can get a 👤/🚗/🐾 badge over time. When a model is on the
+                        // device, classify each new clip's thumbnail once and persist the verdict; the
+                        // thumbnails fetched here are cached and reused for the alert gate below, so
+                        // nothing is downloaded twice, and an already-labelled clip is never re-fetched.
+                        val labelStore = LabelStore(ctx)
+                        val classifier = ClipClassifier(ctx)
+                        val thumbCache = HashMap<String, android.graphics.Bitmap?>()
+                        if (classifier.available) {
+                            newOnes.forEach { clip ->
+                                val base = clip.name.removeSuffix(".mp4")
+                                if (!labelStore.has(base)) {
+                                    val thumb = thumbCache.getOrPut(clip.id) {
+                                        runCatching { drive.fetchClipThumbnail(clip) }.getOrNull()
+                                    }
+                                    thumb?.let { classifier.classify(it) }?.let { labelStore.put(base, it) }
+                                }
+                            }
+                        }
+
                         // Only alert on motion while Away — and not during quiet-hours (kills 3am
                         // shadow/bug spam). Still advance the baseline (so switching to Away later
                         // doesn't dump the backlog) and still auto-download regardless.
@@ -79,16 +102,28 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                                         lvl == null || lvl >= minLevel
                                     }
                                 }
-                                if (alertable.isNotEmpty()) {
-                                    val newestClip = alertable.first()   // list stays newest-first
-                                    val thumb = runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
+                                // People-only filter: reads the labels just persisted above (no second
+                                // classify pass). Off, or no model on the device, passes everything;
+                                // an unlabelled clip fails open — see passesLabelGate.
+                                val alerted = if (!store.peopleOnly || !classifier.available) {
+                                    alertable
+                                } else {
+                                    alertable.filter {
+                                        passesLabelGate(labelStore.get(it.name.removeSuffix(".mp4")), peopleOnly = true)
+                                    }
+                                }
+                                if (alerted.isNotEmpty()) {
+                                    val newestClip = alerted.first()     // list stays newest-first
+                                    val thumb = thumbCache[newestClip.id]
+                                        ?: runCatching { drive.fetchClipThumbnail(newestClip) }.getOrNull()
                                     Notifications.notifyNewClips(
-                                        ctx, alertable.size, newestClip.time, thumb,
+                                        ctx, alerted.size, newestClip.time, thumb,
                                         Notifications.clipRoute(newestClip.id),
                                     )
                                 }
                             }
                         }
+                        classifier.close()
                         store.setLastNotified(newest)
                         if (offline.shouldAutoDownloadNow()) {
                             newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }

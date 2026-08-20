@@ -36,6 +36,14 @@ class NotifyStore(context: Context) {
             .getOrDefault(AlertIntensity.ALL)
         set(value) = prefs.edit().putString(KEY_ALERT_LEVEL, value.name).apply()
 
+    /** When on, only clips an on-device classifier reads as a PERSON fire an alert (Phase-1 people
+     *  detection). Off by default = unchanged behaviour. Fails OPEN: if no model is on the device the
+     *  classifier is unavailable, every clip's label is unknown, and this filter passes everything —
+     *  so turning it on without the model simply behaves like off, never silently drops an event. */
+    var peopleOnly: Boolean
+        get() = prefs.getBoolean(KEY_PEOPLE_ONLY, false)
+        set(value) = prefs.edit().putBoolean(KEY_PEOPLE_ONLY, value).apply()
+
     /** True if quiet-hours is enabled and [now] falls in the (possibly midnight-spanning) window. */
     fun inQuietHours(now: LocalTime = LocalTime.now()): Boolean {
         if (!quietHours) return false
@@ -70,6 +78,7 @@ class NotifyStore(context: Context) {
         const val KEY_DIGEST = "digest_day"
         const val KEY_QUIET = "quiet_hours"
         const val KEY_ALERT_LEVEL = "alert_level"
+        const val KEY_PEOPLE_ONLY = "people_only"
         val QUIET_START: LocalTime = LocalTime.of(23, 0)   // 11 p.m.
         val QUIET_END: LocalTime = LocalTime.of(7, 0)      // 7 a.m.
     }

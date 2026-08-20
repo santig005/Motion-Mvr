@@ -29,6 +29,19 @@ class ThumbArchive(context: Context) {
 
     fun totalSizeBytes(): Long = dir.listFiles()?.sumOf { it.length() } ?: 0L
 
+    /** Base names (no extension) of every archived thumbnail — the input set for the label backfill,
+     *  which classifies each locally without touching the network. */
+    fun archivedBaseNames(): List<String> =
+        dir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") && f.length() > 0L }
+            ?.map { it.name.removeSuffix(".jpg") } ?: emptyList()
+
+    /** Decode an archived thumbnail to a Bitmap for on-device classification, or null if it's missing
+     *  or unreadable. */
+    fun decode(baseName: String): android.graphics.Bitmap? =
+        localPathOrNull(baseName)?.let {
+            runCatching { android.graphics.BitmapFactory.decodeFile(it) }.getOrNull()
+        }
+
     /**
      * Downloads the clip's Drive jpg ([thumbFileId]) into the archive. No-op (true) if already there.
      * Best-effort — returns false on any failure (the history just falls back to the Drive preview

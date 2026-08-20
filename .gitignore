@@ -32,6 +32,9 @@ build/
 .cxx/
 captures/
 
+# --- ML model (fetched by consumer-app/download-model.sh; a ~4.4MB binary the build never needs) ---
+*.tflite
+
 # --- IDE ---
 .idea/
 .kotlin/

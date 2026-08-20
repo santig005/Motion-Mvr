@@ -33,6 +33,10 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures { compose = true }
+
+    // TF Lite memory-maps the model straight from the APK, which only works if it was stored
+    // uncompressed. Keep .tflite out of the asset compressor so the classifier can load it at runtime.
+    androidResources { noCompress += "tflite" }
 }
 
 dependencies {
@@ -91,4 +95,14 @@ dependencies {
     // Home-screen widget (Jetpack Glance). Renders the summary NewClipsWorker persists — the widget
     // itself does no network work. Glance's minSdk is 23, comfortably under this app's minSdk 26.
     implementation("androidx.glance:glance-appwidget:1.1.1")
+
+    // On-device object detection (Phase-1 people detection). TF Lite Task Vision runs an EfficientDet
+    // (COCO) model over the thumbnail the app already downloads, entirely offline at inference time.
+    // ⚠️ ADDING THIS BREAKS THE LOCAL `--offline` assembleDebug UNTIL ONE ONLINE BUILD populates the
+    // Gradle cache with these artifacts (the same constraint that kept Room out — see
+    // _private/build-and-deploy.md). Do that online build deliberately, once, then the offline
+    // build+install flow works again. The MODEL itself is NOT a build input: it's fetched by
+    // download-model.sh into src/main/assets, and the classifier fails open if it's absent, so a
+    // missing model never breaks the build — it only leaves people-detection dormant.
+    implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")
 }
