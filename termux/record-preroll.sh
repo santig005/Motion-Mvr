@@ -107,6 +107,9 @@ REBOOT_EVERY_SECS="${REBOOT_EVERY_SECS:-600}"    # min gap between camera-reboot
 WEDGE_RETRY_SECS="${WEDGE_RETRY_SECS:-60}"       # once classified wedged, retry at this slow cadence (the 5s dance changes nothing and costs battery)
 CAM_HOST="${CAM_HOST:-$(printf '%s' "$RTSP_MAIN" | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')}"  # camera IP/host for ping + control
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
+WIFI_LOG="${WIFI_LOG:-$(dirname "$OUT_DIR")/wifi.jsonl}"         # dense Wi-Fi time series at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl lane; keeper is its ONLY writer
+WIFI_SAMPLE_SECS="${WIFI_SAMPLE_SECS:-120}"                      # how often to sample the Wi-Fi radio. Fine enough to correlate an RTSP wedge with RF (20min was useless for that); cheap on a charging phone
+WIFI_MAX_LINES="${WIFI_MAX_LINES:-2000}"                         # line cap on wifi.jsonl (~2.8 days at 120s); bounds the re-upload cost over the very weak link it exists to diagnose
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
 BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
 BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
@@ -125,6 +128,7 @@ printf 'OK 0\n' > "$DET_STATE" 2>/dev/null || true   # assume the detector is fi
 printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true  # never inherit a stale wedge verdict; re-classify from scratch (~6 min)
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
 DOWN_SINCE=0                                       # epoch recording went down (0=up); surfaced in status.json + used for the 'up' dur_s
+LAST_RSSI=""; LAST_WIFI_FREQ=""; LAST_RSSI_TS=0    # cached Wi-Fi sample (set by sample_wifi); write_status emits it WITHOUT its own termux-api call
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
 # Global event log (one short JSON object per line) at the CAMERAS_DIR root. cloud-sync uploads it
@@ -238,6 +242,43 @@ compute_battery_eta(){ # $1=current pct
     }' "$BATTERY_HIST" </dev/null
 }
 
+# Reads the Wi-Fi signal via termux-api (if installed). Prints "RSSI FREQ_MHZ" (e.g. "-68 2412") or
+# fails. Best-effort by design: unlike the battery gauge, a missing RSSI is NOT a silent-failure hazard
+# (nothing depends on it to keep recording), so when it can't be read we simply omit the field rather
+# than publish an explicit "unknown". It exists because the camera wedges have correlated with weak RF
+# — −68 dBm on 2.4 GHz — and until now the signal was only ever measured by hand mid-incident, never
+# recorded, so it could never be correlated with an outage after the fact.
+read_rssi(){
+  command -v termux-wifi-connectioninfo >/dev/null 2>&1 || return 1
+  local j rssi freq
+  j=$(timeout 8 termux-wifi-connectioninfo 2>/dev/null) || return 1
+  rssi=$(printf '%s' "$j" | grep -o '"rssi"[^,}]*' | grep -o '\-\?[0-9]\+' | head -1)
+  freq=$(printf '%s' "$j" | grep -o '"frequency_mhz"[^,}]*' | grep -o '[0-9]\+' | head -1)
+  [ -z "$rssi" ] && return 1
+  printf '%s %s' "$rssi" "${freq:-0}"
+}
+
+# Periodic Wi-Fi sampler. This is the ONLY place the radio is read (the single termux-api call): it
+# caches the value for write_status to emit, and appends a compact line to wifi.jsonl — a dense time
+# series so an outage/wedge can be correlated against RF strength AFTER the fact. The −68 dBm 2.4 GHz
+# link has coincided with every RTSP wedge, but until now the signal was never recorded alongside the
+# events, and a 20-minute heartbeat was far too coarse to line up against a wedge. Capped like
+# daily_health so a file re-uploaded over that same weak link can't grow without bound.
+sample_wifi(){
+  local r now n
+  r=$(read_rssi) || return 0
+  now=$(date +%s)
+  LAST_RSSI="${r% *}"; LAST_WIFI_FREQ="${r#* }"; LAST_RSSI_TS="$now"
+  printf '{"ts":%d,"cam":"%s","rssi":%s,"freq_mhz":%s}\n' \
+    "$now" "$CAM_LABEL" "$LAST_RSSI" "$LAST_WIFI_FREQ" >> "$WIFI_LOG" 2>/dev/null || return 0
+  # Trim to the newest WIFI_MAX_LINES only once we're a margin past it, so we're not rewriting the
+  # whole file on every sample.
+  n=$(wc -l < "$WIFI_LOG" 2>/dev/null || echo 0)
+  if [ "${n:-0}" -gt $((WIFI_MAX_LINES + 200)) ]; then
+    tail -n "$WIFI_MAX_LINES" "$WIFI_LOG" > "$WIFI_LOG.tmp" 2>/dev/null && mv -f "$WIFI_LOG.tmp" "$WIFI_LOG" 2>/dev/null
+  fi
+}
+
 write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   local rec now bat pct chg eta extra="" hb="${2:-0}"
   [ "$1" = 1 ] && rec=true || rec=false
@@ -294,6 +335,14 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     local wf wsince
     read -r wf wsince < "$WEDGE_STATE" 2>/dev/null
     [ "${wf:-0}" = 1 ] && extra="${extra},\"camera_wedged\":true,\"wedged_since\":${wsince:-0}"
+  fi
+  # Wi-Fi signal from the cached periodic sample (sample_wifi does the single radio read, every
+  # WIFI_SAMPLE_SECS). Emitted on EVERY status write — including the ok<->down transition — so the
+  # snapshot at the exact moment recording drops carries the RF state, while wifi.jsonl holds the
+  # surrounding trend. No termux-api call here, so it can't add hang risk to the health path. Guarded
+  # by freshness so a stalled sampler can't publish a stale number as if it were current.
+  if [ -n "$LAST_RSSI" ] && [ "$((now - LAST_RSSI_TS))" -le "$((WIFI_SAMPLE_SECS * 3))" ]; then
+    extra="${extra},\"rssi\":${LAST_RSSI},\"wifi_freq_mhz\":${LAST_WIFI_FREQ}"
   fi
   # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
   local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
@@ -842,12 +891,13 @@ daily_rollover(){ # $1=new date(YYYYMMDD)
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
   local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0 det_seen="" cur_det wedge_seen="" cur_wedge
-  local last_daily=0 nd d _od
+  local last_daily=0 last_wifi=0 nd d _od
   started=$(date +%s)
   acc_load                                     # resume today's accumulator or finalize a stale day + start fresh
   scan_drops; fold_sync_errors; acc_save
   daily_upsert "$(daily_line "$ACC_DATE" "$(date +%s)" true)"   # publish today's partial line promptly on startup
   last_daily=$(date +%s)
+  sample_wifi; last_wifi=$(date +%s)                            # prime the Wi-Fi cache so the very first status write already carries rssi
   while true; do
     sleep 5
     now=$(date +%s)
@@ -955,6 +1005,10 @@ keeper_loop(){
     # Housekeeping (~once a minute): reclaim space if the disk is critically low and cap the log.
     if [ "$((now - last_maint))" -ge 60 ]; then
       emergency_prune; trim_log; last_maint=$now
+    fi
+    # Wi-Fi sample: the single radio read, on its own cadence, feeding wifi.jsonl + the status cache.
+    if [ "$((now - last_wifi))" -ge "$WIFI_SAMPLE_SECS" ]; then
+      sample_wifi; last_wifi=$now
     fi
     [ -z "$newest" ] && continue
     newest_start=$(seg_epoch "$(basename "$newest" .mp4)")

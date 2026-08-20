@@ -243,5 +243,28 @@ eq "upward blip is filtered out"  "10.00" "$rate"
 eq "a single sample yields no estimate" "" "$(compute_battery_eta 80)"
 
 # =============================================================================================
+describe "sample_wifi — Wi-Fi telemetry (cache for status.json + capped wifi.jsonl)"
+# =============================================================================================
+# read_rssi shells out via `timeout`, which can't see a shell-function stub, so the radio read is
+# faked at the read_rssi seam. What matters here is the NEW logic: the sample is cached for
+# write_status to emit on every write (incl. the down transition) AND appended to a bounded series.
+export WIFI_LOG="$SANDBOX/wifi.jsonl"; : > "$WIFI_LOG"
+read_rssi(){ echo "-68 2412"; }
+LAST_RSSI=""; LAST_WIFI_FREQ=""; LAST_RSSI_TS=0
+sample_wifi
+eq "caches the rssi for write_status"   "-68"   "$LAST_RSSI"
+eq "caches the band frequency"          "2412"  "$LAST_WIFI_FREQ"
+eq "appends exactly one line"           "1"     "$(wc -l < "$WIFI_LOG")"
+eq "the line is the expected JSON"      '{"ts":TS,"cam":"out","rssi":-68,"freq_mhz":2412}' \
+   "$(sed -E 's/"ts":[0-9]+/"ts":TS/' "$WIFI_LOG")"
+
+# Capping: once the file is a margin past WIFI_MAX_LINES, one more sample trims it to the newest cap.
+WIFI_MAX_LINES=5; : > "$WIFI_LOG"
+for i in $(seq 1 300); do echo "{\"ts\":$i}" >> "$WIFI_LOG"; done
+sample_wifi                              # 301 lines > cap+200 -> trim to newest 5
+eq "wifi.jsonl trimmed to the cap"      "5"     "$(wc -l < "$WIFI_LOG")"
+WIFI_MAX_LINES=2000
+
+# =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
