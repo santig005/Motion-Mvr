@@ -188,6 +188,10 @@ fun estimateBatteryEtaMinutes(samples: List<BatterySample>): Int? {
  *  clips whose video is gone from Drive (so a metadata-only entry still knows how big it was). */
 data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?, val sizeKb: Long? = null)
 
+/** Coarse Wi-Fi signal buckets for the NVR link, so the UI can badge it without repeating the dBm
+ *  thresholds. See [CameraHealth.wifiQuality]. */
+enum class WifiQuality { GOOD, OK, WEAK }
+
 /** NVR/camera health, read from the status.json the NVR writes. */
 data class CameraHealth(
     val camera: String,
@@ -227,7 +231,25 @@ data class CameraHealth(
     val cameraWedged: Boolean = false,
     /** Epoch (s) the wedge started; 0/null if unknown. */
     val wedgedSince: Long? = null,
+    /** Wi-Fi signal (dBm) the NVR phone last measured, plus the band frequency (MHz). The weak
+     *  −68 dBm 2.4 GHz link has coincided with every RTSP wedge, so surfacing it turns "the camera
+     *  keeps dropping" into something you can actually see and correlate. null on older NVR builds. */
+    val rssi: Int? = null,
+    val wifiFreqMhz: Int? = null,
 ) {
+    /** Coarse Wi-Fi quality from [rssi] (dBm): GOOD ≥ −60, OK −60..−70, WEAK < −70. null when the NVR
+     *  doesn't report signal. This house's −66/−68 link sits right at the OK/WEAK boundary. */
+    val wifiQuality: WifiQuality? get() = rssi?.let {
+        when {
+            it >= -60 -> WifiQuality.GOOD
+            it >= -70 -> WifiQuality.OK
+            else -> WifiQuality.WEAK
+        }
+    }
+
+    /** "2.4 GHz" / "5 GHz" from [wifiFreqMhz], or null. */
+    val wifiBand: String? get() = wifiFreqMhz?.let { if (it >= 5000) "5 GHz" else "2.4 GHz" }
+
     /** Recording is fine but nothing is being detected, so no clips can be produced — the silent
      *  failure mode. Deliberately narrow: only when we're recording AND the detector is reported
      *  down, so a plain outage still reads as an outage rather than two competing alerts. */
@@ -300,6 +322,28 @@ fun parseOutageLine(line: String): OutageEvent? {
             ev = ev,
             durS = if (j.has("dur_s") && !j.isNull("dur_s")) j.optInt("dur_s") else null,
             msg = if (j.has("msg") && !j.isNull("msg")) j.optString("msg").ifBlank { null } else null,
+        )
+    }.getOrNull()
+}
+
+/** One line of the NVR's wifi.jsonl: the Wi-Fi radio state sampled every ~2 min, so an outage/wedge
+ *  can be lined up against RF strength over time (the whole reason the dense series exists). */
+data class WifiSample(val ts: Long, val cam: String?, val rssi: Int, val freqMhz: Int)
+
+/** Parses one wifi.jsonl line ({"ts":..,"cam":..,"rssi":-66,"freq_mhz":2412}). Null for blanks /
+ *  malformed JSON / missing ts|rssi, so one bad line never drops the series. */
+fun parseWifiLine(line: String): WifiSample? {
+    val t = line.trim()
+    if (!t.startsWith("{")) return null
+    return runCatching {
+        val j = JSONObject(t)
+        val ts = j.optLong("ts", 0L)
+        if (ts <= 0L || !j.has("rssi")) return null
+        WifiSample(
+            ts = ts,
+            cam = if (j.has("cam") && !j.isNull("cam")) j.optString("cam").ifBlank { null } else null,
+            rssi = j.optInt("rssi"),
+            freqMhz = j.optInt("freq_mhz", 0),
         )
     }.getOrNull()
 }

@@ -250,6 +250,8 @@ class DriveClient(
                             detectorDownSince = if (j.has("detector_down_since")) j.optLong("detector_down_since") else null,
                             cameraWedged = j.optBoolean("camera_wedged", false),
                             wedgedSince = if (j.has("wedged_since")) j.optLong("wedged_since") else null,
+                            rssi = if (j.has("rssi")) j.optInt("rssi") else null,
+                            wifiFreqMhz = if (j.has("wifi_freq_mhz")) j.optInt("wifi_freq_mhz") else null,
                         )
                     }
                 }
@@ -320,6 +322,38 @@ class DriveClient(
                 }
         }
         days
+    }
+
+    /** Reads the NVR's wifi.jsonl (a dense Wi-Fi RF sample every ~2 min) for the signal trend chart.
+     *  Merged across files, parsed defensively line-by-line. Absent file / 404 / any failure yields an
+     *  empty list (the chart then shows its own "no data yet" note). */
+    suspend fun fetchWifiSamples(): List<WifiSample> = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+            .addQueryParameter("q", "name = 'wifi.jsonl' and trashed = false")
+            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("pageSize", "100")
+            .build()
+        val ids = mutableListOf<String>()
+        http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
+            .execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?: return@withContext emptyList()
+                for (i in 0 until files.length()) ids += files.getJSONObject(i).getString("id")
+            }
+        val samples = mutableListOf<WifiSample>()
+        for (id in ids) {
+            val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
+            http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    resp.body?.string()?.lineSequence()?.forEach { line ->
+                        parseWifiLine(line)?.let { samples += it }
+                    }
+                }
+        }
+        samples.sortedBy { it.ts }
     }
 
     /** Reads the NVR's sync_status.json (the cloud-sync pipeline heartbeat). If several exist the
