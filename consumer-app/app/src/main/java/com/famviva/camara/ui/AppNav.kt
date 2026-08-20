@@ -117,6 +117,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -404,6 +405,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
     val notifyStore = remember { NotifyStore(context) }
     var quietHours by remember { mutableStateOf(notifyStore.quietHours) }
     var alertLevel by remember { mutableStateOf(notifyStore.minAlertLevel) }
+    var peopleOnly by remember { mutableStateOf(notifyStore.peopleOnly) }
 
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
@@ -415,6 +417,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
             manualAway = awayStore.manualAway
             quietHours = notifyStore.quietHours
             alertLevel = notifyStore.minAlertLevel
+            peopleOnly = notifyStore.peopleOnly
             expanded = true
         }) {
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
@@ -505,6 +508,30 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
             CheckableMenuItem(R.string.alert_level_strong, selected = alertLevel == AlertIntensity.STRONG) {
                 pickAlertLevel(AlertIntensity.STRONG, R.string.alert_level_strong_toast)
             }
+            // Phase-1 people detection: an on-device classifier over each new clip's thumbnail, gating
+            // the alert to clips a person appears in. Orthogonal to the intensity levels above (which
+            // filter by how MUCH moved); this filters by WHAT moved. Fails open when no model is on the
+            // device, so it silently behaves like off until download-model.sh has run.
+            CheckableMenuItem(R.string.alert_people_only, selected = peopleOnly) {
+                val target = !peopleOnly
+                notifyStore.peopleOnly = target
+                peopleOnly = target
+                Toast.makeText(
+                    context,
+                    context.getString(if (target) R.string.alert_people_only_on_toast else R.string.alert_people_only_off_toast),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            // One-tap backfill: classify every already-archived thumbnail so the 👤 badge appears on old
+            // clips too, not just ones that arrive from now on. Runs in the background, entirely local.
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.label_backfill)) },
+                onClick = {
+                    expanded = false
+                    com.famviva.camara.notify.LabelBackfillWorker.enqueue(context)
+                    Toast.makeText(context, context.getString(R.string.label_backfill_toast), Toast.LENGTH_SHORT).show()
+                },
+            )
             HorizontalDivider()
 
             MenuSectionLabel(stringResource(R.string.menu_language))
@@ -1297,6 +1324,7 @@ private fun ClipsScreen(
     var periodName by rememberSaveable { mutableStateOf<String?>(null) }
     var strongOnly by rememberSaveable { mutableStateOf(false) }
     var newOnly by rememberSaveable { mutableStateOf(false) }
+    var peopleOnly by rememberSaveable { mutableStateOf(false) }
     val selectedPeriod = periodName?.let { name -> DayPeriod.entries.firstOrNull { it.name == name } }
 
     // Token to authorize thumbnail loading and downloads (Drive).
@@ -1306,11 +1334,22 @@ private fun ClipsScreen(
     // Clip selected with a long press (for the share/download menu).
     var actionClip by remember { mutableStateOf<Clip?>(null) }
 
+    // Persisted people-detection verdicts for the 👤 badge. Read once per day view (a background label
+    // pass or backfill shows up on the next entry — good enough; no need to observe live).
+    val labels = remember(day) { com.famviva.camara.data.LabelStore(context).all() }
+    // Live progress of a running history-labelling pass, so tapping "Label history" shows a moving bar
+    // (newest clips first) instead of leaving the user wondering whether anything is happening.
+    val backfillInfos by com.famviva.camara.notify.LabelBackfillWorker.progressFlow(context)
+        .collectAsState(initial = emptyList())
+
     val dayClips = vm.clipsOf(day)
     val clips = dayClips
         .filter { selectedPeriod == null || it.period == selectedPeriod }
         .filter { !strongOnly || (it.intensityLevel ?: 0) >= 4 }
         .filter { !newOnly || vm.isNew(it) }
+        // Only clips the on-device classifier tagged as a person. An unlabelled clip (not classified
+        // yet) is treated as "not a person" here — the filter shows what was actually detected.
+        .filter { !peopleOnly || labels[it.name.removeSuffix(".mp4")] == com.famviva.camara.data.ClipLabel.PERSON }
         .let { list -> if (newestFirst) list.sortedByDescending { it.name } else list.sortedBy { it.name } }
 
     Scaffold(
@@ -1336,6 +1375,12 @@ private fun ClipsScreen(
         },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
+            backfillInfos.firstOrNull { it.state == WorkInfo.State.RUNNING }?.let { info ->
+                BackfillProgress(
+                    done = info.progress.getInt(com.famviva.camara.notify.LabelBackfillWorker.KEY_DONE, 0),
+                    total = info.progress.getInt(com.famviva.camara.notify.LabelBackfillWorker.KEY_TOTAL, 0),
+                )
+            }
             ChipsRow {
                 FilterChip(
                     selected = selectedPeriod == null,
@@ -1366,6 +1411,17 @@ private fun ClipsScreen(
                     onClick = { newOnly = !newOnly },
                     label = { Text(stringResource(R.string.filter_new_only)) },
                     leadingIcon = if (newOnly) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                    } else null,
+                )
+                Spacer(Modifier.width(8.dp))
+                // People-only: the payoff of Phase-1 detection on the browsing side — hide the shadows/
+                // insects/vegetation and show just the clips a person was actually in.
+                FilterChip(
+                    selected = peopleOnly,
+                    onClick = { peopleOnly = !peopleOnly },
+                    label = { Text(stringResource(R.string.filter_people_only)) },
+                    leadingIcon = if (peopleOnly) {
                         { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
                     } else null,
                 )
@@ -1406,6 +1462,7 @@ private fun ClipsScreen(
                                 isNew = vm.isNew(clip),
                                 isDownloaded = vm.isDownloaded(clip),
                                 isFavorite = vm.isFavorite(clip),
+                                label = labels[clip.name.removeSuffix(".mp4")],
                                 onClick = { nav.navigate("player/${clip.id}") },
                                 onLongClick = { actionClip = clip },
                             )
@@ -1501,11 +1558,13 @@ private fun FavoritesScreen(
     nav: NavHostController,
     tokenProvider: suspend () -> String,
 ) {
+    val context = LocalContext.current
     var token by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { token = runCatching { tokenProvider() }.getOrNull() }
 
     var actionClip by remember { mutableStateOf<Clip?>(null) }
     val clips = vm.favoriteClips()
+    val labels = remember(clips.size) { com.famviva.camara.data.LabelStore(context).all() }
 
     Scaffold(
         topBar = {
@@ -1551,6 +1610,7 @@ private fun FavoritesScreen(
                         isNew = vm.isNew(clip),
                         isDownloaded = vm.isDownloaded(clip),
                         isFavorite = true,
+                        label = labels[clip.name.removeSuffix(".mp4")],
                         onClick = { nav.navigate("player/${clip.id}") },
                         onLongClick = { actionClip = clip },
                     )
@@ -2180,6 +2240,45 @@ private fun SheetAction(label: String, onClick: () -> Unit) {
     )
 }
 
+/** A thin banner with a determinate bar while the history-labelling backfill runs (newest clips
+ *  first). Shows "done/total" so a few-hundred-clip pass visibly moves instead of looking stuck; it
+ *  disappears on its own when the worker finishes. */
+@Composable
+private fun BackfillProgress(done: Int, total: Int) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    stringResource(R.string.backfill_running),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                Spacer(Modifier.weight(1f))
+                if (total > 0) {
+                    Text(
+                        "$done/$total",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            if (total > 0) {
+                LinearProgressIndicator(
+                    progress = { done.toFloat() / total.toFloat() },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                LinearProgressIndicator(Modifier.fillMaxWidth())   // indeterminate until total is known
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ClipCard(
@@ -2188,6 +2287,7 @@ private fun ClipCard(
     isNew: Boolean,
     isDownloaded: Boolean,
     isFavorite: Boolean,
+    label: com.famviva.camara.data.ClipLabel? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -2248,13 +2348,32 @@ private fun ClipCard(
                         modifier = Modifier.size(34.dp),
                     )
                 }
-                if (isNew) {
-                    OverlayChip(
-                        text = stringResource(R.string.overlay_new),
-                        bg = MaterialTheme.colorScheme.primary,
-                        fg = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                    )
+                // Top-left stack: the transient NEW chip and, below it, the persistent detection badge
+                // (👤 person / 🚗 vehicle / 🐾 animal) — the whole point of Phase-1, making "a person was
+                // here" a visible property of the card rather than only a push notification. A person is
+                // highlighted (tertiary); vehicle/animal stay a quiet dark chip. NONE/unlabelled: nothing.
+                val labelBadge: Triple<String, Color, Color>? = when (label) {
+                    com.famviva.camara.data.ClipLabel.PERSON ->
+                        Triple("👤 " + stringResource(R.string.badge_person),
+                            MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.onTertiary)
+                    com.famviva.camara.data.ClipLabel.VEHICLE ->
+                        Triple("🚗", Color.Black.copy(alpha = 0.6f), Color.White)
+                    com.famviva.camara.data.ClipLabel.ANIMAL ->
+                        Triple("🐾", Color.Black.copy(alpha = 0.6f), Color.White)
+                    else -> null
+                }
+                Column(
+                    Modifier.align(Alignment.TopStart).padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    if (isNew) {
+                        OverlayChip(
+                            text = stringResource(R.string.overlay_new),
+                            bg = MaterialTheme.colorScheme.primary,
+                            fg = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    }
+                    labelBadge?.let { (text, bg, fg) -> OverlayChip(text = text, bg = bg, fg = fg) }
                 }
                 // Tier badge: ⬇️ archived on this phone · ☁️ on Drive only. Same ☁️/⬇️ language as the
                 // History view (a metadata-only clip never reaches this list — it lives in History).
@@ -2514,6 +2633,7 @@ private fun CameraStatusCard(
     }
     val clickMod = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(clickMod) {
+      Column {
       when {
         !h.ok -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
@@ -2585,6 +2705,45 @@ private fun CameraStatusCard(
             }
         }
       }
+        // Wi-Fi signal is shown in EVERY state — especially the banner ones — because a weak link is
+        // the prime suspect behind the recording drops it sits above. Hidden entirely if the NVR build
+        // doesn't report it yet.
+        NvrWifiRow(h)
+      }
+    }
+}
+
+/** One compact line: "📶 NVR Wi-Fi: −66 dBm · 2.4 GHz · weak", with the quality word coloured
+ *  (weak = error, ok = neutral, good = primary). Renders nothing when there's no signal report. */
+@Composable
+private fun NvrWifiRow(h: com.famviva.camara.data.CameraHealth) {
+    val q = h.wifiQuality ?: return
+    val rssi = h.rssi ?: return
+    val (qualityRes, qualityColor) = when (q) {
+        com.famviva.camara.data.WifiQuality.GOOD -> R.string.wifi_quality_good to MaterialTheme.colorScheme.primary
+        com.famviva.camara.data.WifiQuality.OK -> R.string.wifi_quality_ok to MaterialTheme.colorScheme.onSurfaceVariant
+        com.famviva.camara.data.WifiQuality.WEAK -> R.string.wifi_quality_weak to MaterialTheme.colorScheme.error
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 0.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            stringResource(
+                R.string.wifi_nvr_value,
+                stringResource(R.string.wifi_nvr_label),
+                rssi,
+                h.wifiBand?.let { " · $it" } ?: "",
+            ),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            " · " + stringResource(qualityRes),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = qualityColor,
+        )
     }
 }
 
@@ -2620,8 +2779,9 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
     var timeline by remember { mutableStateOf<List<HealthEvent>>(emptyList()) }
     var daily by remember { mutableStateOf<List<DailyHealth>>(emptyList()) }
     var sync by remember { mutableStateOf<SyncStatus?>(null) }
-    // Selected horizon for the coverage swimlane: 0 = 24h, 1 = 7d, 2 = 30d.
-    var horizon by rememberSaveable { mutableStateOf(0) }
+    var wifi by remember { mutableStateOf<List<com.famviva.camara.data.WifiSample>>(emptyList()) }
+    // Selected horizon for the coverage swimlane: 0=1h, 1=3h, 2=6h, 3=24h, 4=7d, 5=30d.
+    var horizon by rememberSaveable { mutableStateOf(2) }   // default 6h (unchanged from before the 1h/3h zoom levels were added)
 
     LaunchedEffect(Unit) {
         loading = true
@@ -2630,6 +2790,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
         timeline = clusterHealthTimeline(buildHealthTimeline(raw))
         daily = runCatching { drive.fetchDailyHealth() }.getOrDefault(emptyList())
         sync = runCatching { drive.fetchSyncStatus() }.getOrNull()
+        wifi = runCatching { drive.fetchWifiSamples() }.getOrDefault(emptyList())
         loading = false
     }
 
@@ -2666,6 +2827,17 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                         onClick = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null,
                     )
                 }
+            }
+
+            // Wi-Fi signal trend (the dense wifi.jsonl series): the RF dip that precedes a wedge is
+            // visible here, where the single live value on the status card above can't show it. Only
+            // shown once there are samples, so it doesn't sit empty while the series accrues.
+            if (wifi.isNotEmpty()) {
+                item {
+                    Spacer(Modifier.height(6.dp))
+                    HealthSectionHeader(stringResource(R.string.health_wifi_section))
+                }
+                item { WifiTrendCard(wifi) }
             }
 
             // Per-service coverage swimlane (24h/7d from events.jsonl, 30d from daily_health.jsonl).
@@ -2732,6 +2904,63 @@ private fun serviceName(svc: String): String = when (svc) {
     "detector" -> stringResource(R.string.health_svc_detector)
     "sync" -> stringResource(R.string.health_svc_sync)
     else -> svc
+}
+
+/** The Wi-Fi signal trend: a sparkline of rssi (dBm) over the recent samples, with now/min/max and a
+ *  reference line at the weak threshold (−70 dBm). Lets you SEE the RF sag that leads into a wedge. */
+@Composable
+private fun WifiTrendCard(samples: List<com.famviva.camara.data.WifiSample>) {
+    // Cap to the most recent stretch so the line stays readable (samples are ~2 min apart → ~12 h).
+    val recent = remember(samples) { samples.takeLast(360) }
+    val rssis = recent.map { it.rssi }
+    val cur = rssis.lastOrNull() ?: 0
+    val mn = rssis.minOrNull() ?: 0
+    val mx = rssis.maxOrNull() ?: 0
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            Text(
+                stringResource(R.string.wifi_trend_stats, cur, mn, mx),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            WifiSparkline(recent, Modifier.fillMaxWidth().height(96.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                stringResource(R.string.wifi_trend_caption, recent.size),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+}
+
+/** rssi sparkline on a fixed −90..−40 dBm scale (so two days are comparable), newest at the right,
+ *  with a thin reference line at the −70 dBm weak threshold. */
+@Composable
+private fun WifiSparkline(samples: List<com.famviva.camara.data.WifiSample>, modifier: Modifier) {
+    val lineColor = MaterialTheme.colorScheme.primary
+    val weakColor = MaterialTheme.colorScheme.error.copy(alpha = 0.55f)
+    androidx.compose.foundation.Canvas(modifier) {
+        val minR = -90f
+        val maxR = -40f
+        fun y(r: Int): Float =
+            (1f - ((r.coerceIn(-90, -40) - minR) / (maxR - minR))) * size.height
+        // Weak-threshold reference at −70 dBm.
+        val yWeak = y(-70)
+        drawLine(weakColor, Offset(0f, yWeak), Offset(size.width, yWeak), strokeWidth = 2f)
+        val n = samples.size
+        if (n >= 2) {
+            val path = Path()
+            samples.forEachIndexed { i, s ->
+                val x = i.toFloat() / (n - 1) * size.width
+                val yy = y(s.rssi)
+                if (i == 0) path.moveTo(x, yy) else path.lineTo(x, yy)
+            }
+            drawPath(path, lineColor, style = Stroke(width = 3f))
+        }
+    }
 }
 
 @Composable
@@ -3041,10 +3270,13 @@ private fun ServiceCoverageSection(
     nowSec: Long,
 ) {
     Column {
-        // 6h exists because clustering alone cannot separate a burst: at 24h a 3dp band is ~14 min of
-        // real time, so a reconnect storm stays one cluster however well it is drawn. Zooming in is
-        // the only thing that actually pulls those events apart.
+        // The finer horizons exist because clustering alone cannot separate a burst: at 24h a 3dp band
+        // is ~14 min of real time, so overlapping incidents stay one cluster however well they are
+        // drawn. Zooming in is the only thing that actually pulls them apart — 1h and 3h were added for
+        // exactly the "incidents overlap in Recording" case, where 6h still wasn't tight enough.
         val labels = listOf(
+            R.string.health_horizon_1h,
+            R.string.health_horizon_3h,
             R.string.health_horizon_6h,
             R.string.health_horizon_24h,
             R.string.health_horizon_7d,
@@ -3061,10 +3293,12 @@ private fun ServiceCoverageSection(
         }
         Spacer(Modifier.height(10.dp))
         when (horizon) {
-            0, 1, 2 -> {
+            0, 1, 2, 3, 4 -> {
                 val spanSec = when (horizon) {
-                    0 -> 6L * 3_600L
-                    1 -> 86_400L
+                    0 -> 3_600L
+                    1 -> 3L * 3_600L
+                    2 -> 6L * 3_600L
+                    3 -> 86_400L
                     else -> 7L * 86_400L
                 }
                 val timeline = remember(events, horizon) {
@@ -3083,8 +3317,9 @@ private fun ServiceCoverageSection(
 /** The 24h/7d swimlane card (proportional Canvas spans) + its summary card. */
 @Composable
 private fun LiveSwimlane(timeline: ServiceTimeline, horizon: Int) {
-    // horizon: 0 = 6h, 1 = 24h, 2 = 7d. Only the 7d view needs day-stamped axis labels.
-    val is24h = horizon <= 1
+    // horizon: 0=1h, 1=3h, 2=6h, 3=24h, 4=7d. Only the 7d view needs day-stamped axis labels; the
+    // rest all use intraday HH:MM ticks.
+    val is24h = horizon <= 3
     var selSvc by remember(timeline) { mutableStateOf<String?>(null) }
     var selSpan by remember(timeline) { mutableStateOf<List<TimelineSpan>?>(null) }
     val windowSpan = (timeline.windowEnd - timeline.windowStart).coerceAtLeast(1L)
@@ -3094,8 +3329,10 @@ private fun LiveSwimlane(timeline: ServiceTimeline, horizon: Int) {
             Text(
                 stringResource(
                     when (horizon) {
-                        0 -> R.string.health_win_note_6h
-                        1 -> R.string.health_win_note_24h
+                        0 -> R.string.health_win_note_1h
+                        1 -> R.string.health_win_note_3h
+                        2 -> R.string.health_win_note_6h
+                        3 -> R.string.health_win_note_24h
                         else -> R.string.health_win_note_7d
                     },
                 ),
@@ -3126,6 +3363,25 @@ private fun LiveSwimlane(timeline: ServiceTimeline, horizon: Int) {
             val span = selSpan
             val svc = selSvc
             if (span != null && svc != null) {
+                // Step through the selected lane's incidents (its non-OK spans) with prev/next, so a
+                // selection can be walked forward and back instead of hunting for the next coloured
+                // band — the point being exactly the crowded windows where bands overlap. Tapping an OK
+                // stretch leaves the index at -1, and ▶ then jumps to the first incident.
+                val incidents = timeline.lanes.firstOrNull { it.svc == svc }
+                    ?.spans?.filter { it.state != LaneState.OK } ?: emptyList()
+                val curTs = (span.firstOrNull { it.state != LaneState.OK } ?: span.first()).startTs
+                val idx = incidents.indexOfFirst { it.startTs == curTs }
+                if (incidents.isNotEmpty()) {
+                    IncidentNav(
+                        index = idx,
+                        total = incidents.size,
+                        onPrev = { if (idx > 0) selSpan = listOf(incidents[idx - 1]) },
+                        onNext = {
+                            val n = if (idx < 0) 0 else idx + 1
+                            if (n < incidents.size) selSpan = listOf(incidents[n])
+                        },
+                    )
+                }
                 SelectedSpanDetail(svc, span)
             } else {
                 Text(
@@ -3138,6 +3394,35 @@ private fun LiveSwimlane(timeline: ServiceTimeline, horizon: Int) {
     }
     Spacer(Modifier.height(10.dp))
     SummaryCard(timeline.summaries, is30d = false)
+}
+
+/** Prev/next stepper over the selected lane's incidents. Arrows disable at the ends; the counter shows
+ *  the position ("Incident 2/5"), or the total with a ▶ hint when the current pick is an OK stretch
+ *  (index -1) so the first press jumps onto the first real incident. */
+@Composable
+private fun IncidentNav(index: Int, total: Int, onPrev: () -> Unit, onNext: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onPrev, enabled = index > 0, modifier = Modifier.size(34.dp)) {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = stringResource(R.string.health_incident_prev),
+            )
+        }
+        Text(
+            if (index >= 0) stringResource(R.string.health_incident_counter, index + 1, total)
+            else stringResource(R.string.health_incident_total, total),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onNext, enabled = index < total - 1, modifier = Modifier.size(34.dp)) {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = stringResource(R.string.health_incident_next),
+            )
+        }
+    }
 }
 
 /** The 30d swimlane card (one cell per day) + summary, or the honest empty state if the NVR hasn't

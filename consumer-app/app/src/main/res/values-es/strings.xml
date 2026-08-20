@@ -28,6 +28,7 @@
     <!-- Chips de filtro por contenido (lista de clips) -->
     <string name="filter_strong_only">Solo fuertes</string>
     <string name="filter_new_only">Nuevos</string>
+    <string name="filter_people_only">👤 Personas</string>
 
     <!-- Franjas del día -->
     <string name="period_all">Todas</string>
@@ -158,6 +159,14 @@
     <string name="alert_level_all_toast">Alertas para todo el movimiento.</string>
     <string name="alert_level_medium_toast">Alertas solo para movimiento mediano y fuerte. Los clips más leves siguen apareciendo en la app.</string>
     <string name="alert_level_strong_toast">Alertas solo para movimiento fuerte. Los clips más leves siguen apareciendo en la app.</string>
+    <!-- Detección de personas (Fase 1): limitar las alertas a clips donde aparece una persona -->
+    <string name="alert_people_only">🚶 Solo personas</string>
+    <string name="alert_people_only_on_toast">Alertas solo cuando se detecta una persona. Todos los clips siguen apareciendo en la app.</string>
+    <string name="alert_people_only_off_toast">Solo personas desactivado: las alertas suenan para cualquier movimiento.</string>
+    <string name="badge_person">Persona</string>
+    <string name="label_backfill">🏷️ Etiquetar historial (personas)</string>
+    <string name="label_backfill_toast">Clasificando el historial de clips en segundo plano — los badges aparecen a medida que termina.</string>
+    <string name="backfill_running">🏷️ Etiquetando personas (más nuevas primero)…</string>
     <!-- Pantalla de ajustes del modo ausente -->
     <string name="away_settings_title">Modo ausente</string>
     <string name="away_settings_intro">El modo automático activa las alertas de movimiento cuando sales de casa y las silencia al volver. Revisa tu ubicación en cada actualización en segundo plano; no hay seguimiento en vivo.</string>
@@ -204,6 +213,14 @@
     <string name="status_critical_title">🔋 Batería crítica: quedan ~%s</string>
     <string name="status_critical_body">Conecta el teléfono antes de que se apague.</string>
     <string name="status_recording">✅ %s grabando</string>
+    <string name="wifi_nvr_label">Wi-Fi NVR</string>
+    <string name="wifi_nvr_value">📶 %1$s: %2$d dBm%3$s</string>
+    <string name="wifi_quality_good">buena</string>
+    <string name="wifi_quality_ok">aceptable</string>
+    <string name="wifi_quality_weak">débil</string>
+    <string name="health_wifi_section">Señal Wi-Fi del NVR</string>
+    <string name="wifi_trend_stats">ahora %1$d dBm · mín %2$d · máx %3$d</string>
+    <string name="wifi_trend_caption">%1$d muestras · la más reciente a la derecha · línea roja = débil (−70 dBm)</string>
     <string name="battery_eta_hm">%1$dh %2$dm</string>
     <string name="battery_eta_m">%1$dm</string>
 
@@ -248,14 +265,22 @@
     <!-- Pantalla Salud: línea de tiempo de cobertura por servicio ("swimlane") -->
     <string name="health_coverage_section">Cobertura por servicio</string>
     <string name="health_summary_section">Resumen del periodo</string>
+    <string name="health_horizon_1h">1 h</string>
+    <string name="health_horizon_3h">3 h</string>
     <string name="health_horizon_6h">6 h</string>
     <string name="health_horizon_24h">24 h</string>
     <string name="health_horizon_7d">7 días</string>
     <string name="health_horizon_30d">30 días</string>
+    <string name="health_win_note_1h">Última 1 h · zoom máximo, para separar limpiamente incidencias solapadas.</string>
+    <string name="health_win_note_3h">Últimas 3 h · ampliado lo justo para distinguir incidencias cercanas.</string>
     <string name="health_win_note_6h">Últimas 6 h · ampliado, para separar las ráfagas de eventos.</string>
     <string name="health_win_note_24h">Últimas 24 h · cada franja es proporcional a su duración real.</string>
     <string name="health_win_note_7d">Últimos 7 días · el parche de hoy es el incidente de la cámara.</string>
     <string name="health_win_note_30d">Últimos 30 días · resumen diario (una línea por día).</string>
+    <string name="health_incident_prev">Incidencia anterior</string>
+    <string name="health_incident_next">Incidencia siguiente</string>
+    <string name="health_incident_counter">Incidencia %1$d/%2$d</string>
+    <string name="health_incident_total">%1$d incidencias · usa ▶</string>
     <string name="health_legend_ok">Grabando 2K</string>
     <string name="health_legend_degraded">360p (degradado)</string>
     <string name="health_legend_down">Caído (sin video)</string>

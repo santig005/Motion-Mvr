@@ -28,6 +28,7 @@
     <!-- Content filter chips (clip list) -->
     <string name="filter_strong_only">Strong only</string>
     <string name="filter_new_only">New</string>
+    <string name="filter_people_only">👤 People</string>
 
     <!-- Day periods -->
     <string name="period_all">All</string>
@@ -159,6 +160,14 @@
     <string name="alert_level_all_toast">Alerts for all motion.</string>
     <string name="alert_level_medium_toast">Alerts only for medium and strong motion. Fainter clips still show in the app.</string>
     <string name="alert_level_strong_toast">Alerts only for strong motion. Weaker clips still show in the app.</string>
+    <!-- Phase-1 people detection: gate alerts to clips a person appears in (on-device classifier) -->
+    <string name="alert_people_only">🚶 People only</string>
+    <string name="alert_people_only_on_toast">Alerts only when a person is detected. Every clip still shows in the app.</string>
+    <string name="alert_people_only_off_toast">People-only off: motion alerts fire for anything that moves.</string>
+    <string name="badge_person">Person</string>
+    <string name="label_backfill">🏷️ Label history (people)</string>
+    <string name="label_backfill_toast">Classifying the clip history in the background — badges appear as it finishes.</string>
+    <string name="backfill_running">🏷️ Labelling people (newest first)…</string>
     <!-- Away-mode settings screen -->
     <string name="away_settings_title">Away mode</string>
     <string name="away_settings_intro">Automatic mode turns motion alerts on when you leave home and mutes them when you\'re back. It checks your location on each background update — no live tracking.</string>
@@ -205,6 +214,14 @@
     <string name="status_critical_title">🔋 Battery critical: ~%s left</string>
     <string name="status_critical_body">Plug in the phone before it dies.</string>
     <string name="status_recording">✅ %s recording</string>
+    <string name="wifi_nvr_label">NVR Wi-Fi</string>
+    <string name="wifi_nvr_value">📶 %1$s: %2$d dBm%3$s</string>
+    <string name="wifi_quality_good">good</string>
+    <string name="wifi_quality_ok">ok</string>
+    <string name="wifi_quality_weak">weak</string>
+    <string name="health_wifi_section">NVR Wi-Fi signal</string>
+    <string name="wifi_trend_stats">now %1$d dBm · min %2$d · max %3$d</string>
+    <string name="wifi_trend_caption">%1$d samples · newest at right · red line = weak (−70 dBm)</string>
     <string name="battery_eta_hm">%1$dh %2$dm</string>
     <string name="battery_eta_m">%1$dm</string>
 
@@ -249,14 +266,22 @@
     <!-- Health screen: per-service coverage timeline ("swimlane") -->
     <string name="health_coverage_section">Coverage by service</string>
     <string name="health_summary_section">Period summary</string>
+    <string name="health_horizon_1h">1 h</string>
+    <string name="health_horizon_3h">3 h</string>
     <string name="health_horizon_6h">6 h</string>
     <string name="health_horizon_24h">24 h</string>
     <string name="health_horizon_7d">7 days</string>
     <string name="health_horizon_30d">30 days</string>
+    <string name="health_win_note_1h">Last 1 h · maximum zoom, so overlapping incidents separate cleanly.</string>
+    <string name="health_win_note_3h">Last 3 h · zoomed in enough to tell close incidents apart.</string>
     <string name="health_win_note_6h">Last 6 h · zoomed in, so bursts of events pull apart.</string>
     <string name="health_win_note_24h">Last 24 h · each band is proportional to its real duration.</string>
     <string name="health_win_note_7d">Last 7 days · today\'s patch is the camera incident.</string>
     <string name="health_win_note_30d">Last 30 days · daily rollup (one line per day).</string>
+    <string name="health_incident_prev">Previous incident</string>
+    <string name="health_incident_next">Next incident</string>
+    <string name="health_incident_counter">Incident %1$d/%2$d</string>
+    <string name="health_incident_total">%1$d incidents · use ▶</string>
     <string name="health_legend_ok">Recording 2K</string>
     <string name="health_legend_degraded">360p (degraded)</string>
     <string name="health_legend_down">Down (no video)</string>
