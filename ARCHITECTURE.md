@@ -102,6 +102,14 @@ Cameras/<cam>/status.json
   *healthy* if it actually **wrote a segment** — runs that hang at open for the RTSP timeout (~10 s)
   and die empty count as failures, so the backoff engages during a bad spell instead of retrying
   every 5 s forever.
+- **Blind-detector recovery.** The detector can die independently of recording: the ring keeps
+  filling perfectly while *no clip is ever built* (clips are motion-triggered), which looks exactly
+  like a quiet day — a failure mode that once hid for hours. The watchdog now watches the detector's
+  own liveness and **restarts it** (with backoff) when it goes blind, and if the RTSP detector stays
+  down the NVR **falls back to a ring-scan detector**: it runs the same frame-difference over the
+  segments already being recorded, so an outage of the *detector* no longer means an outage of
+  *events*. Detector health (`detector_ok`) is published separately from recording health, since one
+  can be perfect while the other is dead.
 - **Truthful recording quality.** The segmenter records the 2K main stream and falls back to the
   360p sub-stream when the 2K flaps; the current mode (`rec_mode`) + hourly 2K drop count are
   published to `status.json` **mid-run** (once a connection sustains ~90 s), not when the run ends —
@@ -111,21 +119,33 @@ Cameras/<cam>/status.json
 ## Health signalling
 
 The NVR writes `status.json` per camera: `recording_ok` (segment freshness), `updated` (a heartbeat
-every ~20 min, independent of whether there's motion), `down_since` while recording is down, and
-optional `battery`/`charging` (via Termux:API). The app reads these and distinguishes three failure
-modes: **camera down** (not recording), **not reporting** (heartbeat stale ⇒ phone probably
-off/offline), and **low battery**.
+every ~20 min, independent of whether there's motion), `down_since` while recording is down, optional
+`battery`/`charging` (via Termux:API), and a set of quality/liveness signals — `rec_mode` (2K vs the
+360p fallback) + hourly 2K-drop count, `detector_ok`, `camera_wedged`, `disk_free_mb`, and the phone's
+Wi-Fi `rssi`/`wifi_freq_mhz`. The app reads these and distinguishes the failure modes that need
+*different actions*: **camera down** (not recording), **camera wedged** (pings but refuses RTSP — needs
+a power-cycle, not a wait), **blind detector** (recording fine but nothing detected ⇒ no clips built),
+**not reporting** (heartbeat stale ⇒ phone probably off/offline), **recording in 360p**, **disk low**,
+and **low battery** — each with its own wording, because "no signal" is easy to scroll past while
+"unplug the camera" is not.
 
-Two more files at the cameras root make outages *reconstructable after the fact*, not just visible
+A few more files at the cameras root make outages *reconstructable after the fact*, not just visible
 live (they ride the same csv/json refresh lane):
 
 - **`events.jsonl`** — an append-only event log (one JSON object per line): recording `down`/`up`
-  with the outage duration, segmenter/detector drops with how long the run lasted, and sync
-  failures. Trimmed at line boundaries past ~256 KB by cloud-sync (its only trimmer). The app's
-  **Salud** screen renders it as an outage timeline: which service fell, when, and for how long.
+  with the outage duration, segmenter/detector drops with how long the run lasted, wedge verdicts,
+  and sync failures. Trimmed at line boundaries past ~256 KB by cloud-sync (its only trimmer). The
+  app's **Salud** screen renders it as a per-service coverage timeline (zoomable 1h → 30d): which
+  service fell, when, and for how long.
 - **`sync_status.json`** — cloud-sync's own health, written once per cycle: per-lane last-success
   epochs and the last error. The uploader can't report its own death, so the app infers "sync down"
   from this file's `updated` going stale.
+- **`wifi.jsonl`** — a dense Wi-Fi RF sample (`rssi`, band) every ~2 min, capped and uploaded on the
+  same lane. The weak 2.4 GHz link has coincided with every RTSP wedge, but signal was only ever
+  measured by hand mid-incident; the series lets the app draw a **signal-trend chart** and lets a wedge
+  be correlated with the RF sag that preceded it. The live value also rides in `status.json` (emitted
+  on every write, including the down transition, so the snapshot at the moment recording drops carries
+  the RF state).
 
 On the app side, freshness is explicit: reopening from the background auto-refetches when in-memory
 data is older than ~60 s, a line under the health cards shows *when* the data was fetched, and the
@@ -174,15 +194,26 @@ A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choice
   on boot) keeps the state fresh between polls, and the 15-min poll's distance check stays on as a
   fallback because the OS drops geofences. Alerts can additionally be gated by a **minimum motion
   intensity** (all / medium+ / strong only, fail-open when a clip has no metric yet).
+- **On-device detection (people / vehicle / animal).** A TFLite EfficientDet (COCO) model runs over
+  the thumbnail the app already downloads and labels each clip. The label persists (`LabelStore`,
+  JSON — same offline-build constraint as `CatalogStore`) and drives a 👤 badge on the card, a "People
+  only" list filter, and an optional people-only alert gate; a one-tap **backfill** classifies the
+  archived thumbnails (newest first, with a progress bar). Post-hoc over the thumbnail loses nothing
+  here — the pipeline is already ~2 min end-to-end, so a second of inference is invisible. It **never
+  gates recording** (only what's shown/announced) and **fails open**: with no model on the device the
+  feature is simply dormant and every alert passes. The model is fetched separately, not a build input.
 - **Offline & storage.** New clips can auto-download for offline playback (off / Wi-Fi only / Wi-Fi
   + mobile data). A storage screen shows the on-device vs. Drive footprint as a per-day donut, and
   clips can be starred as **favorites** that survive batch deletes.
 - **Battery forecast.** For each camera the app charts the battery history and shows a "lasts until"
   ETA, cross-checking the NVR's own estimate against a local fit.
 - **Screens:** a bottom NavigationBar with four tabs — Clips (days → day list → player), Live,
-  Favorites and **Salud** (health: current status, sync health, outage timeline) — plus Away-mode
-  setup, Storage (per-day donut with tappable slices), Battery, and the in-app live-log viewer.
-  Day/period filters, a chronological **thumbnail filmstrip** atop each day, unseen-clip tracking,
+  Favorites and **Salud** (health: current status with the live Wi-Fi signal, a zoomable per-service
+  coverage timeline (1h → 30d) with a prev/next incident stepper, a Wi-Fi signal-trend chart, sync
+  health and an outage list) — plus Away-mode setup, Storage (per-day donut with tappable slices),
+  Battery, and the in-app live-log viewer.
+  Day/period filters (including a **"People" filter**), a chronological **thumbnail filmstrip** atop
+  each day, unseen-clip tracking,
   pull-to-refresh, long-press share/download, a motion-intensity meter, and per-clip upload latency
   run throughout. A **Glance home-screen widget** shows camera health + today's clips from the
   15-min poll's snapshot (no network of its own, and it shows the snapshot's age).
@@ -197,6 +228,8 @@ A small single-Activity **Jetpack Compose** app (`consumer-app/`). Design choice
 
 [Frigate](https://frigate.video/) is a great free NVR with real AI object detection, and there's a
 config for it here. But it wants an always-on box with some horsepower (Pi 4/5 or an N100 mini-PC).
-The phone-based pipeline needs *zero* extra hardware and no AI accelerator, at the cost of
-"motion" instead of "person/car." Frigate is the natural upgrade once a small always-on host is
-available; the storage layout and the app don't have to change.
+The phone-based pipeline needs *zero* extra hardware and no AI accelerator; with the app's on-device
+classifier it now labels person/vehicle/animal too — just **post-hoc** (over the thumbnail, ~2 min
+after the event) rather than in real time. Frigate remains the natural upgrade once a small always-on
+host is available and real-time, multi-camera detection is genuinely needed; the storage layout and
+the app don't have to change.

@@ -5,7 +5,7 @@ Status: **approved, not started.** Author handoff for a fresh implementation ses
 ## Motivation
 
 Google Drive is the free 15 GB tier, so cloud retention is short (`CLOUD_KEEP_DAYS=30`). But the
-consumer phone (a Pixel) has ~100 GB free — unused space. The user wants to keep a **longer history
+consumer-app phone has ~100 GB free — unused space. The user wants to keep a **longer history
 on the consumer device**, independent of Drive's 30-day rotation: even after a clip is purged from
 Drive, it (or at least its metadata) stays browsable in the app for a user-chosen horizon.
 
@@ -18,13 +18,13 @@ Measured footprint (2026-07-20, real numbers from the NVR):
   the clips (30 d cloud / 7 d local).
 
 Takeaway: the metadata is already permanent and featherweight; thumbnails are cheap; only the video
-is heavy — and even that fits for months on the Pixel.
+is heavy — and even that fits for months on the consumer-app phone.
 
 ## The 3-tier retention model (target)
 
 1. **Cloud (Drive) — 30 days.** Off-site, redundant backup of recent clips, re-streamable from any
    device. Theft-resilience for recent events. **Unchanged.**
-2. **Local video archive (Pixel) — user-chosen horizon (30/60/90 d or custom).** Full video kept on
+2. **Local video archive (consumer-app phone) — user-chosen horizon (30/60/90 d or custom).** Full video kept on
    the phone (downloaded on Wi-Fi), browsable **even after Drive purges the original**. Favorites
    kept indefinitely.
 3. **Metadata + thumbnail history — effectively permanent (years).** A timeline/heatmap of ALL
@@ -100,7 +100,7 @@ retention-settings store, `ui/AppNav.kt` (Storage settings, badges, player state
 
 ## Caveats to honor (tell the user, keep in the UX)
 
-- **Single copy.** Once Drive purges a clip, the Pixel archive is the ONLY copy of that video. Drive
+- **Single copy.** Once Drive purges a clip, the consumer-app phone's archive is the ONLY copy of that video. Drive
   was the redundancy. Fine for old archive; for anything critical → favorite it (favorites stay on
   Drive, spared from the purge). Consider a gentle note in the retention UI.
 - **Wi-Fi + battery.** Auto-downloading everything uses bandwidth + battery; default to Wi-Fi-only,

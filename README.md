@@ -10,8 +10,10 @@ plays each clip in place.
 
 It runs on hardware you already own: the recorder is a **spare Android phone** running
 [Termux](https://termux.dev/) (ffmpeg + bash), and the viewer is a small **Kotlin / Jetpack
-Compose** app. There is an optional [Frigate](https://frigate.video/) path for real AI person
-detection on a Raspberry Pi / mini-PC.
+Compose** app that now also runs a small **on-device object detector** over each clip — labelling
+*person / vehicle / animal* with no extra hardware and no AI accelerator. A heavier
+[Frigate](https://frigate.video/) path (real-time detection on a Raspberry Pi / mini-PC) remains an
+optional upgrade, not a requirement.
 
 > Full design rationale in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 > Where the project stands and what comes next: [`ROADMAP.md`](ROADMAP.md).
@@ -84,10 +86,21 @@ See [`frigate/`](frigate/): point it at the same RTSP URLs and run `docker compo
   measured on the 2K, not on a fixed timer, so there's no dead footage.
 - **Atomic writes** — clips/thumbnails are written to `.part` and renamed, so the uploader never
   ships a half-written file.
+- **On-device detection (no extra hardware)** — a small TFLite object detector runs over each clip's
+  thumbnail (which the app already downloads) and labels it *person / vehicle / animal / none*. That
+  drives a **👤 badge** on the card, a **"People only" filter**, and a **people-only alert gate** — so
+  the gallery of mostly shadows/insects/rain becomes the handful of clips that are a person. It never
+  decides what gets *recorded*, only what gets *announced/shown*, and **fails open** (no model → all
+  alerts pass). A one-tap **backfill** labels the existing history too.
 - **Self-healing** — a watchdog revives the recorder, uploader, wake-lock and sshd; a boot script
-  restarts everything after a reboot; camera "stuck" states are handled with staggered backoff.
-- **Health surfacing** — the NVR writes a `status.json` (recording fresh? battery? charging?) that
-  the app turns into banners and notifications ("camera down — power-cycle it").
+  restarts everything after a reboot; camera "stuck" (wedged) states are classified and surfaced with
+  staggered backoff; a **blind detector is auto-restarted**, and if the RTSP detector stays down the
+  NVR **falls back to scanning the recording ring** so motion is still caught during the outage.
+- **Health surfacing & observability** — the NVR writes `status.json` (recording fresh? battery?
+  charging? recording in 2K or 360p? detector alive? camera wedged? disk low? **Wi-Fi RSSI?**) which
+  the app turns into banners and notifications. A **Salud** screen adds a per-service coverage timeline
+  (1h → 30d zoom) reconstructed from an `events.jsonl` outage log, plus a **Wi-Fi signal trend** chart
+  from a dense `wifi.jsonl` series — so a weak link can be correlated with the drops it causes.
 - **More than a viewer** — the app also does a **live RTSP view** (SD/2K, fullscreen, works remotely
   over Tailscale), **live snapshots**, **photo alerts** that open the live view, presence-based
   **Home/Away** alerting (manual or by location), offline downloads, a storage breakdown, favorites,

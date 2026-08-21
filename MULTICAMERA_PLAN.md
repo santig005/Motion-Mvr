@@ -142,8 +142,7 @@ how a stolen camera would go quiet forever.
 ## Hard capacity limits — read before adding camera #2
 
 This is the part that constrains the ambition, and it is better known now than discovered later. All
-numbers come from real measurements on the production phone (see
-`_private/battery-investigation-2026-07-15.md`).
+numbers come from real measurements on the production phone.
 
 **The NVR phone is a Galaxy A03 and it is already near its limit with ONE camera.**
 
@@ -170,7 +169,7 @@ the current 30-day cloud retention:
 | 4 | ~24 GB | ❌ |
 
 So **three or four cameras forces a decision**: shorten cloud retention to ~7–10 days, or pay for
-Drive storage. Local storage is not the issue (37 GB free on the NVR; the Pixel archive has ~100 GB).
+Drive storage. Local storage is not the issue (37 GB free on the NVR; the consumer-app phone's archive has ~100 GB).
 
 **Consequence for the roadmap:** the moment a genuine 3–4 camera setup is wanted, the NVR phone is no
 longer the right host. That — not electricity cost — is the argument that would justify the mini PC

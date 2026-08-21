@@ -429,7 +429,7 @@ The phone had not rebooted (uptime 8 d).
 | "Move the phone to 5 GHz" (recommendation D1) | Impossible: the SM-A035M is 802.11 b/g/n, **2.4 GHz only**. The recommendation was invalid, and this is also why "internet came back at 9:32" was true on 5 GHz while the NVR stayed dark on 2.4. |
 | The camera has wedged again (`.2` pings but gives no RTSP) | **No.** See the DHCP trap below — a real wedge *accepts* the connection and returns `Invalid data`; this was `Connection refused` with zero open ports, neither 80 nor 554. |
 
-Airtime contention was real and measured — channel 9 (2452 MHz) shared with a `Pixel 9a` AP at −47 dBm,
+Airtime contention was real and measured — channel 9 (2452 MHz) shared with a nearby phone's hotspot AP at −47 dBm,
 **21 dB (~125×) stronger** than the router at −68 dBm; ping to the router at one hop showing 5 % loss
 and 3.5 / 59.6 / 219 ms; drops per hour going 0.2 before the router restart → 10.9 after. But the
 actual cause of the 3 h 23 m of *zero* successes was found by reproducing it twice the same day: **the

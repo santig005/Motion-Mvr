@@ -23,13 +23,20 @@ The UI is available in **English and Spanish**, switchable at runtime from the t
 - **Offline & storage:** optional auto-download (off / Wi-Fi / + mobile data), a local-vs-Drive
   storage breakdown, and starrable favorites that survive batch deletes.
 - **Battery:** per-camera history chart and a "lasts until" ETA.
-- **Health:** reads each camera's `status.json` and surfaces "camera down / not reporting / low
-  battery" as banners and **photo** notifications; tapping a new-clip alert opens the live view.
+- **Detection (on-device):** a TFLite EfficientDet (COCO) model classifies each clip's thumbnail
+  (person / vehicle / animal / none). Drives a **👤 badge**, a **"People" list filter**, and a
+  people-only **alert gate**; a "Label history" action **backfills** the archive (newest first, with a
+  progress bar). Never gates recording; **fails open** (no model on the device → dormant, alerts pass).
+- **Health:** reads each camera's `status.json` and surfaces the *actionable* states — camera down /
+  **wedged** / **blind detector** / not reporting / recording in 360p / disk low / low battery — as
+  banners and **photo** notifications; tapping a new-clip alert opens the live view. A **Salud** tab
+  adds a zoomable per-service coverage timeline (1h → 30d), a **Wi-Fi signal-trend** chart, and sync
+  health.
 - **Localization:** UI strings live in `res/values/` (English) and `res/values-es/` (Spanish); the
   in-app switch uses AppCompat per-app locales.
 
-Screens: **Days** → **Clips of a day** → **Player**, plus **Live**, **Away mode**, **Storage**,
-**Favorites**, and **Battery**.
+Screens: **Days** → **Clips of a day** → **Player**, plus **Live**, **Salud** (health), **Away mode**,
+**Storage**, **Favorites**, and **Battery**.
 
 ## Requirements
 
@@ -74,11 +81,14 @@ gradlew :app:assembleDebug
 
 - Instant push (FCM) instead of the ~15-min WorkManager poll (needs a Firebase project).
 - Distinguish clips per camera (today it groups every `mt_`; premature with one camera).
-- "Person" label once Frigate is in the loop (needs an always-on host).
+- Make the archive **searchable by label** ("people at night last week") and add a daily **story**
+  summary — Phases 2–3 of on-device detection.
 
 Done since this list was written: OS geofencing for away mode (with the poll kept as fallback),
-bottom-tab navigation, Salud screen with the outage timeline, alert intensity gating, home-screen
-widget, and the per-day thumbnail filmstrip.
+bottom-tab navigation, Salud screen with the coverage timeline + **Wi-Fi signal trend**, alert
+intensity gating, home-screen widget, the per-day thumbnail filmstrip, and **on-device
+person/vehicle/animal detection** (badge, "People" filter, people-only alerts, history backfill) —
+which retired the old *"'Person' label once Frigate is in the loop"* item: no always-on host needed.
 
 Recorded-clip capture from the live view was considered and dropped: the NVR already records exactly
 the motion you'd want, so it added no value over the live snapshot.
