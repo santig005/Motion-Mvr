@@ -274,8 +274,12 @@ describe "per-service health accounting — the 2026-08-26 lesson"
 # footage. These tests pin the two properties that make that impossible to repeat — seconds accrue
 # per tick, and the open-outage watermark is persisted — plus the honest handling of "unknown".
 jf(){ printf '%s' "$2" | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }   # read one int from a JSON line
+# The accumulator is keyed by the LOCAL day, and acc_load deliberately rolls over when the persisted
+# day is not today. A hard-coded date therefore passes until midnight and then fails for the right
+# reason at the wrong time -- which is exactly what happened the first night this suite existed.
+TODAY=$(date +%Y%m%d)
 
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick rec 1 60 1060
 acc_tick rec 1 60 1120
 eq "up seconds accrue per tick"              "120" "$ACC_rec_UP"
@@ -299,13 +303,13 @@ eq "…with its full duration as the worst"    "120" "$ACC_rec_WORST"
 
 # Unknown (INIT) is credited to NEITHER side, so uptime% never counts "we had not looked yet" as
 # either health or failure — the distinction the old boolean could not express at all.
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick det -1 60 1060
 eq "unknown accrues no up seconds"           "0"   "$ACC_det_UP"
 eq "unknown accrues no down seconds"         "0"   "$ACC_det_DOWN"
 
 # THE regression test: a restart mid-outage must not erase it. acc_load reads the persisted line back.
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick rec 0 60 1180                       # outage opens and is saved
 ACC_rec_SINCE=999999; ACC_rec_DOWN=999999    # scribble over RAM to prove the reload is from disk
 acc_load                                     # <- what a watchdog restart does
@@ -316,9 +320,9 @@ eq "the outage survives the restart"          "1"    "$ACC_rec_OUT"
 eq "…charged its true duration, not zero"     "300"  "$ACC_rec_WORST"
 
 # Every service gets the same treatment; the emitted line carries all four.
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick rec 1 60 1060; acc_tick det 0 60 1060; acc_tick seg 1 60 1060; acc_tick sync 0 60 1060
-LINE=$(daily_line 20260826 1060 true)
+LINE=$(daily_line $TODAY 1060 true)
 eq "recording up seconds in the line"        "60" "$(jf rec_up_s "$LINE")"
 eq "detector down seconds in the line"       "60" "$(jf det_down_s "$LINE")"
 eq "segmenter up seconds in the line"        "60" "$(jf seg_up_s "$LINE")"
@@ -329,7 +333,7 @@ eq "legacy rec_down_s still emitted"         "0"  "$(jf rec_down_s "$LINE")"
 # episode counter and the outage seconds become time-stuck. The 2026-08-26 wedge lasted 10h and left
 # no durable record anywhere that it had even happened, which is why "do we need a smart plug?" had
 # no number behind it.
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick wedge 1 60 1060                     # healthy: not wedged
 eq "a healthy camera banks no wedge time"    "0" "$ACC_wedge_DOWN"
 acc_tick wedge 0 60 1120                     # classified wedged
@@ -339,12 +343,12 @@ eq "an ongoing wedge is not an episode yet"  "0"   "$ACC_wedge_OUT"
 acc_tick wedge 1 60 1240                     # power-cycled / recovered
 eq "the closed wedge counts as one episode"  "1"   "$ACC_wedge_OUT"
 eq "…with its duration as the worst"         "120" "$ACC_wedge_WORST"
-LINE=$(daily_line 20260826 1240 true)
+LINE=$(daily_line $TODAY 1240 true)
 eq "wedge episodes reach the daily line"     "1"   "$(jf wedge_episodes "$LINE")"
 eq "wedge seconds reach the daily line"      "120" "$(jf wedge_s "$LINE")"
 
 # A day boundary must not silently close an outage that is still open.
-acc_reset 20260826 1000
+acc_reset $TODAY 1000
 acc_tick sync 0 60 1180
 acc_carry 20260827 2000
 eq "an open outage carries into the new day" "2000" "$ACC_sync_SINCE"
