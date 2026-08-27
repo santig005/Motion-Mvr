@@ -50,7 +50,12 @@ printf '\n\033[1mWatchdog — removing each recovery guard\033[0m\n'
 
 # Guard 1: without the ping check it restarts the NVR over a camera that is simply switched off.
 mutate "guard 1: ping before restarting" watchdog.sh test-watchdog.sh \
-  's/! ping -c1 -W2 "\$host" >\/dev\/null 2>&1/false/s'
+  's/! host_pings "\$host" 5/false/s'
+
+# The 2026-08-26 bug: if recovery does not have to HOLD, the fresh session's own non-DOWN state
+# closes the episode, the attempt counter resets, and the ladder restarts the NVR forever at
+# "attempt 1" — with guards 2 and 3 both alive but unreachable.
+mutate "guard 4b: recovery must be sustained" watchdog.sh test-watchdog.sh   's/\[ "\$\(\( now - \$\{DET_WELL\[\$cam\]\} \)\)" -lt "\$DET_RECOVER_SECS" \] && return 0//s'
 
 # Guard 2: without backoff it restarts every INTERVAL — the restart loop.
 mutate "guard 2: backoff between attempts" watchdog.sh test-watchdog.sh \

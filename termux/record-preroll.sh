@@ -93,6 +93,14 @@ RING_DET_POLL="${RING_DET_POLL:-10}"              # how often to look for new se
 RING_DET_SCALE="${RING_DET_SCALE:-640:360}"       # downscale before analysis: 2.5x cheaper, same crop/threshold as the RTSP detector
 RING_DET_STATE="$RING_DIR/.ring_det"              # ring detector -> log/status: "1 <since>" while it is the one detecting
 WEDGE_STATE="$RING_DIR/.wedge_state"              # segmenter -> keeper: "1 <since_epoch>" while the camera is classified WEDGED
+# Segmenter capture health, PERSISTED so it survives a watchdog restart: "<UP|DOWN|INIT> <since> <firstfail>".
+# Two jobs in one file. (a) It gives the keeper a real up/down signal for the segmenter lane, distinct
+# from `recording` (which measures the ring's OUTPUT; this measures whether the capture session itself
+# is producing). (b) `firstfail` -- how long we have gone with produced=0 -- used to live in a local of
+# segmenter_loop, so the watchdog's ~368s restart cadence reset it before WEDGE_AFTER_SECS=360 could
+# ever elapse: on 2026-08-26 a 10h camera wedge was never once classified, losing the race by ~9s every
+# cycle. Persisting it is what makes the wedge classifier able to fire at all.
+SEG_STATE="$RING_DIR/.seg_state"
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
 EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
@@ -118,16 +126,28 @@ DISK_FREE_MIN_MB="${DISK_FREE_MIN_MB:-500}"                     # emergency floo
 DAILY_HEALTH="${DAILY_HEALTH:-$(dirname "$OUT_DIR")/daily_health.jsonl}"        # long-horizon rollup at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl refresh lane; keeper is its ONLY writer
 HEALTH_ACC="${HEALTH_ACC:-$HOME/.health_acc_$CAM_LABEL}"                        # local-only (NOT uploaded) running per-day accumulator; single writer = keeper, no concurrency
 SYNC_STATUS_FILE="${SYNC_STATUS_FILE:-$(dirname "$OUT_DIR")/sync_status.json}"  # cloud-sync's health file; keeper READS it to fold sync failures in (never shared-write)
-DAILY_REFRESH_SECS="${DAILY_REFRESH_SECS:-300}"                 # how often today's partial daily_health line is rewritten + the accumulator persisted
+SYNC_STALE_SECS="${SYNC_STALE_SECS:-900}"                       # cloud-sync's fast lane not completing for this long => sync is DOWN (it runs every ~60s)
+QUAL_STATE="$RING_DIR/.qual_state"                              # last recording quality PUBLISHED to the app ("2K"|"SUB"); persisted so a `degraded` is always closed by exactly one `restored`
+DAILY_REFRESH_SECS="${DAILY_REFRESH_SECS:-300}"                 # how often today's partial daily_health line is rewritten
+ACC_SAVE_SECS="${ACC_SAVE_SECS:-60}"                            # how often the accumulator itself is flushed; bounds what a restart can lose to this many seconds
 DAILY_HEALTH_MAX_LINES="${DAILY_HEALTH_MAX_LINES:-800}"         # line cap on daily_health.jsonl (~365 lines/cam/year; keeps it from growing forever)
 
 mkdir -p "$OUT_DIR" "$RING_DIR" "$(dirname "$LOG")"
 : > "$MWIN" 2>/dev/null || true
-printf '2K 0\n' > "$REC_STATE" 2>/dev/null || true   # assume 2K until the segmenter says otherwise
-printf 'OK 0\n' > "$DET_STATE" 2>/dev/null || true   # assume the detector is fine until it says otherwise
-printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true  # never inherit a stale wedge verdict; re-classify from scratch (~6 min)
+# Startup state. These three lines used to assert "2K, detector fine, not wedged" on EVERY process
+# start -- and the watchdog restarts this process every ~6 min during an incident, so the restart
+# itself manufactured a clean bill of health. On 2026-08-26 that painted ~65s of fake "recording in
+# 2K" into the app once per cycle for 10h while the ring stayed empty. Health is now only ever
+# asserted from observed evidence: INIT means "nothing seen yet", which counts as neither up nor
+# down, and the wedge verdict is INHERITED (the classifier needs 360s of continuous failure and
+# never once got that from scratch between restarts).
+printf 'INIT 0\n' > "$REC_STATE" 2>/dev/null || true                  # mode unknown until a run actually produces
+printf 'INIT %s\n' "$(date +%s)" > "$DET_STATE" 2>/dev/null || true   # no frames seen yet != detector healthy
+[ -s "$WEDGE_STATE" ] || printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true   # inherit; a produced segment is what clears it
+[ -s "$SEG_STATE" ]   || printf 'INIT %s 0\n' "$(date +%s)" > "$SEG_STATE" 2>/dev/null || true
 touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexing the ring
-DOWN_SINCE=0                                       # epoch recording went down (0=up); surfaced in status.json + used for the 'up' dur_s
+# (Recording's "down since" used to be this in-RAM global. It now lives in the persisted accumulator
+# as ACC_rec_SINCE -- a process-local watermark is exactly what the watchdog restart kept erasing.)
 LAST_RSSI=""; LAST_WIFI_FREQ=""; LAST_RSSI_TS=0    # cached Wi-Fi sample (set by sample_wifi); write_status emits it WITHOUT its own termux-api call
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
@@ -309,10 +329,17 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   # Recording-quality signal (from the segmenter via REC_STATE): rec_mode = "2K" | "SUB",
   # rec_2k_drops_1h = how many times the 2K flapped in the last hour. Lets the app flag "recording in
   # 360p" or "2K unstable" instead of it going unnoticed now that fallback is automatic.
+  # Only a REAL captured quality is published. INIT ("nothing captured yet") and NONE ("that run
+  # captured nothing") are not qualities, and emitting them shipped two lies at once: rec_mode:"INIT",
+  # a value no app build understands, and rec_2k_drops_1h carrying INIT's second field -- an epoch --
+  # which the app renders as the 2K-stability number. Absent is the honest answer; recording_ok
+  # already says whether anything is being recorded at all.
   if [ -r "$REC_STATE" ]; then
     local rmode rdrops
     read -r rmode rdrops < "$REC_STATE" 2>/dev/null
-    [ -n "$rmode" ] && extra="${extra},\"rec_mode\":\"${rmode}\",\"rec_2k_drops_1h\":${rdrops:-0}"
+    case "${rmode:-}" in
+      2K|SUB) extra="${extra},\"rec_mode\":\"${rmode}\",\"rec_2k_drops_1h\":${rdrops:-0}" ;;
+    esac
   fi
   # Detector health (from the detector via DET_STATE) — INDEPENDENT of recording_ok. "Recording" only
   # means fresh segments are landing in the ring; a clip is only ever built when the detector opens a
@@ -322,8 +349,12 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   if [ -r "$DET_STATE" ]; then
     local dstate dsince
     read -r dstate dsince < "$DET_STATE" 2>/dev/null
-    if [ "${dstate:-OK}" = "DOWN" ]; then
+    if [ "${dstate:-}" = "DOWN" ]; then
       extra="${extra},\"detector_ok\":false,\"detector_down_since\":${dsince:-0}"
+    elif [ "${dstate:-}" = "INIT" ]; then
+      # Starting up: no frames seen yet. Kept truthy so older app builds keep working, but flagged so
+      # anything that cares can tell "confirmed healthy" from "has not looked yet".
+      extra="${extra},\"detector_ok\":true,\"detector_init\":true"
     else
       extra="${extra},\"detector_ok\":true"
     fi
@@ -347,7 +378,7 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
   local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
   # While recording is DOWN, surface WHEN it went down so the app can show the outage length live.
-  [ "$1" = 0 ] && [ "${DOWN_SINCE:-0}" -gt 0 ] && extra="${extra},\"down_since\":${DOWN_SINCE}"
+  [ "$1" = 0 ] && [ "${ACC_rec_SINCE:-0}" -gt 0 ] && extra="${extra},\"down_since\":${ACC_rec_SINCE}"
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
@@ -425,16 +456,35 @@ profile_motion(){ # $1=concat_list  $2=offset  $3=dur  $4=crop(w:h:x:y or empty)
 # (AJCloud/Wansview) exposes no HTTP/ONVIF reboot (all 404) — reboot goes over the proprietary P2P
 # channel the FAMVIVA app uses. Capture that once (PCAPdroid) and drop the command in below; until
 # then this raises a distinct, actionable alert so the outage is noticed in minutes, not hours.
+# Is the camera answering at all? Tries up to $1 pings and succeeds on the FIRST reply, so a healthy
+# camera costs one packet and only a genuinely silent one pays the full budget.
+cam_pings(){ # $1 = attempts
+  local i=0
+  while [ "$i" -lt "${1:-3}" ]; do
+    ping -c1 -W2 "$CAM_HOST" >/dev/null 2>&1 && return 0
+    i=$((i+1))
+  done
+  return 1
+}
+
 reboot_camera(){ # $1 = seconds we've been failing continuously
   local downfor="$1"
   local since; since=$(( $(date +%s) - downfor ))
-  if ! ping -c1 -W2 "$CAM_HOST" >/dev/null 2>&1; then
-    log "🔌 camera $CAM_HOST unreachable (${downfor}s no ping) — power/network, not a wedge"
+  # Decide on SEVERAL pings, not one. This split drives the whole recovery story -- "wedged" means
+  # "power-cycle me", "unreachable" means "nothing local can help" -- and a single -c1 dropped packet
+  # on a -71 dBm link silently flips the verdict to the non-actionable one. Seen 2026-08-26: the
+  # camera answered 12/12 pings from a shell while this function had just called it unreachable.
+  if ! cam_pings 5; then
+    log "🔌 camera $CAM_HOST unreachable (${downfor}s, no reply to 5 pings) — power/network, not a wedge"
     log_event recording unreachable "no ping ${downfor}s"
     return 0
   fi
   log "🩺 camera $CAM_HOST WEDGED (${downfor}s: pings but RTSP refuses both channels) — REBOOT REQUIRED"
-  log_event recording wedged "rtsp dead ${downfor}s, host up"
+  # Once per TRANSITION into wedged, not once per retry: the classifier is re-evaluated on a slow
+  # cadence for as long as the camera stays stuck, and events.jsonl is a small, trimmed budget that a
+  # repeating alert would burn (2026-08-26: 1475 lines in 4.5h left only ~4h of history).
+  local prev; read -r prev _ < "$WEDGE_STATE" 2>/dev/null || prev=0
+  [ "${prev:-0}" = 1 ] || log_event recording wedged "rtsp dead ${downfor}s, host up"
   # Publish it for the keeper -> status.json -> app. Before this, the classifier's verdict lived ONLY
   # in the local log: on 2026-08-12 it printed "REBOOT REQUIRED" 68 times over ~11h and nothing that
   # could reach the user ever learned about it.
@@ -456,7 +506,15 @@ reboot_camera(){ # $1 = seconds we've been failing continuously
 # motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
   local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0 d1h="" d1hn=0
-  local fpid sustained newest produced firstfail=0 last_reboot=0
+  local fpid sustained newest produced firstfail=0 last_reboot=0 segst segsince
+  # Inherit the failing-since watermark. WEDGE_AFTER_SECS (360s) is LONGER than the watchdog's restart
+  # cadence during an incident (~368s), so starting this at 0 every time meant the wedge classifier
+  # restarted its clock just before it would have fired -- for 10 hours straight on 2026-08-26. The
+  # timer has to outlive the process the watchdog kills, or it can never reach its own threshold.
+  read -r segst segsince firstfail < "$SEG_STATE" 2>/dev/null || true
+  firstfail="${firstfail:-0}"
+  case "$firstfail" in ''|*[!0-9]*) firstfail=0;; esac
+  [ "$firstfail" != 0 ] && log "⏱ segmenter resuming wedge timer: $(( $(date +%s) - firstfail ))s without a segment"
   last_2k=$(date +%s)
   while true; do
     now=$(date +%s)
@@ -484,7 +542,13 @@ segmenter_loop(){
     sustained=0
     while kill -0 "$fpid" 2>/dev/null; do
       sleep 5
-      if [ "$sustained" = 0 ] && [ "$(( $(date +%s) - t0 ))" -ge "$SUSTAINED_2K_SECS" ]; then
+      # "Sustained" must mean PRODUCING, not merely still-connected. A session that holds the socket
+      # open while the camera sends nothing outlives any duration threshold, and this branch both
+      # publishes the recording mode and clears the wedge verdict -- so scoring it on elapsed time
+      # alone lets a wedged camera keep declaring itself healthy. Same trap as the 2026-08-12
+      # detector bug (health measured by duration, so every failure counted as healthy).
+      if [ "$sustained" = 0 ] && [ "$(( $(date +%s) - t0 ))" -ge "$SUSTAINED_2K_SECS" ] \
+         && [ -n "$(find "$RING_DIR" -name 'seg_*.mp4' -newermt "@$t0" -print -quit 2>/dev/null)" ]; then
         sustained=1; flaps=""; flapn=0
         d1h=$(printf '%s' "$d1h" | awk -v n="$(date +%s)" 'NF && (n-$1)<=3600'); d1hn=$(printf '%s' "$d1h" | grep -c .)
         printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
@@ -492,7 +556,12 @@ segmenter_loop(){
         # post-run clear only runs when a run ENDS, and a healthy run never does — so a camera that
         # came back stayed flagged "wedged, power-cycle me" in the app for as long as it stayed
         # healthy. (Seen live 2026-08-12 right after the power-cycle fixed the camera.)
+        # Publish capture health MID-RUN for the same reason the mode is published here: a healthy 2K
+        # run never ends, so a post-run-only write would leave .seg_state stuck on the DOWN this
+        # incident began with, and the segmenter lane would then report a dead capture forever after
+        # it recovered. (Exactly the shape of the 2026-07-16 bug where the app said 360p for 3h.)
         firstfail=0; printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true
+        printf 'UP %s 0\n' "$(date +%s)" > "$SEG_STATE" 2>/dev/null || true
         [ "$probe" = 1 ] && log "✅ 2K recovered; recording in 2K again"   # a sustained probe -> stay on 2K
       fi
     done
@@ -512,8 +581,10 @@ segmenter_loop(){
     if [ "$produced" = 1 ]; then
       firstfail=0
       printf '0 0\n' > "$WEDGE_STATE" 2>/dev/null || true    # a segment landed => not wedged (any more)
+      printf 'UP %s 0\n' "$now" > "$SEG_STATE" 2>/dev/null || true
     else
       [ "$firstfail" = 0 ] && firstfail="$now"
+      printf 'DOWN %s %s\n' "$firstfail" "$firstfail" > "$SEG_STATE" 2>/dev/null || true
       if [ "$((now - firstfail))" -ge "$WEDGE_AFTER_SECS" ] && [ "$((now - last_reboot))" -ge "$REBOOT_EVERY_SECS" ]; then
         reboot_camera "$((now - firstfail))"; last_reboot="$now"
       fi
@@ -544,7 +615,15 @@ segmenter_loop(){
     # mode (2K/SUB) + how many times the 2K flapped in the last hour, so a silent drop to 360p (or a
     # 2K that keeps failing) is visible instead of unnoticed.
     d1h=$(printf '%s' "$d1h" | awk -v n="$now" 'NF && (n-$1)<=3600'); d1hn=$(printf '%s' "$d1h" | grep -c .)
-    printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
+    # Only claim a quality when we actually captured at that quality. Publishing "$mode" after a run
+    # that produced NOTHING is what fed the app its phantom "recording in 2K" spans: the keeper reads
+    # this file, sees 2K where it previously saw nothing, and emits `recording restored`. A failed run
+    # has no quality to report, so it reports NONE and the keeper draws a gap instead of a recovery.
+    if [ "$produced" = 1 ]; then
+      printf '%s %s\n' "$mode" "$d1hn" > "$REC_STATE" 2>/dev/null || true
+    else
+      printf 'NONE %s\n' "$d1hn" > "$REC_STATE" 2>/dev/null || true
+    fi
     # Staggered backoff so we don't hammer the camera while it's down (gives it room to recover).
     if [ "$sfails" -le 1 ]; then delay=5; else delay=$((sfails*8)); [ "$delay" -gt "$RETRY_MAX" ] && delay="$RETRY_MAX"; fi
     # Wedged camera: the 2K<->SUB fallback resets sfails on every switch, so the backoff kept
@@ -775,29 +854,122 @@ make_thumb(){ # $1=final mp4  $2=duration s
 # keeper is its ONLY writer, so no concurrency) so a watchdog restart doesn't lose the morning's tally,
 # and rolls it up into $DAILY_HEALTH — one JSON line per cam per LOCAL day — which the app reads for
 # 30-day / multi-month horizons WITHOUT depending on events.jsonl retention (that log gets trimmed).
-# Every field is guarded (${x:-0}); a missing/empty/short accumulator just starts fresh (fail-open).
-# Accumulator fields (in order): date day_start rec_down_s rec_outages rec_worst_s rec_sub_s
-#   det_drops seg_drops sync_errors ev_ts sync_err_ts last_tick
+# Every field is guarded; a missing/empty/unparsable accumulator just starts fresh (fail-open).
+#
+# Format v2 is `key=value` pairs on one line, NOT the old positional list -- four services x five
+# counters each is far too many slots to keep in a fixed order safely, and key=value lets a field be
+# added without a migration (unknown keys are ignored, absent keys default to 0).
+#
+# The counters are per service (rec, det, seg, sync) and LEVEL-triggered: every tick adds its real
+# elapsed seconds to <svc>_up or <svc>_down. This is the central lesson of the 2026-08-26 incident.
+# The old accounting was EDGE-triggered -- an outage was only ever credited at the moment it closed,
+# from an in-RAM `DOWN_SINCE` -- and the watchdog restarted this process during every single outage,
+# so not one of them ever closed: daily_health reported rec_down_s=0, rec_outages=0 on a day with ~43
+# recording outages and 10h of no footage at all. Meanwhile rec_sub_s, the ONE counter that was
+# already level-triggered and persisted, came out perfectly correct. That contrast is the design:
+# accrue what you observe, tick by tick, and persist the open-outage watermark so a kill -9 costs at
+# most ACC_SAVE_SECS of accrued seconds instead of the whole incident -- and costs the outage COUNT
+# and WORST nothing at all, since the watermark is written the moment a service transitions and the
+# duration is recomputed from it when the outage finally closes.
+#
+# `<svc>_since` is that watermark (0 = up). It is saved the moment a service transitions, so outage
+# COUNT and WORST survive a restart too, not just the seconds.
+#
+# Unknown (INIT) is a real third state and is deliberately credited to NEITHER up nor down, so
+# uptime% = up/(up+down) never counts "we had not looked yet" as either health or failure.
+# `wedge` rides the same machinery as the four services, with "down" meaning "the camera is
+# classified WEDGED". It is not a service, but it is the condition that costs the most footage and
+# the only one whose fix is physical (a power-cycle), so how OFTEN it happens and how LONG it lasts
+# is the number that decides whether a smart plug is worth buying. Until now it was not counted
+# anywhere at all -- the 2026-08-26 wedge lasted 10h and left no durable trace of having happened.
+ACC_SVCS="rec det seg sync wedge"
+
 acc_reset(){ # $1=date(YYYYMMDD, local)  $2=day_start(epoch)
   ACC_DATE="$1"; ACC_DAY_START="$2"
-  ACC_DOWN_S=0; ACC_OUTAGES=0; ACC_WORST_S=0; ACC_SUB_S=0
-  ACC_DET=0; ACC_SEG=0; ACC_SYNCERR=0
+  local p
+  for p in $ACC_SVCS; do
+    eval "ACC_${p}_UP=0; ACC_${p}_DOWN=0; ACC_${p}_OUT=0; ACC_${p}_WORST=0; ACC_${p}_SINCE=0"
+  done
+  ACC_SUB_S=0; ACC_DET=0; ACC_SEG=0; ACC_SYNCERR=0
   ACC_EV_TS=$(date +%s); ACC_SYNCERR_TS=0; ACC_LAST_TICK="$2"
 }
 
 acc_save(){ # atomic tmp+mv, like the other state files
-  printf '%s %s %s %s %s %s %s %s %s %s %s %s\n' \
-    "$ACC_DATE" "$ACC_DAY_START" "$ACC_DOWN_S" "$ACC_OUTAGES" "$ACC_WORST_S" "$ACC_SUB_S" \
-    "$ACC_DET" "$ACC_SEG" "$ACC_SYNCERR" "$ACC_EV_TS" "$ACC_SYNCERR_TS" "$ACC_LAST_TICK" \
-    > "$HEALTH_ACC.tmp" 2>/dev/null && mv -f "$HEALTH_ACC.tmp" "$HEALTH_ACC" 2>/dev/null || true
+  local p out
+  out="v=2 date=$ACC_DATE day_start=$ACC_DAY_START sub_s=$ACC_SUB_S"
+  out="$out det_drops=$ACC_DET seg_drops=$ACC_SEG sync_errors=$ACC_SYNCERR"
+  out="$out ev_ts=$ACC_EV_TS syncerr_ts=$ACC_SYNCERR_TS last_tick=$ACC_LAST_TICK"
+  for p in $ACC_SVCS; do
+    eval "out=\"\$out ${p}_up=\$ACC_${p}_UP ${p}_down=\$ACC_${p}_DOWN ${p}_out=\$ACC_${p}_OUT ${p}_worst=\$ACC_${p}_WORST ${p}_since=\$ACC_${p}_SINCE\""
+  done
+  printf '%s\n' "$out" > "$HEALTH_ACC.tmp" 2>/dev/null && mv -f "$HEALTH_ACC.tmp" "$HEALTH_ACC" 2>/dev/null || true
+}
+
+# Worst outage for a service, INCLUDING one that is still open. Without this an ongoing outage reads
+# as "worst: 0s" for its whole duration -- i.e. the dashboard is least informative exactly while the
+# incident it is describing is still happening.
+svc_worst(){ # $1=prefix
+  local w sc o now cap; now=$(date +%s)
+  eval "w=\${ACC_$1_WORST:-0}; sc=\${ACC_$1_SINCE:-0}"
+  if [ "${sc:-0}" -gt 0 ]; then
+    o=$(( now - sc ))
+    # Clamp to the day so far. An outage carried over midnight has its watermark re-based to the day
+    # start, so nothing legitimate can exceed this -- while a watermark corrupted by a clock jump or a
+    # half-written accumulator otherwise publishes a nonsense duration straight to the app.
+    cap=$(( now - ${ACC_DAY_START:-$now} )); [ "$cap" -lt 0 ] && cap=0
+    [ "$o" -gt "$cap" ] && o="$cap"
+    [ "$o" -lt 0 ] && o=0
+    [ "$o" -gt "${w:-0}" ] && w="$o"
+  fi
+  printf '%s' "${w:-0}"
 }
 
 daily_line(){ # $1=date  $2=reference_epoch (now for the live line, last_tick/rollover for a finalized one)  $3=partial(true/false)
   local d="$1" ref="$2" partial="$3" day_s
   day_s=$(( ref - ACC_DAY_START )); [ "$day_s" -lt 0 ] && day_s=0
-  printf '{"date":"%s","cam":"%s","day_s":%d,"rec_down_s":%d,"rec_outages":%d,"rec_worst_s":%d,"rec_sub_s":%d,"det_drops":%d,"seg_drops":%d,"sync_errors":%d,"partial":%s}' \
-    "$d" "$CAM_LABEL" "$day_s" "$ACC_DOWN_S" "$ACC_OUTAGES" "$ACC_WORST_S" "$ACC_SUB_S" \
-    "$ACC_DET" "$ACC_SEG" "$ACC_SYNCERR" "$partial"
+  # rec_down_s / rec_outages / rec_worst_s / rec_sub_s / det_drops / seg_drops / sync_errors keep their
+  # original names and meaning so an app build that predates this change still parses the line.
+  printf '{"date":"%s","cam":"%s","day_s":%d' "$d" "$CAM_LABEL" "$day_s"
+  printf ',"rec_down_s":%d,"rec_outages":%d,"rec_worst_s":%d,"rec_sub_s":%d' \
+    "$ACC_rec_DOWN" "$ACC_rec_OUT" "$(svc_worst rec)" "$ACC_SUB_S"
+  printf ',"det_drops":%d,"seg_drops":%d,"sync_errors":%d' "$ACC_DET" "$ACC_SEG" "$ACC_SYNCERR"
+  # Observed up/down seconds per service. up+down is the OBSERVED window, which is what uptime% must
+  # divide by: day_s also contains time the NVR was off, and charging that to a service turns a dead
+  # phone into a "recording outage" (or, worse, hides one).
+  printf ',"rec_up_s":%d,"det_up_s":%d,"det_down_s":%d,"det_outages":%d,"det_worst_s":%d' \
+    "$ACC_rec_UP" "$ACC_det_UP" "$ACC_det_DOWN" "$ACC_det_OUT" "$(svc_worst det)"
+  printf ',"seg_up_s":%d,"seg_down_s":%d,"seg_outages":%d,"seg_worst_s":%d' \
+    "$ACC_seg_UP" "$ACC_seg_DOWN" "$ACC_seg_OUT" "$(svc_worst seg)"
+  printf ',"sync_up_s":%d,"sync_down_s":%d,"sync_outages":%d,"sync_worst_s":%d' \
+    "$ACC_sync_UP" "$ACC_sync_DOWN" "$ACC_sync_OUT" "$(svc_worst sync)"
+  # Camera-wedge KPI: episodes, seconds spent wedged, and the longest single one.
+  printf ',"wedge_episodes":%d,"wedge_s":%d,"wedge_worst_s":%d,"wedge_up_s":%d' \
+    "$ACC_wedge_OUT" "$ACC_wedge_DOWN" "$(svc_worst wedge)" "$ACC_wedge_UP"
+  printf ',"partial":%s}' "$partial"
+}
+
+# Fold ONE observation of a service's state into today's accumulator.
+acc_tick(){ # $1=prefix  $2=state (1 up | 0 down | -1 unknown)  $3=elapsed seconds  $4=now
+  local pfx="$1" st="$2" d="$3" now="$4" sc o
+  case "$st" in
+    1)
+      eval "ACC_${pfx}_UP=\$(( \${ACC_${pfx}_UP:-0} + d ))"
+      eval "sc=\${ACC_${pfx}_SINCE:-0}"
+      if [ "${sc:-0}" -gt 0 ]; then                       # outage closed: bank count + worst
+        o=$(( now - sc )); [ "$o" -lt 0 ] && o=0
+        eval "ACC_${pfx}_OUT=\$(( \${ACC_${pfx}_OUT:-0} + 1 ))"
+        eval "[ \"\$o\" -gt \"\${ACC_${pfx}_WORST:-0}\" ] && ACC_${pfx}_WORST=\$o" || true
+        eval "ACC_${pfx}_SINCE=0"
+        acc_save                                          # edges are rare and precious: persist now
+      fi
+      ;;
+    0)
+      eval "ACC_${pfx}_DOWN=\$(( \${ACC_${pfx}_DOWN:-0} + d ))"
+      eval "sc=\${ACC_${pfx}_SINCE:-0}"
+      if [ "${sc:-0}" -eq 0 ]; then eval "ACC_${pfx}_SINCE=$now"; acc_save; fi
+      ;;
+    *) : ;;   # unknown: neither up nor down (see the note on INIT above)
+  esac
 }
 
 # Upsert a (date,cam) line into $DAILY_HEALTH: drop any existing line for the SAME date+cam (so today's
@@ -856,27 +1028,54 @@ fold_sync_errors(){
 
 # Startup: resume today's accumulator, or (if the persisted one is from an older day) finalize that
 # day into $DAILY_HEALTH (partial=false, coverage up to its last tick) and start fresh for today.
+# Roll into a new local day WITHOUT closing an outage that is still open: a service that is down at
+# midnight stays down, with its watermark re-based to the new day start so each day is charged only
+# its own seconds. Resetting the watermark to 0 would silently "close" the outage, and it would then
+# be counted in neither day -- the same way a restart used to erase one.
+acc_carry(){ # $1=new date  $2=new day_start
+  local p open=""
+  for p in $ACC_SVCS; do
+    eval "[ \"\${ACC_${p}_SINCE:-0}\" -gt 0 ]" && open="$open $p" || true
+  done
+  acc_reset "$1" "$2"
+  for p in $open; do eval "ACC_${p}_SINCE=$2"; done
+}
+
 acc_load(){
-  local dstr now2
+  local dstr now2 tok k v tail ver=0
   dstr=$(date +%Y%m%d); now2=$(date +%s)
-  ACC_DATE=""
+  acc_reset "$dstr" "$now2"          # defaults first, so any key we cannot read simply stays 0
   if [ -r "$HEALTH_ACC" ]; then
-    read -r ACC_DATE ACC_DAY_START ACC_DOWN_S ACC_OUTAGES ACC_WORST_S ACC_SUB_S \
-            ACC_DET ACC_SEG ACC_SYNCERR ACC_EV_TS ACC_SYNCERR_TS ACC_LAST_TICK \
-            < "$HEALTH_ACC" 2>/dev/null || ACC_DATE=""
+    for tok in $(cat "$HEALTH_ACC" 2>/dev/null); do
+      k="${tok%%=*}"; v="${tok#*=}"
+      [ "$k" = "$tok" ] && continue                      # not key=value => legacy v1 line, ignore it
+      case "$v" in ''|*[!0-9]*) continue;; esac          # every value we persist is a non-negative int
+      case "$k" in
+        v)           ver="$v" ;;
+        date)        ACC_DATE="$v" ;;
+        day_start)   ACC_DAY_START="$v" ;;
+        sub_s)       ACC_SUB_S="$v" ;;
+        det_drops)   ACC_DET="$v" ;;
+        seg_drops)   ACC_SEG="$v" ;;
+        sync_errors) ACC_SYNCERR="$v" ;;
+        ev_ts)       ACC_EV_TS="$v" ;;
+        syncerr_ts)  ACC_SYNCERR_TS="$v" ;;
+        last_tick)   ACC_LAST_TICK="$v" ;;
+        *_up|*_down|*_out|*_worst|*_since)
+          tail=$(printf '%s' "${k##*_}" | tr 'a-z' 'A-Z')
+          eval "ACC_${k%_*}_${tail}=$v" ;;
+      esac
+    done
   fi
-  if [ -z "${ACC_DATE:-}" ]; then
-    acc_reset "$dstr" "$now2"; acc_save; return
-  fi
-  # Guard every field so a short/corrupt line degrades to sane values instead of unbound vars.
-  ACC_DAY_START="${ACC_DAY_START:-$now2}"; ACC_DOWN_S="${ACC_DOWN_S:-0}"; ACC_OUTAGES="${ACC_OUTAGES:-0}"
-  ACC_WORST_S="${ACC_WORST_S:-0}"; ACC_SUB_S="${ACC_SUB_S:-0}"; ACC_DET="${ACC_DET:-0}"; ACC_SEG="${ACC_SEG:-0}"
-  ACC_SYNCERR="${ACC_SYNCERR:-0}"; ACC_EV_TS="${ACC_EV_TS:-$now2}"; ACC_SYNCERR_TS="${ACC_SYNCERR_TS:-0}"
-  ACC_LAST_TICK="${ACC_LAST_TICK:-$ACC_DAY_START}"
+  # No v= key at all: either no accumulator yet or a v1 one. Today's partial tallies are lost once,
+  # which is a fair price for never mis-reading a positional line as a keyed one.
+  [ "$ver" = 0 ] && { acc_reset "$dstr" "$now2"; acc_save; return; }
+  ACC_DAY_START="${ACC_DAY_START:-$now2}"; ACC_LAST_TICK="${ACC_LAST_TICK:-$ACC_DAY_START}"
   if [ "$ACC_DATE" != "$dstr" ]; then
     daily_upsert "$(daily_line "$ACC_DATE" "$ACC_LAST_TICK" false)"
-    acc_reset "$dstr" "$now2"; acc_save
+    acc_carry "$dstr" "$now2"
   fi
+  acc_save
 }
 
 # Local day changed: finalize the day that just ended (partial=false) and open today's line.
@@ -884,16 +1083,75 @@ daily_rollover(){ # $1=new date(YYYYMMDD)
   local now2; now2=$(date +%s)
   scan_drops; fold_sync_errors
   daily_upsert "$(daily_line "$ACC_DATE" "$now2" false)"
-  acc_reset "$1" "$now2"; acc_save
+  acc_carry "$1" "$now2"; acc_save
   daily_upsert "$(daily_line "$ACC_DATE" "$now2" true)"
+}
+
+# --- Per-service state readers: "1" = up, "0" = down, "-1" = not yet known ---------------------
+# One observation each, for acc_tick. They read the SAME files the live status is built from, so the
+# daily uptime numbers and the app's live badges cannot drift apart. INIT is reported honestly as
+# unknown rather than rounded up to healthy -- rounding it up is precisely how a restart used to
+# manufacture a clean bill of health.
+svc_state_det(){
+  local st
+  read -r st _ < "$DET_STATE" 2>/dev/null || { printf -- '-1'; return; }
+  case "${st:-}" in OK) printf '1' ;; DOWN) printf '0' ;; *) printf -- '-1' ;; esac
+}
+
+# Wedged is reported INVERTED into the accumulator: "down" = wedged, so wedge_episodes is a count of
+# wedges and wedge_s is time spent stuck. Reusing the outage machinery means the count survives a
+# restart for free -- which matters more here than anywhere else, since the restart cadence during a
+# wedge is exactly what used to erase every trace of it.
+svc_state_wedge(){
+  local wf
+  read -r wf _ < "$WEDGE_STATE" 2>/dev/null || { printf -- '-1'; return; }
+  case "${wf:-}" in 1) printf '0' ;; 0) printf '1' ;; *) printf -- '-1' ;; esac
+}
+
+svc_state_seg(){
+  local st
+  read -r st _ < "$SEG_STATE" 2>/dev/null || { printf -- '-1'; return; }
+  case "${st:-}" in UP) printf '1' ;; DOWN) printf '0' ;; *) printf -- '-1' ;; esac
+}
+
+# Sync is up while cloud-sync's fast lane is still completing. That lane runs every ~60s, so a
+# last_fast_ok older than SYNC_STALE_SECS means uploads have actually stopped -- a state the app
+# could previously only infer from a COUNT of transient errors, which says nothing about how long
+# footage sat unuploaded. (The 2026-08-14 "Drive llena" outage was exactly this: uploads stopped for
+# hours and the only visible signal was an error tally.)
+svc_state_sync(){
+  local ts now2
+  [ -r "$SYNC_STATUS_FILE" ] || { printf -- '-1'; return; }
+  ts=$(grep -o '"last_fast_ok"[^,}]*' "$SYNC_STATUS_FILE" 2>/dev/null | grep -o '[0-9]\+' | head -1)
+  [ -n "${ts:-}" ] || { printf -- '-1'; return; }
+  now2=$(date +%s)
+  [ "$(( now2 - ts ))" -le "$SYNC_STALE_SECS" ] && printf '1' || printf '0'
 }
 
 keeper_loop(){
   local now newest newest_start es el clip_start clip_end ss
   local rec_state="" last_hb=0 started rec_ok mt age rec_mode_seen="" cur_mode last_maint=0 det_seen="" cur_det wedge_seen="" cur_wedge
-  local last_daily=0 last_wifi=0 nd d _od
+  local last_daily=0 last_wifi=0 last_acc=0 nd d _od
+  local st_det st_seg st_sync seg_seen="" sync_seen="" qual_published=0
+  # The quality the app was last TOLD about, inherited from disk. `degraded` and `restored` have to
+  # balance across restarts or the app draws 360p forever (seen 2026-08-17: 9h of phantom "degraded"),
+  # and the old fix for that -- emitting `restored` unconditionally at startup -- became its mirror
+  # image on 2026-08-26, announcing a 2K recovery every six minutes from a camera serving nothing.
+  # Persisting what was actually published is what lets both events stay evidence-based.
+  read -r rec_mode_seen _ < "$QUAL_STATE" 2>/dev/null || rec_mode_seen=""
+  case "${rec_mode_seen:-}" in 2K|SUB) : ;; *) rec_mode_seen="" ;; esac
+  # Whether each lane was mid-outage when we last ticked is already persisted in the accumulator, so
+  # the down/up pairing the app relies on survives a restart without any extra state file. An empty
+  # value means "no opinion yet" and suppresses the first event, so a genuine cold boot stays quiet.
+  inherit_seen(){ # $1=prefix  $2=down label  -> echoes the label or ""
+    local sc; eval "sc=\${ACC_$1_SINCE:-0}"
+    [ "${sc:-0}" -gt 0 ] && printf '%s' "$2" || printf ''
+  }
   started=$(date +%s)
   acc_load                                     # resume today's accumulator or finalize a stale day + start fresh
+  det_seen=$(inherit_seen det DOWN)
+  seg_seen=$(inherit_seen seg 0)
+  sync_seen=$(inherit_seen sync 0)
   scan_drops; fold_sync_errors; acc_save
   daily_upsert "$(daily_line "$ACC_DATE" "$(date +%s)" true)"   # publish today's partial line promptly on startup
   last_daily=$(date +%s)
@@ -901,85 +1159,143 @@ keeper_loop(){
   while true; do
     sleep 5
     now=$(date +%s)
+    # Tick delta + day rollover FIRST, so every acc_tick below charges the same bounded interval to
+    # the right local day (a rollover mid-tick would otherwise bill yesterday's seconds to today).
+    nd=$(date +%Y%m%d)
+    [ "$nd" != "$ACC_DATE" ] && daily_rollover "$nd"          # local day changed: finalize yesterday, open today
+    d=$(( now - ACC_LAST_TICK )); [ "$d" -lt 0 ] && d=0; [ "$d" -gt 120 ] && d=120   # cap guards device-sleep gaps
+    ACC_LAST_TICK=$now
     newest=$(ls -1t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -n1)
     # --- RECORDING health by segment freshness: was the newest one written recently? ---
     if [ -n "$newest" ]; then
       mt=$(stat -c %Y "$newest" 2>/dev/null || echo 0); age=$((now - mt))
       [ "$age" -lt "$STALE_SECS" ] && rec_ok=1 || rec_ok=0
+    elif [ "${ACC_rec_SINCE:-0}" -gt 0 ]; then
+      # An outage was ALREADY open when this process started, so the ring being empty is the outage
+      # continuing -- not a cold start. This is the single line that ends the phantom "recording"
+      # windows: the grace below is keyed off `started`, which every watchdog restart resets, so each
+      # restart bought a fresh 75s of recording_ok:true. On 2026-08-26 that published "recording in
+      # 2K, all healthy" roughly once every six minutes for ten hours, against an empty ring.
+      rec_ok=0
+    elif [ "$((now - started))" -lt "$STALE_SECS" ]; then
+      rec_ok=-1                                       # genuine cold start, nothing observed yet: unknown, NOT up
     else
-      # no segments: grace at startup; past the grace window = down
-      [ "$((now - started))" -lt "$STALE_SECS" ] && rec_ok=1 || rec_ok=0
+      rec_ok=0
     fi
     if [ "$rec_ok" = 1 ] && [ "$rec_state" != "ok" ]; then
-      # Recovery: if we were tracking an outage, emit the 'up' event with its duration, then clear it.
-      # First healthy tick of a FRESH process: close any 'down' the previous run left open. A restart
-      # (watchdog, boot, kick_blind_detector, or a human) starts with DOWN_SINCE=0, so the recovery
-      # branch below never fired and the down event stayed unpaired forever — the app reconstructs
-      # lanes by pairing down->up, so it kept drawing the outage as still in progress. Seen live
-      # 2026-08-17: recording had been healthy for 9h while the Salud screen showed "0.0% coverage,
-      # worst 6h 0m". This matters MORE now that kick_blind_detector restarts the session during an
-      # incident, which is exactly when the dashboard has to be trustworthy.
-      if [ -z "$rec_state" ] && [ "${DOWN_SINCE:-0}" -eq 0 ]; then
+      # Recovery. `up` is only ever emitted from an observed fresh segment now; the old code also
+      # emitted it on the first tick of a fresh process, which meant the watchdog restart that
+      # happened DURING an outage announced a recovery that had not occurred, and the app (which
+      # pairs down->up to draw the lane) duly closed the red span and drew green.
+      if [ "${ACC_rec_SINCE:-0}" -gt 0 ]; then
+        _od=$((now - ACC_rec_SINCE))
+        log_event recording up "recovered" "$_od"
+      elif [ -z "$rec_state" ]; then
         log_event recording up "started"
       fi
-      if [ "${DOWN_SINCE:-0}" -gt 0 ]; then
-        _od=$((now - DOWN_SINCE))
-        log_event recording up "recovered" "$_od"; DOWN_SINCE=0
-        # Fold the just-closed outage into today's accumulator (down seconds, count, worst single one)
-        # and persist immediately — an outage is a rare, important event worth not losing to a crash.
-        ACC_DOWN_S=$((ACC_DOWN_S + _od)); ACC_OUTAGES=$((ACC_OUTAGES + 1))
-        [ "$_od" -gt "$ACC_WORST_S" ] && ACC_WORST_S="$_od"
-        acc_save
-      fi
+      acc_tick rec 1 "$d" "$now"                      # closes the outage in the accumulator (count + worst)
       write_status 1; rec_state=ok; last_hb=$now; [ -n "$newest" ] && log "✅ recording (fresh segments)"
     elif [ "$rec_ok" = 0 ] && [ "$rec_state" != "down" ]; then
-      DOWN_SINCE=$now                                 # mark outage start (before write_status, so down_since is surfaced)
+      acc_tick rec 0 "$d" "$now"                      # opens (and persists) the outage watermark
       write_status 0; rec_state=down; last_hb=$now
       log_event recording down "no fresh segment >${STALE_SECS}s"
       log "⚠️ RECORDING DOWN (no new segment for >${STALE_SECS}s) -> $HEALTH_FILE"
-    elif [ "$((now - last_hb))" -ge "$HEARTBEAT_SECS" ]; then
-      write_status "$rec_ok" 1; last_hb=$now                # heartbeat: refresh updated + battery + history sample
+    else
+      acc_tick rec "$rec_ok" "$d" "$now"              # steady state (or unknown): just accrue seconds
+      if [ "$((now - last_hb))" -ge "$HEARTBEAT_SECS" ]; then
+        [ "$rec_ok" = 1 ] && write_status 1 1 || write_status 0 1
+        last_hb=$now                                  # heartbeat: refresh updated + battery + history sample
+      fi
+    fi
+    # --- The other three lanes, sampled the same way, so every service has real up/down seconds ---
+    # Until now only `recording` had a duration signal at all: detector and segmenter were counted in
+    # reconnect DROPS and sync in error COUNTS, which cannot answer "what fraction of today did this
+    # work?" -- the question the dashboard is actually for. Each reads a persisted state file (or, for
+    # sync, cloud-sync's own status), so all four survive a restart of this process.
+    st_det=$(svc_state_det); st_seg=$(svc_state_seg); st_sync=$(svc_state_sync)
+    acc_tick det "$st_det" "$d" "$now"
+    acc_tick seg "$st_seg" "$d" "$now"
+    acc_tick sync "$st_sync" "$d" "$now"
+    acc_tick wedge "$(svc_state_wedge)" "$d" "$now"
+    # Segmenter and sync now emit paired down/up events like recording does, so the app can draw them
+    # as spans with a real duration instead of a scatter of drop/error dots. Only genuine transitions
+    # are logged (never the unknown state), which keeps the cost to events.jsonl at ~2 lines per
+    # incident rather than one per reconnect.
+    # The FIRST definite observation is logged too, not just later changes. Without it a lane that
+    # simply never breaks emits nothing at all, and the app cannot tell "this NVR does not report
+    # that lane" from "that lane was perfectly healthy" -- so it would show a confident 100% built on
+    # no evidence. One line per lane per restart is a cheap price for the lane declaring itself.
+    if [ "$st_seg" != "-1" ] && [ "$st_seg" != "$seg_seen" ]; then
+      if [ "$st_seg" = 0 ]; then log_event segmenter down "capture producing nothing"
+      else log_event segmenter up "capture producing again"; fi
+      seg_seen="$st_seg"
+    fi
+    if [ "$st_sync" != "-1" ] && [ "$st_sync" != "$sync_seen" ]; then
+      if [ "$st_sync" = 0 ]; then log_event sync down "no upload cycle >${SYNC_STALE_SECS}s"
+      else log_event sync up "uploads flowing again"; fi
+      sync_seen="$st_sync"
     fi
     # Recording quality changed (2K <-> SUB)? Push a status update now (don't wait for the heartbeat)
     # so the app learns promptly that we dropped to 360p or recovered the 2K.
+    # NONE (the run captured nothing) and INIT (nothing captured yet) are not qualities and are
+    # deliberately ignored here: a total outage must leave the quality lane alone rather than be
+    # redrawn as a resolution change.
     cur_mode=$(cut -d' ' -f1 "$REC_STATE" 2>/dev/null)
-    if [ -n "$cur_mode" ] && [ "$cur_mode" != "$rec_mode_seen" ]; then
-      if [ -n "$rec_mode_seen" ]; then
-        log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
-        # Also emit a quality event to events.jsonl so the app can reconstruct exact 360p (degraded)
-        # spans. Rare (only on a real transition) so it doesn't flood the log.
-        if [ "$cur_mode" = "SUB" ]; then log_event recording degraded "2K->SUB"
-        elif [ "$cur_mode" = "2K" ]; then log_event recording restored "SUB->2K"
+    case "${cur_mode:-}" in
+      2K|SUB)
+        # Publish on the first definite quality of this process even when it MATCHES the inherited
+        # one. Without that, a restart that changes nothing leaves status.json with no rec_mode at all
+        # until the 20-minute heartbeat, so the app loses its quality badge for the whole gap -- the
+        # inherited value suppresses the write precisely because nothing changed.
+        if [ "$cur_mode" != "$rec_mode_seen" ] || [ "$qual_published" = 0 ]; then
+          # EVENTS only on a real change. Firing them on the first-observation path too would re-emit
+          # `degraded` on every restart that happened during a 360p spell, opening a second span the
+          # app then has to pair -- the mirror of the phantom `restored` this whole lane exists to fix.
+          if [ "$cur_mode" != "$rec_mode_seen" ]; then
+            [ -n "$rec_mode_seen" ] && log "🎚 recording quality: $rec_mode_seen -> $cur_mode"
+            if [ "$cur_mode" = "SUB" ]; then
+              log_event recording degraded "2K->SUB"
+            elif [ "$rec_mode_seen" = "SUB" ]; then
+              # Only when a `degraded` is actually open. On a first-ever 2K there is nothing to
+              # restore, and saying so anyway is what painted the phantom recoveries.
+              log_event recording restored "SUB->2K"
+            fi
+            rec_mode_seen="$cur_mode"
+            printf '%s\n' "$cur_mode" > "$QUAL_STATE" 2>/dev/null || true
+          fi
+          # STATUS on either path, so the app gets its quality badge back promptly after a restart.
+          qual_published=1
+          [ "$rec_ok" = 1 ] && write_status 1 1 || write_status 0 1
+          last_hb=$now
         fi
-      elif [ "$cur_mode" = "2K" ]; then
-        # Same orphan-close as the recording lane above, for the quality lane. A restart while the
-        # previous run had emitted 'degraded' left it unpaired, so the app drew "recording in 360p"
-        # indefinitely — observed 2026-08-17: the lane showed degraded for 9h while status.json said
-        # rec_mode 2K. Sweeping the whole class, not just the instance that was noticed.
-        log_event recording restored "started in 2K"
-      fi
-      rec_mode_seen="$cur_mode"; write_status "$rec_ok" 1; last_hb=$now
-    fi
+        ;;
+    esac
     # Detector up/down? Push status immediately too. This is the transition that had NO path to the
     # user at all: "recording fine, detecting nothing" looked identical to "recording fine, quiet day",
     # and the 20-minute heartbeat would have delayed even that.
+    # INIT is skipped for the same reason it is skipped in the quality lane: "no frames yet" is not a
+    # recovery. The old `elif` here announced `detector restored "started"` on every process start, so
+    # during the 2026-08-26 restart loop the app was told detection had come back roughly 100 times
+    # while the camera served nothing at all.
     cur_det=$(cut -d' ' -f1 "$DET_STATE" 2>/dev/null)
-    if [ -n "$cur_det" ] && [ "$cur_det" != "$det_seen" ]; then
-      if [ -n "$det_seen" ]; then
-        if [ "$cur_det" = "DOWN" ]; then
-          log "⚠️ DETECTOR DOWN — the ring keeps recording but NO clips can be built"
-          log_event detector down "no frames >${DET_DOWN_SECS}s"
-        else
-          log "✅ detector back up — clips will be built again"
-          log_event detector restored "frames again"
+    case "${cur_det:-}" in
+      DOWN|OK)
+        if [ "$cur_det" != "$det_seen" ]; then
+          if [ "$cur_det" = "DOWN" ]; then
+            log "⚠️ DETECTOR DOWN — the ring keeps recording but NO clips can be built"
+            log_event detector down "no frames >${DET_DOWN_SECS}s"
+          elif [ "$det_seen" = "DOWN" ]; then
+            # Only closes a `down` we know is open -- inherited from the persisted accumulator below,
+            # so it still balances across the restart that used to break the pairing.
+            log "✅ detector back up — clips will be built again"
+            log_event detector restored "frames again"
+          fi
+          det_seen="$cur_det"
+          [ "$rec_ok" = 1 ] && write_status 1 1 || write_status 0 1
+          last_hb=$now
         fi
-      elif [ "$cur_det" != "DOWN" ]; then
-        # Third member of the same class: a restart during a detector outage left 'detector down'
-        # unpaired, so the app kept showing detection as dead while it was working.
-        log_event detector restored "started"
-      fi
-      det_seen="$cur_det"; write_status "$rec_ok" 1; last_hb=$now
-    fi
+        ;;
+    esac
     # Wedge verdict changed? Push it too. Without this the flag would sit in .wedge_state until the
     # next 20-minute heartbeat — and the whole point of the wedge classifier is that it fires within
     # ~6 minutes, so the alert must not then wait another 20 to leave the phone.
@@ -990,14 +1306,15 @@ keeper_loop(){
     fi
     # --- Long-horizon daily health rollup: roll over at local midnight, accrue 360p (SUB) seconds, and
     # --- periodically rewrite today's partial line + persist the accumulator (single writer = keeper).
-    nd=$(date +%Y%m%d)
-    if [ "$nd" != "$ACC_DATE" ]; then
-      daily_rollover "$nd"                       # local day changed: finalize yesterday, open today
-    else
-      d=$(( now - ACC_LAST_TICK )); [ "$d" -lt 0 ] && d=0; [ "$d" -gt 120 ] && d=120   # cap guards device-sleep gaps
-      [ "${cur_mode:-2K}" = "SUB" ] && ACC_SUB_S=$(( ACC_SUB_S + d ))
-    fi
-    ACC_LAST_TICK=$now
+    # 360p seconds, accrued once cur_mode is known for this tick. Only a REAL captured quality counts:
+    # NONE/INIT mean nothing was being recorded, and charging those seconds to "degraded" would dress
+    # a total outage up as merely low-resolution footage.
+    [ "${cur_mode:-}" = "SUB" ] && ACC_SUB_S=$(( ACC_SUB_S + d )) || true
+    # Flush the accumulator on its own, faster cadence than the daily line: that line is a whole-file
+    # rewrite plus an upload, while this is one small local write, and the gap between them decides how
+    # much a restart can erase. Three restarts inside five minutes during this deploy banked nothing at
+    # all at the old shared 300s cadence.
+    if [ "$(( now - last_acc ))" -ge "$ACC_SAVE_SECS" ]; then acc_save; last_acc=$now; fi
     if [ "$(( now - last_daily ))" -ge "$DAILY_REFRESH_SECS" ]; then
       scan_drops; fold_sync_errors; acc_save
       daily_upsert "$(daily_line "$ACC_DATE" "$now" true)"; last_daily=$now
@@ -1073,7 +1390,12 @@ while true; do
     while true; do
       if IFS= read -r -t 2 line; then
         saw=1                       # at least one real frame => this run actually detected something
-        [ "$connected" -eq 0 ] && { log "▶ detector connected (${RTSP_DETECT##*/})"; log_event detector up "reconnected"; connected=1; conn_ts=$(date +%s); }
+        # Publish health on the FIRST REAL FRAME, mid-run. The post-run write below only happens when
+        # a run ENDS, and a healthy detector run never does -- so with the startup default no longer
+        # asserting "OK", a detector that simply worked would have stayed INIT forever and never
+        # accrued a second of uptime. Same shape as the segmenter's mid-run publish; a delivered frame
+        # is the evidence, so this stays evidence-based rather than going back to assuming health.
+        [ "$connected" -eq 0 ] && { log "▶ detector connected (${RTSP_DETECT##*/})"; log_event detector up "reconnected"; connected=1; conn_ts=$(date +%s); printf 'OK 0\n' > "$DET_STATE" 2>/dev/null || true; }
         val=${line##*YAVG=}; val=${val%% *}
         if awk "BEGIN{exit !(${val}+0 > $YAVG_TH)}" 2>/dev/null; then over=$((over+1)); else over=0; fi
         if [ "$over" -ge "$DEBOUNCE" ]; then

@@ -29,7 +29,7 @@ OUT_DIR="/sdcard/Movies/Camaras/Camara1"
 ENV
 
 export WATCH_LOG="$SANDBOX/logs/watchdog.log" RING_BASE="$SANDBOX/ring"
-export DET_BLIND_KICK=300 DET_KICK_MAX=3 DET_KICK_BACKOFF=3
+export DET_BLIND_KICK=300 DET_KICK_MAX=3 DET_KICK_BACKOFF=3 DET_RECOVER_SECS=600
 # shellcheck source=../watchdog.sh
 WATCHDOG_LIB=1 . "$SUT" || { echo "FATAL: could not source $SUT"; exit 1; }
 
@@ -58,8 +58,9 @@ cam_env_var(){ case "$2" in RTSP_MAIN) echo "rtsp://u:p@192.168.101.3:554/live/c
 set_det(){ printf '%s %s\n' "$1" "${2:-0}" > "$SANDBOX/ring/cam1/.det_state"; }
 reset_world(){
   KILLED=0; REVIVED=0; EVENTS=""; PING_OK=0; SESSION_ALIVE=1; NOW=1786900000
-  DET_KICKS=(); DET_LAST=()
+  DET_KICKS=(); DET_LAST=(); DET_WELL=()
 }
+le(){ if [ "$3" -le "$2" ]; then ok "$1"; else no "$1" "<= $2" "$3"; fi; }
 kick(){ kick_blind_detector cam1 "$SANDBOX/ring/cam1"; }
 
 # =================================================================================================
@@ -131,11 +132,20 @@ eq "give-up is logged once, not every cycle" "1" "$(printf '%s' "$EVENTS" | tr '
 # =================================================================================================
 describe "guard 4 — recovery closes the episode"
 # =================================================================================================
+# Recovery must HOLD before it closes the episode. Restarting the session makes the fresh process
+# publish a non-DOWN state within seconds, so treating the first healthy reading as success let the
+# 2026-08-26 wedge run a kick -> "recovered" -> kick loop for ten hours at a permanent "attempt 1".
 reset_world; set_det DOWN $((NOW - 600))
 kick; NOW=$((NOW + 950)); kick                # past the 900s wait, so two attempts are used
 eq "two restarts used"                        "2" "$KILLED"
-set_det OK 0; kick                            # detector comes back
-eq "recovery emits a 'recovered' event"       "restart,restart,recovered" "$EVENTS"
+set_det OK 0; kick                            # detector LOOKS healthy...
+eq "a brief healthy blip does not close it"   "restart,restart" "$EVENTS"
+NOW=$((NOW + DET_RECOVER_SECS + 10)); kick    # ...and has now held long enough to mean something
+eq "recovery closes the episode once it holds" "restart,restart,recovered" "$EVENTS"
+
+reset_world; set_det DOWN $((NOW - 600)); kick
+set_det INIT "$NOW"; NOW=$((NOW + DET_RECOVER_SECS + 10)); kick
+eq "INIT is never mistaken for recovery"      "restart" "$EVENTS"
 
 # The reset must restore the whole BUDGET, not merely allow one more try. Asserting "a new episode
 # restarts at least once" is too weak: the backoff alone permits that even with the counter left
@@ -144,7 +154,8 @@ eq "recovery emits a 'recovered' event"       "restart,restart,recovered" "$EVEN
 reset_world; set_det DOWN $((NOW - 600))
 kick; NOW=$((NOW + 950)); kick; NOW=$((NOW + 2750)); kick
 eq "first episode spends its full budget"     "3" "$KILLED"
-set_det OK 0; kick                            # recovery closes the episode
+set_det OK 0; kick                                         # starts the healthy streak...
+NOW=$((NOW + DET_RECOVER_SECS + 10)); kick                 # ...a SUSTAINED recovery closes the episode
 NOW=$((NOW + 100000)); set_det DOWN $((NOW - 600)); KILLED=0
 kick; NOW=$((NOW + 950)); kick; NOW=$((NOW + 2750)); kick
 eq "a NEW episode gets a full budget again"   "3" "$KILLED"
@@ -163,6 +174,26 @@ for _ in $(seq 1 410); do                       # 410 cycles x 120s ≈ 13h40m
 done
 eq "first intervention within ~6 min (was: never)" "360" "$FIRST_KICK"
 eq "total restarts over the whole 13h40m outage"   "3"   "$KILLED"
+
+# =================================================================================================
+describe "the 2026-08-26 restart loop — a wedged camera must not refill the budget"
+# =================================================================================================
+# The camera pinged perfectly (12/12) but served no video on EITHER channel. Every kick brought up a
+# fresh session that published a non-DOWN .det_state within seconds; the old guard 4 read that as
+# recovery and zeroed the counter, so the ladder began again at "attempt 1" — ~100 restarts over 10h.
+# The ceiling and the backoff were both effectively dead code. Worse, that same cadence (~368s) kept
+# resetting the segmenter's 360s wedge timer, so the one classifier that could have said "power-cycle
+# the camera" never finished counting even once.
+reset_world; set_det DOWN $((NOW - 600))
+for _ in $(seq 1 60); do
+  kick                                             # restarts only while the budget allows
+  set_det INIT "$NOW";  NOW=$((NOW + 60));  kick   # fresh session, no frames yet
+  set_det OK 0;         NOW=$((NOW + 60));  kick   # a healthy blip, far shorter than DET_RECOVER_SECS
+  set_det DOWN "$NOW";  NOW=$((NOW + 400))         # blind again, and this time it stays blind
+done
+le "blip 'recovery' cannot refill the budget" "$DET_KICK_MAX" "$KILLED"
+case "$EVENTS" in *giveup*) ok "it still stands down explicitly" ;;
+                  *) no "it still stands down explicitly" "…,giveup" "$EVENTS" ;; esac
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

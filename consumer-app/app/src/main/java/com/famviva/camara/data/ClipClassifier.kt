@@ -40,23 +40,30 @@ class ClipClassifier(context: Context) : Closeable {
     val available: Boolean get() = detector != null
 
     /**
-     * Classify one thumbnail into a [ClipLabel], or null if the classifier is unavailable or errored.
-     * null is fail-open input to [passesLabelGate]; an empty detection set is a positive [ClipLabel.NONE].
+     * Raw COCO class names (score >= [MIN_SCORE]) the detector finds in one frame, or null if the
+     * classifier is unavailable or the frame errored. The shared building block behind both [classify]
+     * (a single thumbnail) and the multi-frame clip path in [ClipFrames], which unions these names
+     * across several frames before summarizing — so a person seen in ANY frame labels the whole clip.
      */
-    fun classify(bitmap: Bitmap): ClipLabel? {
+    fun detectNames(bitmap: Bitmap): List<String>? {
         val d = detector ?: return null
         return runCatching {
             // TensorImage needs ARGB_8888; thumbnails decode to it already, but convert defensively
             // rather than let a stray config throw inside the native detector.
             val argb = if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap
             else bitmap.copy(Bitmap.Config.ARGB_8888, false)
-            val detections = d.detect(TensorImage.fromBitmap(argb))
-            val names = detections.flatMap { it.categories }
+            d.detect(TensorImage.fromBitmap(argb))
+                .flatMap { it.categories }
                 .filter { it.score >= MIN_SCORE }
                 .map { it.label }
-            ClipLabel.summarize(names)
         }.getOrNull()
     }
+
+    /**
+     * Classify one thumbnail into a [ClipLabel], or null if the classifier is unavailable or errored.
+     * null is fail-open input to [passesLabelGate]; an empty detection set is a positive [ClipLabel.NONE].
+     */
+    fun classify(bitmap: Bitmap): ClipLabel? = detectNames(bitmap)?.let { ClipLabel.summarize(it) }
 
     override fun close() {
         runCatching { detector?.close() }

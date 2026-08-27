@@ -266,5 +266,90 @@ eq "wifi.jsonl trimmed to the cap"      "5"     "$(wc -l < "$WIFI_LOG")"
 WIFI_MAX_LINES=2000
 
 # =============================================================================================
+describe "per-service health accounting — the 2026-08-26 lesson"
+# =============================================================================================
+# The old accounting only ever credited an outage at the moment it CLOSED, from an in-RAM watermark.
+# The watchdog restarted the keeper during every outage on 2026-08-26, so none of them ever closed:
+# daily_health reported rec_down_s=0 and rec_outages=0 on a day with ~43 outages and 10h of no
+# footage. These tests pin the two properties that make that impossible to repeat — seconds accrue
+# per tick, and the open-outage watermark is persisted — plus the honest handling of "unknown".
+jf(){ printf '%s' "$2" | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }   # read one int from a JSON line
+
+acc_reset 20260826 1000
+acc_tick rec 1 60 1060
+acc_tick rec 1 60 1120
+eq "up seconds accrue per tick"              "120" "$ACC_rec_UP"
+eq "…and nothing is counted as down"         "0"   "$ACC_rec_DOWN"
+
+acc_tick rec 0 60 1180                       # goes down
+eq "down seconds accrue too"                 "60"  "$ACC_rec_DOWN"
+eq "the outage watermark opens"              "1180" "$ACC_rec_SINCE"
+eq "…and is persisted immediately"           "1180" "$(tr ' ' '\n' < "$HEALTH_ACC" | grep '^rec_since=' | cut -d= -f2)"
+eq "an OPEN outage is not counted yet"       "0"   "$ACC_rec_OUT"
+# An outage still in progress must already report a duration. Reporting "worst: 0s" until it ends
+# makes the dashboard least informative exactly while the incident is happening.
+date(){ if [ "${1:-}" = "+%s" ]; then echo 1300; else command date "$@"; fi; }
+eq "…but its duration is already visible"    "120" "$(svc_worst rec)"
+unset -f date
+
+acc_tick rec 0 60 1240
+acc_tick rec 1 60 1300                       # recovers
+eq "the closed outage is counted once"       "1"   "$ACC_rec_OUT"
+eq "…with its full duration as the worst"    "120" "$ACC_rec_WORST"
+
+# Unknown (INIT) is credited to NEITHER side, so uptime% never counts "we had not looked yet" as
+# either health or failure — the distinction the old boolean could not express at all.
+acc_reset 20260826 1000
+acc_tick det -1 60 1060
+eq "unknown accrues no up seconds"           "0"   "$ACC_det_UP"
+eq "unknown accrues no down seconds"         "0"   "$ACC_det_DOWN"
+
+# THE regression test: a restart mid-outage must not erase it. acc_load reads the persisted line back.
+acc_reset 20260826 1000
+acc_tick rec 0 60 1180                       # outage opens and is saved
+ACC_rec_SINCE=999999; ACC_rec_DOWN=999999    # scribble over RAM to prove the reload is from disk
+acc_load                                     # <- what a watchdog restart does
+eq "a restart mid-outage keeps the watermark" "1180" "$ACC_rec_SINCE"
+eq "…and the seconds already banked"          "60"   "$ACC_rec_DOWN"
+acc_tick rec 1 60 1480                        # the SAME outage now closes, in a different process
+eq "the outage survives the restart"          "1"    "$ACC_rec_OUT"
+eq "…charged its true duration, not zero"     "300"  "$ACC_rec_WORST"
+
+# Every service gets the same treatment; the emitted line carries all four.
+acc_reset 20260826 1000
+acc_tick rec 1 60 1060; acc_tick det 0 60 1060; acc_tick seg 1 60 1060; acc_tick sync 0 60 1060
+LINE=$(daily_line 20260826 1060 true)
+eq "recording up seconds in the line"        "60" "$(jf rec_up_s "$LINE")"
+eq "detector down seconds in the line"       "60" "$(jf det_down_s "$LINE")"
+eq "segmenter up seconds in the line"        "60" "$(jf seg_up_s "$LINE")"
+eq "sync down seconds in the line"           "60" "$(jf sync_down_s "$LINE")"
+eq "legacy rec_down_s still emitted"         "0"  "$(jf rec_down_s "$LINE")"
+
+# The camera-wedge KPI. Inverted on purpose: "down" means wedged, so the outage counter becomes the
+# episode counter and the outage seconds become time-stuck. The 2026-08-26 wedge lasted 10h and left
+# no durable record anywhere that it had even happened, which is why "do we need a smart plug?" had
+# no number behind it.
+acc_reset 20260826 1000
+acc_tick wedge 1 60 1060                     # healthy: not wedged
+eq "a healthy camera banks no wedge time"    "0" "$ACC_wedge_DOWN"
+acc_tick wedge 0 60 1120                     # classified wedged
+acc_tick wedge 0 60 1180
+eq "time spent wedged accrues"               "120" "$ACC_wedge_DOWN"
+eq "an ongoing wedge is not an episode yet"  "0"   "$ACC_wedge_OUT"
+acc_tick wedge 1 60 1240                     # power-cycled / recovered
+eq "the closed wedge counts as one episode"  "1"   "$ACC_wedge_OUT"
+eq "…with its duration as the worst"         "120" "$ACC_wedge_WORST"
+LINE=$(daily_line 20260826 1240 true)
+eq "wedge episodes reach the daily line"     "1"   "$(jf wedge_episodes "$LINE")"
+eq "wedge seconds reach the daily line"      "120" "$(jf wedge_s "$LINE")"
+
+# A day boundary must not silently close an outage that is still open.
+acc_reset 20260826 1000
+acc_tick sync 0 60 1180
+acc_carry 20260827 2000
+eq "an open outage carries into the new day" "2000" "$ACC_sync_SINCE"
+eq "…with the new day's counters reset"      "0"    "$ACC_sync_DOWN"
+
+# =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

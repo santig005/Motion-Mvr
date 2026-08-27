@@ -96,7 +96,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -144,8 +146,11 @@ import com.famviva.camara.data.BlipCluster
 import com.famviva.camara.data.BlipClusterEntry
 import com.famviva.camara.data.BlipEntry
 import com.famviva.camara.data.buildHealthTimeline
+import com.famviva.camara.data.buildHealthTrend
 import com.famviva.camara.data.buildServiceTimeline
 import com.famviva.camara.data.buildDailyTimeline
+import com.famviva.camara.data.buildWedgeStats
+import com.famviva.camara.data.WEDGE_WINDOWS
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.ClipRecord
 import com.famviva.camara.data.ClipState
@@ -160,6 +165,10 @@ import com.famviva.camara.data.ServiceDailyTimeline
 import com.famviva.camara.data.ServiceLane
 import com.famviva.camara.data.ServiceTimeline
 import com.famviva.camara.data.SummaryTone
+import com.famviva.camara.data.TrendBucket
+import com.famviva.camara.data.TrendMetric
+import com.famviva.camara.data.TrendPoint
+import com.famviva.camara.data.TrendSeries
 import com.famviva.camara.data.TimelineSpan
 import com.famviva.camara.data.DayPeriod
 import com.famviva.camara.data.formatDurationSec
@@ -406,6 +415,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
     var quietHours by remember { mutableStateOf(notifyStore.quietHours) }
     var alertLevel by remember { mutableStateOf(notifyStore.minAlertLevel) }
     var peopleOnly by remember { mutableStateOf(notifyStore.peopleOnly) }
+    var detectionFrames by remember { mutableStateOf(notifyStore.detectionFrames) }
 
     val tags = AppCompatDelegate.getApplicationLocales().toLanguageTags()
     val isSpanish = (if (tags.isNotEmpty()) tags else Locale.getDefault().language).startsWith("es")
@@ -418,6 +428,7 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
             quietHours = notifyStore.quietHours
             alertLevel = notifyStore.minAlertLevel
             peopleOnly = notifyStore.peopleOnly
+            detectionFrames = notifyStore.detectionFrames
             expanded = true
         }) {
             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.menu_more))
@@ -522,6 +533,36 @@ private fun HomeOverflowMenu(vm: MainViewModel, nav: NavHostController, onAwayCh
                     Toast.LENGTH_SHORT,
                 ).show()
             }
+            // How many frames the classifier samples per clip. More frames = fewer missed people (a
+            // person present in only part of a clip), at the cost of a small mp4 fetch + N inferences.
+            // 1 = the old single-thumbnail behaviour. Exposed so the trade-off can be tuned on-device.
+            MenuSectionLabel(stringResource(R.string.detect_frames_title))
+            listOf(1, 4, 9, 16).forEach { n ->
+                DropdownMenuItem(
+                    text = { Text(pluralStringResource(R.plurals.detect_frames_option, n, n)) },
+                    onClick = {
+                        expanded = false
+                        if (notifyStore.detectionFrames != n) {
+                            notifyStore.detectionFrames = n
+                            detectionFrames = n
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.detect_frames_toast, n),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    },
+                    leadingIcon = {
+                        if (detectionFrames == n) {
+                            Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        } else {
+                            Spacer(Modifier.size(24.dp))
+                        }
+                    },
+                )
+            }
+            HorizontalDivider()
+
             // One-tap backfill: classify every already-archived thumbnail so the 👤 badge appears on old
             // clips too, not just ones that arrive from now on. Runs in the background, entirely local.
             DropdownMenuItem(
@@ -2862,6 +2903,31 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                 }
             }
 
+            // Camera-wedge KPI: a wedge answers ping but serves no video on any channel and only a
+            // physical power-cycle clears it. This exists to decide whether a smart plug is worth it.
+            item {
+                Spacer(Modifier.height(6.dp))
+                HealthSectionHeader(stringResource(R.string.health_wedge_section))
+            }
+            item {
+                if (!loading) {
+                    WedgeKpiCard(
+                        rawEvents,
+                        daily,
+                        now,
+                        vm.cameraHealth.firstOrNull { it.wedgedSince != null }?.wedgedSince,
+                    )
+                }
+            }
+
+            // Trends. The swimlane above answers "what happened"; this answers "is it getting better
+            // or worse", which is the question that actually follows an incident.
+            item {
+                Spacer(Modifier.height(6.dp))
+                HealthSectionHeader(stringResource(R.string.health_trend_section))
+            }
+            item { if (!loading) HealthTrendSection(daily) }
+
             // Sync pipeline.
             item {
                 Spacer(Modifier.height(6.dp))
@@ -3189,8 +3255,11 @@ private fun isFlapState(state: LaneState): Boolean =
 /** Short lane label (fits the 92dp column). Reuses serviceName() except detector, whose full name
  *  ("Detector de movimiento") is too long here. */
 @Composable
-private fun laneShortName(svc: String): String =
-    if (svc == "detector") stringResource(R.string.health_lane_name_detector) else serviceName(svc)
+private fun laneShortName(svc: String): String = when (svc) {
+    "detector" -> stringResource(R.string.health_lane_name_detector)
+    "wedge" -> stringResource(R.string.health_lane_name_wedge)
+    else -> serviceName(svc)
+}
 
 @Composable
 private fun laneSub(svc: String): String = stringResource(
@@ -3851,7 +3920,7 @@ private fun SummaryRow(s: LaneSummary, is30d: Boolean) {
     val detail: String
     when (s.svc) {
         "recording" -> {
-            stat = "%.1f%%".format(s.coveragePct ?: 100.0)
+            stat = s.coveragePct?.let { "%.1f%%".format(it) } ?: stringResource(R.string.health_stat_nodata)
             detail = when {
                 is30d && s.worstDate != null ->
                     stringResource(R.string.health_sum_worst_day, prettyDate(context, s.worstDate!!), formatDurationSec(context, s.worstOutageSec))
@@ -3860,13 +3929,26 @@ private fun SummaryRow(s: LaneSummary, is30d: Boolean) {
                 else -> stringResource(R.string.health_sum_rec_none)
             }
         }
+        // The capture lanes and sync now lead with an uptime too, and keep their own count as the
+        // caption. Reporting only "128 drops" left the two questions that matter unanswerable: how
+        // long was it actually broken, and is that better or worse than yesterday?
         "detector", "segmenter" -> {
-            stat = s.flapDrops.toString()
-            detail = if (s.flapDrops > 0) stringResource(R.string.health_sum_flap_active) else stringResource(R.string.health_sum_flap_stable)
+            stat = s.uptimePct?.let { "%.1f%%".format(it) } ?: stringResource(R.string.health_stat_nodata)
+            val flap = if (s.flapDrops > 0)
+                stringResource(R.string.health_sum_flap_drops, s.flapDrops)
+            else stringResource(R.string.health_sum_flap_stable)
+            detail = if (s.outageCount > 0)
+                stringResource(R.string.health_sum_svc_outages, s.outageCount, formatDurationSec(context, s.worstOutageSec)) + " · " + flap
+            else flap
         }
         else -> {
-            stat = if (s.syncErrors > 0) s.syncErrors.toString() else stringResource(R.string.health_stat_ok)
-            detail = if (s.syncErrors > 0) stringResource(R.string.health_sum_sync_errors, s.syncErrors) else stringResource(R.string.health_sum_sync_ok)
+            stat = s.uptimePct?.let { "%.1f%%".format(it) } ?: stringResource(R.string.health_stat_nodata)
+            val errs = if (s.syncErrors > 0)
+                stringResource(R.string.health_sum_sync_errors, s.syncErrors)
+            else stringResource(R.string.health_sum_sync_ok)
+            detail = if (s.outageCount > 0)
+                stringResource(R.string.health_sum_svc_outages, s.outageCount, formatDurationSec(context, s.worstOutageSec)) + " · " + errs
+            else errs
         }
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3877,7 +3959,16 @@ private fun SummaryRow(s: LaneSummary, is30d: Boolean) {
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.width(LANE_LABEL_W),
         )
-        Text(stat, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = tone)
+        // An absent number must not wear a verdict. Tone-colouring "no data" made the same missing
+        // value read as alarming on one row and reassuring on the next, purely from the lane's OTHER
+        // metric -- which is exactly the kind of confident-looking nonsense this screen is meant to stop.
+        val noData = if (s.svc == "recording") s.coveragePct == null else s.uptimePct == null
+        Text(
+            stat,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = if (noData) MaterialTheme.colorScheme.onSurfaceVariant else tone,
+        )
         Spacer(Modifier.weight(1f))
         Text(
             detail,
@@ -3886,6 +3977,397 @@ private fun SummaryRow(s: LaneSummary, is30d: Boolean) {
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
         )
     }
+}
+
+/* ======================================== Camera wedges ======================================= */
+
+/**
+ * Camera-wedge KPI: how often has the camera answered ping but served no video on any channel, and
+ * for how long. A wedge only clears on a physical power-cycle, so this exists to answer one question:
+ * is a smart plug worth buying. Never shows a confident zero where the underlying log doesn't reach —
+ * a window with no data reports "—", not 0.
+ */
+@Composable
+private fun WedgeKpiCard(events: List<OutageEvent>, daily: List<DailyHealth>, nowSec: Long, wedgedSince: Long?) {
+    val context = LocalContext.current
+    val stats = remember(events, daily, nowSec, wedgedSince) {
+        buildWedgeStats(events, daily, nowSec, events.minOfOrNull { it.ts }, wedgedSince)
+    }
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            if (stats.wedgedSince != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(10.dp)
+                            .background(TL_CRIT, shape = androidx.compose.foundation.shape.CircleShape),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.health_wedge_now, formatDurationSec(context, nowSec - stats.wedgedSince!!)),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TL_CRIT,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                WEDGE_WINDOWS.forEachIndexed { i, w ->
+                    if (i > 0) Spacer(Modifier.width(18.dp))
+                    val count = stats.counts[w]
+                    val color = when {
+                        count == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        count == 0 -> TL_OK
+                        else -> TL_CRIT
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            stringResource(wedgeWindowLabelRes(w)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            count?.toString() ?: "—",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = color,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                if (stats.episodes30d > 0)
+                    stringResource(
+                        R.string.health_wedge_cost,
+                        stats.episodes30d,
+                        formatDurationSec(context, stats.totalSec30d),
+                        formatDurationSec(context, stats.worstSec30d),
+                    )
+                else if (stats.daysMeasured30d < 30)
+                    stringResource(R.string.health_wedge_none_partial, stats.daysMeasured30d)
+                else stringResource(R.string.health_wedge_none),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (stats.counts.values.any { it == null }) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    stringResource(R.string.health_wedge_partial),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Maps a [WEDGE_WINDOWS] seconds value to its horizon label (shared with the coverage swimlane's
+ *  horizon selector, since the two use the same six windows). */
+private fun wedgeWindowLabelRes(sec: Long): Int = when (sec) {
+    3_600L -> R.string.health_horizon_1h
+    3L * 3_600L -> R.string.health_horizon_3h
+    6L * 3_600L -> R.string.health_horizon_6h
+    86_400L -> R.string.health_horizon_24h
+    7L * 86_400L -> R.string.health_horizon_7d
+    else -> R.string.health_horizon_30d
+}
+
+/* ======================================= Health trends ======================================= */
+
+private val TREND_PLOT_H = 116.dp
+private val TREND_Y_GUTTER = 36.dp
+
+/**
+ * "Is this getting better or worse?" for one service at a time.
+ *
+ * Deliberately ONE metric on ONE axis. Uptime% and failure counts share no scale, and drawing them
+ * on the same plot would invent a correlation the data does not contain; the selector swaps the
+ * series instead of stacking a second y-axis onto it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HealthTrendSection(daily: List<DailyHealth>) {
+    val context = LocalContext.current
+    var svc by rememberSaveable { mutableStateOf("recording") }
+    var metricIdx by rememberSaveable { mutableStateOf(0) }
+    var scaleIdx by rememberSaveable { mutableStateOf(1) }
+    var selected by remember { mutableStateOf<Int?>(null) }
+
+    val metric = if (metricIdx == 0) TrendMetric.UPTIME else TrendMetric.FAILURES
+    val bucket = if (scaleIdx == 2) TrendBucket.WEEK else TrendBucket.DAY
+    val spanDays = when (scaleIdx) { 0 -> 7; 1 -> 30; else -> 84 }
+    val series = remember(daily, svc, metricIdx, scaleIdx) {
+        buildHealthTrend(daily, svc, metric, bucket, spanDays)
+    }
+    // Changing any control invalidates whichever bucket was pinned open.
+    LaunchedEffect(svc, metricIdx, scaleIdx) { selected = null }
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            // One filter row per control, above the plot it scopes.
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                listOf("recording", "detector", "segmenter", "sync", "wedge").forEach { id ->
+                    FilterChip(
+                        selected = svc == id,
+                        onClick = { svc = id },
+                        label = { Text(laneShortName(id)) },
+                        modifier = Modifier.padding(end = 6.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                listOf(R.string.health_trend_metric_uptime, R.string.health_trend_metric_failures)
+                    .forEachIndexed { i, res ->
+                        SegmentedButton(
+                            selected = metricIdx == i,
+                            onClick = { metricIdx = i },
+                            shape = SegmentedButtonDefaults.itemShape(index = i, count = 2),
+                        ) { Text(stringResource(res)) }
+                    }
+            }
+            Spacer(Modifier.height(6.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                listOf(
+                    R.string.health_trend_scale_7d,
+                    R.string.health_trend_scale_30d,
+                    R.string.health_trend_scale_12w,
+                ).forEachIndexed { i, res ->
+                    SegmentedButton(
+                        selected = scaleIdx == i,
+                        onClick = { scaleIdx = i },
+                        shape = SegmentedButtonDefaults.itemShape(index = i, count = 3),
+                    ) { Text(stringResource(res)) }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            if (series.observed.isEmpty()) {
+                // Honest empty state. The capture lanes and sync genuinely have no history before the
+                // NVR started publishing per-service seconds, and inventing 100% for them would be the
+                // same class of lie this whole change exists to remove.
+                Text(
+                    stringResource(R.string.health_trend_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 18.dp),
+                )
+                return@Column
+            }
+
+            TrendHeadline(series)
+            Spacer(Modifier.height(10.dp))
+            TrendChart(series, selected) { selected = it }
+            Spacer(Modifier.height(8.dp))
+            val pick = selected?.let { series.points.getOrNull(it) }
+            if (pick != null) {
+                TrendPointDetail(series, pick)
+            } else {
+                Text(
+                    stringResource(R.string.health_trend_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** Hero figure (latest observed bucket) + the direction of travel. The number IS the headline; the
+ *  plot below is the supporting detail, not the other way round. */
+@Composable
+private fun TrendHeadline(series: TrendSeries) {
+    val last = series.observed.lastOrNull()?.value
+    val delta = series.delta
+    val isUptime = series.metric == TrendMetric.UPTIME
+    // A rise in uptime is good; a rise in failures is bad. Same arrow, opposite meaning, so the
+    // colour is decided by the metric rather than by the sign.
+    val better = delta?.let { if (isUptime) it > 0 else it < 0 }
+    val tone = when {
+        delta == null || kotlin.math.abs(delta) < if (isUptime) 0.05 else 0.5 -> MaterialTheme.colorScheme.onSurfaceVariant
+        better == true -> TL_OK
+        else -> TL_CRIT
+    }
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(
+            last?.let { trendValueText(series, it) } ?: stringResource(R.string.health_stat_nodata),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.width(10.dp))
+        if (delta != null) {
+            val arrow = if (delta > 0) "↑" else if (delta < 0) "↓" else "→"
+            val mag = if (isUptime) "%.1f pp".format(kotlin.math.abs(delta))
+                      else "%.1f".format(kotlin.math.abs(delta))
+            Text(
+                "$arrow $mag",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = tone,
+                modifier = Modifier.padding(bottom = 3.dp),
+            )
+        }
+    }
+    Text(
+        stringResource(R.string.health_trend_caption, series.observed.size),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+private fun trendValueText(series: TrendSeries, v: Double): String =
+    if (series.metric == TrendMetric.UPTIME) "%.1f%%".format(v) else "%.0f".format(v)
+
+/**
+ * The plot. Uptime draws as a line (a band-zoomed y-axis is the only way 99.4% vs 99.9% is legible),
+ * failures as bars from a true zero. Buckets with no data are GAPS in both — never zeros, because
+ * "the NVR was off" and "nothing failed" must not look identical.
+ */
+@Composable
+private fun TrendChart(series: TrendSeries, selected: Int?, onSelect: (Int?) -> Unit) {
+    val ink = MaterialTheme.colorScheme.onSurfaceVariant
+    val grid = MaterialTheme.colorScheme.outlineVariant
+    val mark = MaterialTheme.colorScheme.primary
+    val surface = MaterialTheme.colorScheme.surface
+    val measurer = rememberTextMeasurer()
+    val labelStyle = MaterialTheme.typography.labelSmall.copy(color = ink)
+    val isUptime = series.metric == TrendMetric.UPTIME
+    val values = series.observed.mapNotNull { it.value }
+
+    // Uptime is band-zoomed, not 0-100: at 99.x% a full-height axis is a flat line carrying no
+    // information. The band snaps to one of four fixed floors (never fitted per chart) so two
+    // screenshots stay comparable, and both bounds are printed on the axis so the zoom is disclosed.
+    val lo = if (!isUptime) 0.0 else (values.minOrNull() ?: 100.0).let {
+        when { it >= 99.0 -> 99.0; it >= 95.0 -> 95.0; it >= 90.0 -> 90.0; else -> 0.0 }
+    }
+    val hi = if (isUptime) 100.0 else (values.maxOrNull() ?: 0.0).coerceAtLeast(1.0)
+    val n = series.points.size
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(TREND_PLOT_H + 18.dp)   // plot + the x-axis band, so nothing gets clipped
+            .pointerInput(series) {
+                detectTapGestures { off ->
+                    val gutter = TREND_Y_GUTTER.toPx()
+                    val w = size.width - gutter
+                    if (w <= 0f || n == 0) return@detectTapGestures
+                    val i = (((off.x - gutter) / w) * n).toInt().coerceIn(0, n - 1)
+                    onSelect(if (selected == i) null else i)
+                }
+            },
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val gutter = TREND_Y_GUTTER.toPx()
+            val axisH = 18.dp.toPx()
+            val plotH = size.height - axisH
+            val plotW = size.width - gutter
+            if (plotW <= 0f || plotH <= 0f || n == 0) return@Canvas
+            val span = (hi - lo).takeIf { it > 0.0 } ?: 1.0
+            fun yOf(v: Double) = (plotH * (1.0 - (v - lo) / span)).toFloat().coerceIn(0f, plotH)
+
+            // Recessive solid hairlines — never dashed, which would read as a threshold.
+            for (f in listOf(0.0, 0.5, 1.0)) {
+                val y = (plotH * f).toFloat()
+                drawLine(grid, Offset(gutter, y), Offset(size.width, y), strokeWidth = 1f)
+            }
+            listOf(hi to 0f, lo to plotH).forEach { (v, y) ->
+                val txt = if (isUptime) "%.0f%%".format(v) else "%.0f".format(v)
+                val m = measurer.measure(txt, labelStyle)
+                drawText(m, topLeft = Offset(gutter - m.size.width - 4.dp.toPx(), y - m.size.height / 2f))
+            }
+            // Uptime target, when the band actually contains it.
+            if (isUptime && lo < 99.5) {
+                val y = yOf(99.5)
+                drawLine(TL_WARN.copy(alpha = 0.55f), Offset(gutter, y), Offset(size.width, y), strokeWidth = 1.5f)
+            }
+
+            val slot = plotW / n
+            if (isUptime) {
+                // Line + gaps. A run of consecutive observed buckets becomes one path; a null breaks it.
+                var path: Path? = null
+                series.points.forEachIndexed { i, pt ->
+                    val v = pt.value
+                    if (v == null) { path?.let { drawPath(it, mark, style = Stroke(width = 2.dp.toPx())) }; path = null; return@forEachIndexed }
+                    val x = gutter + slot * i + slot / 2f
+                    val y = yOf(v)
+                    if (path == null) { path = Path().also { it.moveTo(x, y) } } else path!!.lineTo(x, y)
+                }
+                path?.let { drawPath(it, mark, style = Stroke(width = 2.dp.toPx())) }
+                // Markers only when they fit; past that the line carries the shape and the endpoint
+                // plus any selection stay marked, which keeps hit targets honest without a pixel mush.
+                val dense = n > 14
+                series.points.forEachIndexed { i, pt ->
+                    val v = pt.value ?: return@forEachIndexed
+                    val isLast = i == series.points.indexOfLast { it.value != null }
+                    if (dense && !isLast && selected != i) return@forEachIndexed
+                    val x = gutter + slot * i + slot / 2f
+                    val y = yOf(v)
+                    drawCircle(surface, radius = 5.dp.toPx(), center = Offset(x, y))       // 2px surface ring
+                    drawCircle(mark, radius = 4.dp.toPx(), center = Offset(x, y))
+                }
+            } else {
+                val gap = 2.dp.toPx()
+                val bw = (slot - gap).coerceAtLeast(2f)
+                val r = 4.dp.toPx()
+                series.points.forEachIndexed { i, pt ->
+                    val v = pt.value ?: return@forEachIndexed
+                    val x = gutter + slot * i + gap / 2f
+                    val y = yOf(v)
+                    val h = plotH - y
+                    if (h <= 0.5f) return@forEachIndexed
+                    val c = if (selected == i) mark else mark.copy(alpha = 0.85f)
+                    // Rounded data-end anchored to the baseline: a rounded cap at the top, square foot.
+                    if (h > r) {
+                        drawRoundRect(c, Offset(x, y), Size(bw, (2 * r).coerceAtMost(h)),
+                            cornerRadius = CornerRadius(r, r))
+                        drawRect(c, Offset(x, y + r), Size(bw, h - r))
+                    } else {
+                        drawRect(c, Offset(x, y), Size(bw, h))
+                    }
+                }
+            }
+
+            // Selection guide.
+            selected?.let { i ->
+                if (i in 0 until n) {
+                    val x = gutter + slot * i + slot / 2f
+                    drawLine(ink.copy(alpha = 0.45f), Offset(x, 0f), Offset(x, plotH), strokeWidth = 1f)
+                }
+            }
+
+            // X labels: first / middle / last only. One per bucket collides at 30 and 84 buckets.
+            listOf(0, n / 2, n - 1).distinct().forEach { i ->
+                val pt = series.points.getOrNull(i) ?: return@forEach
+                val m = measurer.measure(pt.label, labelStyle)
+                val x = (gutter + slot * i + slot / 2f - m.size.width / 2f)
+                    .coerceIn(gutter, size.width - m.size.width)
+                drawText(m, topLeft = Offset(x, plotH + 3.dp.toPx()))
+            }
+        }
+    }
+}
+
+/** The tapped bucket, spelled out. A tooltip must never be the only way to read a value. */
+@Composable
+private fun TrendPointDetail(series: TrendSeries, pt: TrendPoint) {
+    val context = LocalContext.current
+    val range = if (series.bucket == TrendBucket.WEEK)
+        stringResource(R.string.health_trend_week, prettyDate(context, pt.key))
+    else prettyDate(context, pt.key)
+    val value = pt.value?.let { trendValueText(series, it) } ?: stringResource(R.string.health_trend_nodata_bucket)
+    DetailBody(
+        MaterialTheme.colorScheme.primary,
+        false,
+        "${laneShortName(series.svc)} · $value",
+        range + if (pt.partial) " · " + stringResource(R.string.health_trend_partial) else "",
+    )
 }
 
 /**

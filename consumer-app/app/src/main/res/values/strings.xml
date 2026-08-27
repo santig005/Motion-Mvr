@@ -165,6 +165,12 @@
     <string name="alert_people_only_on_toast">Alerts only when a person is detected. Every clip still shows in the app.</string>
     <string name="alert_people_only_off_toast">People-only off: motion alerts fire for anything that moves.</string>
     <string name="badge_person">Person</string>
+    <string name="detect_frames_title">Frames scanned per clip</string>
+    <plurals name="detect_frames_option">
+        <item quantity="one">%1$d frame</item>
+        <item quantity="other">%1$d frames</item>
+    </plurals>
+    <string name="detect_frames_toast">Scanning %1$d frames per clip</string>
     <string name="label_backfill">🏷️ Label history (people)</string>
     <string name="label_backfill_toast">Classifying the clip history in the background — badges appear as it finishes.</string>
     <string name="backfill_running">🏷️ Labelling people (newest first)…</string>
@@ -312,6 +318,30 @@
     <string name="health_sum_sync_ok">no backlog</string>
     <string name="health_sum_worst_day">worst day: %1$s (%2$s)</string>
     <string name="health_stat_ok">OK</string>
+    <string name="health_stat_nodata">no data</string>
+    <string name="health_sum_flap_drops">%1$d reconnects</string>
+    <string name="health_sum_svc_outages">%1$d outages · worst %2$s</string>
+    <!-- Camera wedges (needs a physical power-cycle) -->
+    <string name="health_wedge_section">Camera wedges</string>
+    <string name="health_wedge_now">Camera wedged for %1$s — needs a power-cycle</string>
+    <string name="health_wedge_cost">%1$d wedges in 30 days · %2$s lost · longest %3$s</string>
+    <string name="health_wedge_none">No wedges recorded in the last 30 days.</string>
+    <string name="health_wedge_none_partial">No wedges yet — but only %1$d of the last 30 days have been measured, so this is not a verdict yet.</string>
+    <string name="health_wedge_partial">Windows shown as — are longer than the event log kept on the NVR; the 7-day and 30-day counts come from the daily rollup and fill in from here on.</string>
+    <string name="health_lane_name_wedge">Wedge</string>
+    <!-- Trends -->
+    <string name="health_trend_section">Trend over time</string>
+    <string name="health_trend_metric_uptime">Uptime</string>
+    <string name="health_trend_metric_failures">Failures</string>
+    <string name="health_trend_scale_7d">7 days</string>
+    <string name="health_trend_scale_30d">30 days</string>
+    <string name="health_trend_scale_12w">12 weeks</string>
+    <string name="health_trend_caption">over %1$d periods with data</string>
+    <string name="health_trend_hint">Tap the chart to inspect a period.</string>
+    <string name="health_trend_week">week of %1$s</string>
+    <string name="health_trend_partial">still accumulating</string>
+    <string name="health_trend_nodata_bucket">no data</string>
+    <string name="health_trend_empty">No history yet for this service. The NVR started recording per-service uptime with this version, so the chart fills in day by day.</string>
     <string name="health_30d_unavailable">Not available yet — the NVR is still accumulating the daily rollup. The event log is trimmed as it fills, so fine-grained detail only goes back a few days. For months, the NVR keeps one summary line per day — cheap and enough for long horizons.</string>
 
     <!-- Battery history graph -->

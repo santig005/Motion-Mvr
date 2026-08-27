@@ -9,9 +9,12 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.famviva.camara.data.ClipClassifier
+import com.famviva.camara.data.ClipFrames
 import com.famviva.camara.data.ClipLabel
 import com.famviva.camara.data.LabelStore
+import com.famviva.camara.data.OfflineStore
 import com.famviva.camara.data.ThumbArchive
+import java.io.File
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -41,6 +44,8 @@ class LabelBackfillWorker(context: Context, params: WorkerParameters) :
         classifier.use { c ->
             val thumbs = ThumbArchive(ctx)
             val store = LabelStore(ctx)
+            val offline = OfflineStore(ctx)
+            val frameSamples = NotifyStore(ctx).detectionFrames
             // Base names are mt_YYYYMMDD_HHMMSS, so a plain descending sort is newest-first.
             val pending = thumbs.archivedBaseNames().filterNot { store.has(it) }.sortedDescending()
             val total = pending.size
@@ -49,10 +54,15 @@ class LabelBackfillWorker(context: Context, params: WorkerParameters) :
             val batch = HashMap<String, ClipLabel>()
             var done = 0
             for (name in pending) {
-                thumbs.decode(name)?.let { bmp ->
-                    c.classify(bmp)?.let { batch[name] = it }
-                    bmp.recycle()
+                // Multi-frame over the mp4 when a copy is already on the phone (offline-downloaded) —
+                // same accuracy win as new clips, at zero network cost. This pass stays network-free:
+                // clips without a local mp4 fall back to the single archived thumbnail.
+                val label = offline.downloadedPathForName(name)?.let { path ->
+                    ClipFrames.classifyFile(File(path), c, frameSamples)
+                } ?: thumbs.decode(name)?.let { bmp ->
+                    c.classify(bmp).also { bmp.recycle() }
                 }
+                label?.let { batch[name] = it }
                 done++
                 // Flush periodically so a long backfill persists progress instead of risking it all on
                 // one final write (a kill mid-run still leaves what it managed labelled), and publish

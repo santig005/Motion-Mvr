@@ -29,7 +29,8 @@ LOG_MAX_KB="${LOG_MAX_KB:-1024}"                  # cap on watchdog.log before i
 DET_BLIND_KICK="${DET_BLIND_KICK:-300}"           # seconds with .det_state = DOWN before the first session restart
 DET_KICK_MAX="${DET_KICK_MAX:-3}"                 # give up after this many restarts in one episode (see backoff note below)
 DET_KICK_BACKOFF="${DET_KICK_BACKOFF:-3}"         # each further attempt waits DET_BLIND_KICK * this^n (300s, 900s, 2700s)
-declare -A DET_KICKS=() DET_LAST=()               # per-camera episode state: attempts made, epoch of the last one
+DET_RECOVER_SECS="${DET_RECOVER_SECS:-600}"       # detector must stay healthy this long before an episode counts as OVER (see kick_blind_detector)
+declare -A DET_KICKS=() DET_LAST=() DET_WELL=()   # per-camera episode state: attempts made, epoch of the last one, epoch it started looking healthy
 mkdir -p "$(dirname "$LOG")"
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 
@@ -101,20 +102,42 @@ wlog_event(){ # $1=cam  $2=ev  $3=msg
 #      forever only burns the battery that the app is trying to preserve.
 #   4. AUTO-RESET — a healthy detector closes the episode, so a later, unrelated failure starts from
 #      attempt 1 rather than inheriting an exhausted counter.
+# Does the host answer at all? Returns on the FIRST reply, so a healthy camera costs one packet.
+host_pings(){ # $1=host  $2=attempts
+  local i=0
+  while [ "$i" -lt "${2:-3}" ]; do
+    ping -c1 -W2 "$1" >/dev/null 2>&1 && return 0
+    i=$((i+1))
+  done
+  return 1
+}
+
 kick_blind_detector(){ # $1=cam  $2=ring_dir
   local cam="$1" ring="$2" st since blind n last wait_s host now
   tmux has-session -t "$cam" 2>/dev/null || return 0
   [ -r "$ring/.det_state" ] || return 0
   read -r st since < "$ring/.det_state" 2>/dev/null || return 0
   now=$(date +%s)
-  if [ "${st:-OK}" != "DOWN" ]; then                       # guard 4: episode over
+  if [ "${st:-}" != "DOWN" ]; then                         # guard 4: is the episode over?
     if [ "${DET_KICKS[$cam]:-0}" -gt 0 ]; then
-      log "✅ detector [$cam] healthy again after ${DET_KICKS[$cam]} restart(s)"
+      # Recovery has to HOLD. Restarting the session makes the fresh process publish a non-DOWN state
+      # within seconds, and the old code read that as success: it cleared the attempt counter, so the
+      # next kick was "attempt 1" all over again and neither DET_KICK_MAX nor the exponential backoff
+      # could ever engage. On 2026-08-26 that produced a kick -> "recovered" -> kick loop every ~368s
+      # for ten hours against a camera that needed a power-cycle -- precisely the "restarts the NVR in
+      # a loop, so nothing is ever recorded" outcome this function's guards exist to prevent. And the
+      # restart cadence itself then kept resetting the segmenter's 360s wedge timer, so the one
+      # classifier that could have named the real fault never got to finish counting.
+      if [ "${st:-}" = "INIT" ]; then DET_WELL[$cam]=0; return 0; fi   # "no frames yet" is not recovery
+      [ "${DET_WELL[$cam]:-0}" -eq 0 ] && DET_WELL[$cam]="$now"
+      [ "$(( now - ${DET_WELL[$cam]} ))" -lt "$DET_RECOVER_SECS" ] && return 0
+      log "✅ detector [$cam] healthy for $(( now - ${DET_WELL[$cam]} ))s after ${DET_KICKS[$cam]} restart(s)"
       wlog_event "$cam" recovered "detector ok after ${DET_KICKS[$cam]} restart(s)"
-      DET_KICKS[$cam]=0; DET_LAST[$cam]=0
+      DET_KICKS[$cam]=0; DET_LAST[$cam]=0; DET_WELL[$cam]=0
     fi
     return 0
   fi
+  DET_WELL[$cam]=0                                        # still DOWN: any partial recovery streak is void
   blind=$(( now - ${since:-0} ))
   [ "$blind" -ge "$DET_BLIND_KICK" ] || return 0
   n="${DET_KICKS[$cam]:-0}"
@@ -132,7 +155,10 @@ kick_blind_detector(){ # $1=cam  $2=ring_dir
     [ "$(( now - last ))" -lt "$wait_s" ] && return 0
   fi
   host=$(cam_env_var "$cam" RTSP_MAIN | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')
-  if [ -n "$host" ] && ! ping -c1 -W2 "$host" >/dev/null 2>&1; then   # guard 1: ping
+  # Several pings, not one: a single dropped ICMP on this -71 dBm link would otherwise stand the
+  # watchdog down for a full cycle on a camera that is actually answering (observed 2026-08-26, when
+  # the camera replied 12/12 from a shell moments after being declared unreachable).
+  if [ -n "$host" ] && ! host_pings "$host" 5; then                  # guard 1: ping
     log "🔌 detector [$cam] blind ${blind}s but camera $host does not ping — external fault, not restarting"
     wlog_event "$cam" skipped "blind ${blind}s, camera unreachable"
     return 0

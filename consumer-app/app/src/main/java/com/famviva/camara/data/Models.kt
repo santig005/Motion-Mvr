@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.annotation.StringRes
 import com.famviva.camara.R
 import org.json.JSONObject
+import java.time.DayOfWeek
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -260,7 +261,7 @@ data class CameraHealth(
     fun isStale(nowSec: Long, maxAgeSec: Long = 10800): Boolean = updated > 0 && nowSec - updated > maxAgeSec
 
     /** Low battery and NOT charging. */
-    val lowBattery: Boolean get() = battery != null && battery!! < 30 && charging != true
+    val lowBattery: Boolean get() = battery != null && battery!! < 35 && charging != true
 
     /** Recording in the 360p sub-stream because the 2K link was too unstable to hold. Still
      *  recording — just at lower resolution — so this is a warning, not an outage. */
@@ -474,6 +475,10 @@ enum class SummaryTone { GOOD, MID, BAD }
 data class LaneSummary(
     val svc: String,
     val tone: SummaryTone,
+    /** % of the observed window this service was up. Set for EVERY lane now. Recording used to be the
+     *  only one with a percentage, so detector/segmenter/sync could only be reported as a count of
+     *  failures — which says nothing about how long anything was actually broken. */
+    val uptimePct: Double? = null,
     val coveragePct: Double? = null,  // recording lane: % of the window not fully down
     val outageCount: Int = 0,         // recording lane: number of down->up outages
     val worstOutageSec: Long = 0,     // recording lane: longest single outage
@@ -584,6 +589,37 @@ private fun flapIntervals(
     return out
 }
 
+/**
+ * Pairs `down` with whatever the NVR uses to close it (`up`, or `restored` for the detector) into DOWN
+ * spans for [svc]. An unpaired `down` is an outage still in progress.
+ *
+ * This is what lets every lane report a real uptime. Detector and segmenter used to be drawn purely
+ * from reconnect DROPS, and sync from error COUNTS -- neither of which can answer "for what fraction
+ * of the day did this actually work?", the question this screen exists to answer. A count also
+ * flattens the two cases that matter most: 40 drops that each heal in 10s is a healthy-ish lane,
+ * 40 drops around one 9-hour dead spell is an incident, and both of them read as "40".
+ */
+private fun outageIntervals(events: List<OutageEvent>, svc: String): List<LaneInterval> {
+    val rows = events.filter { it.svc == svc }.sortedBy { it.ts }
+    val out = mutableListOf<LaneInterval>()
+    var open: Long? = null
+    for (e in rows) {
+        when (e.ev) {
+            "down" -> if (open == null) open = e.ts
+            "up", "restored" -> open?.let { out.add(LaneInterval(it, e.ts, LaneState.DOWN, 3)); open = null }
+        }
+    }
+    open?.let { out.add(LaneInterval(it, Long.MAX_VALUE, LaneState.DOWN, 3)) }
+    return out
+}
+
+/** Uptime band -> tone, shared by every lane so the colours mean the same thing everywhere. */
+private fun toneForUptime(pct: Double): SummaryTone = when {
+    pct >= 99.5 -> SummaryTone.GOOD
+    pct >= 97.0 -> SummaryTone.MID
+    else -> SummaryTone.BAD
+}
+
 /** Sync lane: green baseline with a short amber mark at each transient `error`. */
 private fun syncIntervals(events: List<OutageEvent>, windowStart: Long, windowEnd: Long): List<LaneInterval> =
     events.filter { it.svc == "sync" && it.ev == "error" && it.ts in windowStart..windowEnd }
@@ -594,40 +630,69 @@ private fun syncIntervals(events: List<OutageEvent>, windowStart: Long, windowEn
  * summaries. Lane order matches the mockup: recording, detector, segmenter, sync.
  */
 fun buildServiceTimeline(events: List<OutageEvent>, windowStart: Long, windowEnd: Long): ServiceTimeline {
+    // Every lane is now built the same way: real down->up outage spans (priority 3), with the lane's
+    // own texture layered underneath at priority 2 -- quality for recording, reconnect flaps for the
+    // capture lanes, error marks for sync.
+    val detFlaps = flapIntervals(events, "detector", windowStart, windowEnd)
+    val segFlaps = flapIntervals(events, "segmenter", windowStart, windowEnd)
     val lanes = listOf(
         resolveLane("recording", windowStart, windowEnd, recordingIntervals(events)),
-        resolveLane("detector", windowStart, windowEnd, flapIntervals(events, "detector", windowStart, windowEnd)),
-        resolveLane("segmenter", windowStart, windowEnd, flapIntervals(events, "segmenter", windowStart, windowEnd)),
-        resolveLane("sync", windowStart, windowEnd, syncIntervals(events, windowStart, windowEnd)),
+        resolveLane("detector", windowStart, windowEnd, outageIntervals(events, "detector") + detFlaps),
+        resolveLane("segmenter", windowStart, windowEnd, outageIntervals(events, "segmenter") + segFlaps),
+        resolveLane("sync", windowStart, windowEnd,
+            outageIntervals(events, "sync") + syncIntervals(events, windowStart, windowEnd)),
     )
+    // Reconnect totals come from the SOURCE intervals, never from the resolved spans. resolveLane
+    // splits an interval wherever any other interval starts or ends, and every fragment carries the
+    // parent's full flapCount -- so summing over spans multiplies the total by however many outages
+    // happened to overlap it. Seen live: a detector lane with 42 outages reported "23 668 reconnects"
+    // over six hours against ~760 real ones. Only visible once these lanes gained outage spans.
+    val flapTotals = mapOf(
+        "detector" to detFlaps.sumOf { it.flapCount },
+        "segmenter" to segFlaps.sumOf { it.flapCount },
+    )
+    // A lane can only claim an uptime if this NVR actually reports that lane's up/down transitions.
+    // An older NVR emits none for segmenter or sync, and "no down events" would otherwise render as a
+    // confident 100% built on no evidence at all -- the exact failure this whole change exists to end.
+    val reportsUpDown = events.groupBy { it.svc }
+        .mapValues { (_, rows) -> rows.any { it.ev == "down" || it.ev == "up" || it.ev == "restored" } }
     val span = (windowEnd - windowStart).coerceAtLeast(1L)
     val summaries = lanes.map { lane ->
+        // Uptime, computed identically for all four: the share of the window not spent in a DOWN span.
+        val downs = lane.spans.filter { it.state == LaneState.DOWN }
+        val downTotal = downs.sumOf { it.endTs - it.startTs }
+        val uptime = if (reportsUpDown[lane.svc] == true) 100.0 * (span - downTotal) / span else null
+        val worst = downs.maxOfOrNull { it.endTs - it.startTs } ?: 0L
         when (lane.svc) {
             "recording" -> {
-                val downs = lane.spans.filter { it.state == LaneState.DOWN }
                 val degraded = lane.spans.any { it.state == LaneState.DEGRADED }
-                val downTotal = downs.sumOf { it.endTs - it.startTs }
-                val cov = 100.0 * (span - downTotal) / span
-                val worst = downs.maxOfOrNull { it.endTs - it.startTs } ?: 0L
                 val tone = when {
                     downs.isEmpty() && !degraded -> SummaryTone.GOOD
-                    cov >= 99.5 -> SummaryTone.GOOD
-                    cov >= 95.0 -> SummaryTone.MID
+                    uptime == null -> SummaryTone.GOOD
+                    uptime >= 99.5 -> SummaryTone.GOOD
+                    uptime >= 95.0 -> SummaryTone.MID
                     else -> SummaryTone.BAD
                 }
-                LaneSummary(lane.svc, tone, coveragePct = cov, outageCount = downs.size, worstOutageSec = worst)
+                LaneSummary(lane.svc, tone, uptimePct = uptime, coveragePct = uptime,
+                    outageCount = downs.size, worstOutageSec = worst)
             }
             "detector", "segmenter" -> {
                 val flaps = lane.spans.filter { it.state == LaneState.FLAP_SERIOUS || it.state == LaneState.FLAP_CRITICAL }
-                val drops = flaps.sumOf { it.flapCount }
+                val drops = flapTotals[lane.svc] ?: 0
                 val dur = flaps.sumOf { it.endTs - it.startTs }
                 val heavy = flaps.any { it.state == LaneState.FLAP_CRITICAL }
-                val tone = if (drops == 0) SummaryTone.GOOD else if (heavy) SummaryTone.BAD else SummaryTone.MID
-                LaneSummary(lane.svc, tone, flapDrops = drops, flapDurSec = dur)
+                // Downtime outranks flapping: a lane can reconnect noisily all day and still be up,
+                // or sit dead without a single reconnect, and the worse of the two picks the colour.
+                val flapTone = if (drops == 0) SummaryTone.GOOD else if (heavy) SummaryTone.BAD else SummaryTone.MID
+                val tone = if (uptime == null) flapTone else minOf(flapTone, toneForUptime(uptime))
+                LaneSummary(lane.svc, tone, uptimePct = uptime, outageCount = downs.size,
+                    worstOutageSec = worst, flapDrops = drops, flapDurSec = dur)
             }
             else -> {
                 val errs = lane.spans.count { it.state == LaneState.SYNC_WARN }
-                LaneSummary(lane.svc, if (errs == 0) SummaryTone.GOOD else SummaryTone.MID, syncErrors = errs)
+                val errTone = if (errs == 0) SummaryTone.GOOD else SummaryTone.MID
+                LaneSummary(lane.svc, if (uptime == null) errTone else minOf(errTone, toneForUptime(uptime)),
+                    uptimePct = uptime, outageCount = downs.size, worstOutageSec = worst, syncErrors = errs)
             }
         }
     }
@@ -647,7 +712,73 @@ data class DailyHealth(
     val segDrops: Int,    // segmenter reconnect drops
     val syncErrors: Int,  // sync transient errors
     val partial: Boolean, // the day's rollup is still accumulating (e.g. today)
-)
+    // --- Per-service OBSERVED seconds. Defaulted, because every line the NVR wrote before it started
+    // --- publishing them simply lacks the keys; [hasSvcUptime] is what tells the two cases apart.
+    val recUpS: Int = 0,
+    val detUpS: Int = 0, val detDownS: Int = 0, val detOutages: Int = 0, val detWorstS: Int = 0,
+    val segUpS: Int = 0, val segDownS: Int = 0, val segOutages: Int = 0, val segWorstS: Int = 0,
+    val syncUpS: Int = 0, val syncDownS: Int = 0, val syncOutages: Int = 0, val syncWorstS: Int = 0,
+    // Camera-wedge KPI. Not a service: the condition where the camera pings but serves no video on
+    // any channel, which only a power-cycle clears. Counted because it is the one fault whose fix is
+    // physical, so its frequency and total cost are what decide whether a smart plug pays for itself.
+    val wedgeEpisodes: Int = 0, val wedgeS: Int = 0, val wedgeWorstS: Int = 0, val wedgeUpS: Int = 0,
+    /** True when the NVR wrote per-service up/down seconds for this day. Distinguishes "this service
+     *  was down all day" from "this day predates per-service accounting" — a zero cannot. */
+    val hasSvcUptime: Boolean = false,
+) {
+    /** Observed (up, down) seconds for a service, or null when this day has nothing to say about it.
+     *  Recording falls back to the legacy day_s/rec_down_s pair so existing history still charts; the
+     *  other three genuinely have no history before this shipped, and null draws a gap instead of a
+     *  confident 0% or 100%. */
+    fun observed(svc: String): Pair<Int, Int>? = when (svc) {
+        "recording" ->
+            if (hasSvcUptime) recUpS to recDownS
+            else if (dayS > 0) (dayS - recDownS).coerceAtLeast(0) to recDownS
+            else null
+        "detector"  -> if (hasSvcUptime) detUpS to detDownS else null
+        "segmenter" -> if (hasSvcUptime) segUpS to segDownS else null
+        "sync"      -> if (hasSvcUptime) syncUpS to syncDownS else null
+        "wedge"     -> if (j_hasWedge) wedgeUpS to wedgeS else null
+        else -> null
+    }
+
+    /** Whether this day carries wedge accounting at all (it postdates the rest). */
+    private val j_hasWedge: Boolean get() = wedgeUpS > 0 || wedgeS > 0 || wedgeEpisodes > 0
+
+    /** Whether this day can answer a FAILURES question for a service. Drop and error counts have
+     *  always been written, so only wedge needs the guard -- and it needs it badly: without one,
+     *  thirty days on which nothing was counting wedges draw as a confident flat zero, which is
+     *  precisely the "we were not looking" rendered as "nothing happened" that this screen exists
+     *  to stop, and it would be read as evidence that a smart plug is unnecessary. */
+    fun hasFailureData(svc: String): Boolean = svc != "wedge" || j_hasWedge
+
+    /** % of the observed day this service was up, or null if the day says nothing about it. */
+    fun uptimePct(svc: String): Double? = observed(svc)?.let { (up, down) ->
+        val tot = up.toLong() + down.toLong()
+        if (tot <= 0L) null else 100.0 * up / tot
+    }
+
+    /** Count of down->up episodes for a service. */
+    fun outagesOf(svc: String): Int = when (svc) {
+        "recording" -> recOutages
+        "detector"  -> detOutages
+        "segmenter" -> segOutages
+        "sync"      -> syncOutages
+        "wedge"     -> wedgeEpisodes
+        else -> 0
+    }
+
+    /** Failure COUNT: outages for recording, reconnect drops for the capture lanes, transient errors
+     *  for sync — i.e. each lane's own "how often did this break?" number. */
+    fun failures(svc: String): Int = when (svc) {
+        "recording" -> recOutages
+        "detector"  -> detDrops
+        "segmenter" -> segDrops
+        "sync"      -> syncErrors
+        "wedge"     -> wedgeEpisodes
+        else -> 0
+    }
+}
 
 /** Parses one daily_health.jsonl line; null for blanks / malformed / missing date (parse defensively). */
 fun parseDailyHealthLine(line: String): DailyHealth? {
@@ -668,6 +799,16 @@ fun parseDailyHealthLine(line: String): DailyHealth? {
             segDrops = j.optInt("seg_drops", 0),
             syncErrors = j.optInt("sync_errors", 0),
             partial = j.optBoolean("partial", false),
+            recUpS = j.optInt("rec_up_s", 0),
+            detUpS = j.optInt("det_up_s", 0), detDownS = j.optInt("det_down_s", 0),
+            detOutages = j.optInt("det_outages", 0), detWorstS = j.optInt("det_worst_s", 0),
+            segUpS = j.optInt("seg_up_s", 0), segDownS = j.optInt("seg_down_s", 0),
+            segOutages = j.optInt("seg_outages", 0), segWorstS = j.optInt("seg_worst_s", 0),
+            syncUpS = j.optInt("sync_up_s", 0), syncDownS = j.optInt("sync_down_s", 0),
+            syncOutages = j.optInt("sync_outages", 0), syncWorstS = j.optInt("sync_worst_s", 0),
+            wedgeEpisodes = j.optInt("wedge_episodes", 0), wedgeS = j.optInt("wedge_s", 0),
+            wedgeWorstS = j.optInt("wedge_worst_s", 0), wedgeUpS = j.optInt("wedge_up_s", 0),
+            hasSvcUptime = j.has("rec_up_s"),
         )
     }.getOrNull()
 }
@@ -679,6 +820,9 @@ data class DayCell(
     val state: LaneState,
     val partial: Boolean,
     val coveragePct: Double? = null,
+    /** % of the day this service was observed up. Null when the day predates per-service accounting,
+     *  which the UI must render as "no data" rather than as a confident number. */
+    val uptimePct: Double? = null,
     val metric: Int = 0,
     /** Recording lane only: fraction of the full 24 h the NVR was actually alive that day (day_s /
      *  86400). <1.0 means the phone was OFF part of the day — a real footage gap that must NOT be
@@ -695,6 +839,24 @@ data class ServiceDailyTimeline(
     val summaries: List<LaneSummary>,
     val dayCount: Int,
 )
+
+/** Seconds-weighted uptime across the rows of one day (there may be several cameras). Weighting by
+ *  SECONDS rather than averaging each row's percentage keeps a camera that was only alive for an hour
+ *  from counting as much as one that ran all day. */
+private fun dayUptime(rows: List<DailyHealth>, svc: String): Double? {
+    var up = 0L
+    var down = 0L
+    for (r in rows) r.observed(svc)?.let { (u, d) -> up += u; down += d }
+    return if (up + down <= 0L) null else 100.0 * up / (up + down)
+}
+
+/** Darkens a lane's own state with what its measured uptime says, when there is an uptime to use. */
+private fun worstState(base: LaneState, uptimePct: Double?): LaneState = when {
+    uptimePct == null -> base
+    uptimePct < 97.0 -> LaneState.DOWN
+    uptimePct < 99.5 && base == LaneState.OK -> LaneState.DEGRADED
+    else -> base
+}
 
 private fun flapStateForCount(drops: Int): LaneState = when {
     drops >= 60 -> LaneState.FLAP_CRITICAL
@@ -733,13 +895,21 @@ fun buildDailyTimeline(days: List<DailyHealth>): ServiceDailyTimeline {
         // (today) day is naturally short because it isn't over, so it doesn't count as a gap.
         val fullDay = 86_400L * rows.size
         val coveredFrac = if (partial) 1.0 else (dayS.toDouble() / fullDay.toDouble()).coerceIn(0.0, 1.0)
-        rec.add(DayCell(date, recState, partial, coveragePct = cov, metric = rows.sumOf { it.recOutages }, coveredFrac = coveredFrac))
+        rec.add(DayCell(date, recState, partial, coveragePct = cov, uptimePct = dayUptime(rows, "recording"),
+            metric = rows.sumOf { it.recOutages }, coveredFrac = coveredFrac))
+        // The capture lanes keep their drop-count colour as a floor, but a real measured downtime now
+        // overrides it: a detector that was simply DEAD all day produces no reconnects at all, so a
+        // drop count of zero used to paint it green.
         val dDrops = rows.sumOf { it.detDrops }
-        det.add(DayCell(date, flapStateForCount(dDrops), partial, metric = dDrops))
+        val dUp = dayUptime(rows, "detector")
+        det.add(DayCell(date, worstState(flapStateForCount(dDrops), dUp), partial, uptimePct = dUp, metric = dDrops))
         val sDrops = rows.sumOf { it.segDrops }
-        seg.add(DayCell(date, flapStateForCount(sDrops), partial, metric = sDrops))
+        val sUp = dayUptime(rows, "segmenter")
+        seg.add(DayCell(date, worstState(flapStateForCount(sDrops), sUp), partial, uptimePct = sUp, metric = sDrops))
         val sErr = rows.sumOf { it.syncErrors }
-        syn.add(DayCell(date, if (sErr > 0) LaneState.SYNC_WARN else LaneState.OK, partial, metric = sErr))
+        val yUp = dayUptime(rows, "sync")
+        val synBase = if (sErr > 0) LaneState.SYNC_WARN else LaneState.OK
+        syn.add(DayCell(date, worstState(synBase, yUp), partial, uptimePct = yUp, metric = sErr))
     }
     val lanes = listOf(
         ServiceDayLane("recording", rec),
@@ -757,13 +927,19 @@ fun buildDailyTimeline(days: List<DailyHealth>): ServiceDailyTimeline {
     }
     val recSummary = LaneSummary(
         "recording", recTone,
+        uptimePct = dayUptime(days, "recording") ?: avgCov,
         coveragePct = avgCov,
         outageCount = days.sumOf { it.recOutages },
         worstOutageSec = (worstDay?.recWorstS ?: 0).toLong(),
         worstDate = worstDay?.takeIf { it.recWorstS > 0 }?.date,
     )
-    fun flapSummary(svc: String, total: Int, heavyDays: Int) =
-        LaneSummary(svc, if (total == 0) SummaryTone.GOOD else if (heavyDays > 0) SummaryTone.BAD else SummaryTone.MID, flapDrops = total)
+    fun flapSummary(svc: String, total: Int, heavyDays: Int): LaneSummary {
+        val up = dayUptime(days, svc)
+        val base = if (total == 0) SummaryTone.GOOD else if (heavyDays > 0) SummaryTone.BAD else SummaryTone.MID
+        val tone = if (up == null) base else minOf(base, toneForUptime(up))
+        return LaneSummary(svc, tone, uptimePct = up, flapDrops = total,
+            outageCount = days.sumOf { it.outagesOf(svc) })
+    }
     val detTotal = days.sumOf { it.detDrops }
     val segTotal = days.sumOf { it.segDrops }
     val syncTotal = days.sumOf { it.syncErrors }
@@ -771,9 +947,175 @@ fun buildDailyTimeline(days: List<DailyHealth>): ServiceDailyTimeline {
         recSummary,
         flapSummary("detector", detTotal, det.count { it.state == LaneState.FLAP_CRITICAL }),
         flapSummary("segmenter", segTotal, seg.count { it.state == LaneState.FLAP_CRITICAL }),
-        LaneSummary("sync", if (syncTotal == 0) SummaryTone.GOOD else SummaryTone.MID, syncErrors = syncTotal),
+        dayUptime(days, "sync").let { up ->
+            val base = if (syncTotal == 0) SummaryTone.GOOD else SummaryTone.MID
+            LaneSummary("sync", if (up == null) base else minOf(base, toneForUptime(up)),
+                uptimePct = up, syncErrors = syncTotal, outageCount = days.sumOf { it.outagesOf("sync") })
+        },
     )
     return ServiceDailyTimeline(lanes, summaries, dates.size)
+}
+
+// -------------------------------------------------------------------------------------------
+// Health TRENDS: not "what broke", but "is this getting better or worse?"
+// -------------------------------------------------------------------------------------------
+// The swimlane answers "what happened", one window at a time, and that is the wrong shape for the
+// question you actually ask after an incident: is the detector flapping more than it did last month?
+// Did fixing the charger move recording uptime at all? These bucket daily_health.jsonl into days or
+// weeks so a direction is visible.
+
+enum class TrendMetric { UPTIME, FAILURES }
+
+enum class TrendBucket { DAY, WEEK }
+
+/** One bucket. [value] is null when the bucket observed nothing at all -- rendered as a GAP, never as
+ *  a zero, because "the NVR was off" and "the service was down" must not look the same. */
+data class TrendPoint(
+    val key: String,        // bucket start, YYYYMMDD
+    val label: String,      // short axis label, e.g. "14/8"
+    val value: Double?,
+    val partial: Boolean,   // includes a day that is still accumulating
+)
+
+data class TrendSeries(
+    val svc: String,
+    val metric: TrendMetric,
+    val bucket: TrendBucket,
+    val points: List<TrendPoint>,
+) {
+    val observed: List<TrendPoint> get() = points.filter { it.value != null }
+
+    /** Change from the older half of the observed buckets to the newer half. Positive means the metric
+     *  ROSE (good for uptime, bad for failures -- the UI decides which colour that earns). Null while
+     *  there is too little history to claim a direction, which is the honest answer for a lane whose
+     *  accounting only started today. */
+    val delta: Double?
+        get() {
+            val o = observed
+            if (o.size < 4) return null
+            val half = o.size / 2
+            val older = o.take(half).mapNotNull { it.value }
+            val newer = o.takeLast(half).mapNotNull { it.value }
+            if (older.isEmpty() || newer.isEmpty()) return null
+            return newer.average() - older.average()
+        }
+}
+
+/**
+ * Buckets [days] into a [TrendSeries] for one service over the last [spanDays], by day or by week.
+ * Buckets with no data still appear (with a null value) so the x-axis stays evenly spaced in time --
+ * dropping them would silently compress a gap and make an outage look like it never happened.
+ */
+fun buildHealthTrend(
+    days: List<DailyHealth>,
+    svc: String,
+    metric: TrendMetric,
+    bucket: TrendBucket,
+    spanDays: Int,
+    today: LocalDate = LocalDate.now(),
+): TrendSeries {
+    val from = today.minusDays((spanDays - 1).coerceAtLeast(0).toLong())
+    fun keyOf(d: LocalDate) = if (bucket == TrendBucket.WEEK) d.with(DayOfWeek.MONDAY) else d
+    val buckets = LinkedHashMap<LocalDate, MutableList<DailyHealth>>()
+    var cur = keyOf(from)
+    while (!cur.isAfter(today)) {
+        buckets[cur] = mutableListOf()
+        cur = if (bucket == TrendBucket.WEEK) cur.plusWeeks(1) else cur.plusDays(1)
+    }
+    for (d in days) {
+        val ld = runCatching { LocalDate.parse(d.date, DateTimeFormatter.BASIC_ISO_DATE) }.getOrNull() ?: continue
+        if (ld.isBefore(from) || ld.isAfter(today)) continue
+        buckets[keyOf(ld)]?.add(d)
+    }
+    val axis = DateTimeFormatter.ofPattern("d/M")
+    val points = buckets.map { (start, rows) ->
+        val value: Double? = when {
+            rows.isEmpty() -> null
+            metric == TrendMetric.UPTIME -> dayUptime(rows, svc)
+            else -> rows.filter { it.hasFailureData(svc) }
+                .takeIf { it.isNotEmpty() }
+                ?.sumOf { it.failures(svc) }?.toDouble()
+        }
+        TrendPoint(
+            key = start.format(DateTimeFormatter.BASIC_ISO_DATE),
+            label = start.format(axis),
+            value = value,
+            partial = rows.any { it.partial },
+        )
+    }
+    return TrendSeries(svc, metric, bucket, points)
+}
+
+/**
+ * Camera-wedge counts over a set of windows, plus the cost in lost time.
+ *
+ * Short windows are counted from events.jsonl (which carries one `wedged` line per episode); the 7d
+ * and 30d windows come from daily_health.jsonl, because events.jsonl is trimmed and cannot be
+ * trusted that far back. A window whose source has no data reports null, not 0 -- "we have not been
+ * counting that long" and "it never happened" are different answers, and only one of them justifies
+ * leaving the camera on a dumb plug.
+ */
+data class WedgeStats(
+    /** window label seconds -> episode count (null = no data covering that window). */
+    val counts: Map<Long, Int?>,
+    val totalSec30d: Long,
+    val worstSec30d: Long,
+    val episodes30d: Int,
+    /** How many of the last 30 days actually carry wedge accounting. "0 wedges in 30 days" means
+     *  something very different on 1 day of data than on 30, and the difference is the whole basis
+     *  for deciding whether a smart plug is worth buying -- so the count is never shown alone. */
+    val daysMeasured30d: Int = 0,
+    /** Epoch the camera became wedged, if it is wedged right now. */
+    val wedgedSince: Long? = null,
+) {
+    val hasAny: Boolean get() = episodes30d > 0 || counts.values.any { (it ?: 0) > 0 }
+}
+
+val WEDGE_WINDOWS = listOf(3_600L, 3L * 3600, 6L * 3600, 24L * 3600, 7L * 86_400, 30L * 86_400)
+
+/**
+ * Builds [WedgeStats] from the two sources, preferring the durable daily rollup for anything the
+ * event log cannot cover. [eventsCoverFrom] is the oldest ts present in events.jsonl, so a window
+ * longer than the retained log reports null rather than an undercount.
+ */
+fun buildWedgeStats(
+    events: List<OutageEvent>,
+    daily: List<DailyHealth>,
+    nowSec: Long,
+    eventsCoverFrom: Long?,
+    wedgedSince: Long? = null,
+): WedgeStats {
+    val wedges = events.filter { it.svc == "recording" && it.ev == "wedged" }.map { it.ts }
+    val today = LocalDate.now()
+    fun dailySince(days: Int): List<DailyHealth> {
+        val from = today.minusDays((days - 1).toLong())
+        return daily.filter {
+            val d = runCatching { LocalDate.parse(it.date, DateTimeFormatter.BASIC_ISO_DATE) }.getOrNull()
+            d != null && !d.isBefore(from)
+        }
+    }
+    val counts = WEDGE_WINDOWS.associateWith { w ->
+        when {
+            // 7d / 30d: the daily rollup is the only source that survives log trimming.
+            w >= 7L * 86_400 -> dailySince((w / 86_400).toInt())
+                .takeIf { rows -> rows.any { it.wedgeEpisodes > 0 || it.wedgeUpS > 0 || it.wedgeS > 0 } }
+                ?.sumOf { it.wedgeEpisodes }
+            // Shorter windows come from the event log, but only if the log actually reaches back
+            // that far -- otherwise the honest answer is "unknown", not a confident zero.
+            eventsCoverFrom != null && eventsCoverFrom <= nowSec - w ->
+                wedges.count { it >= nowSec - w }
+            else -> null
+        }
+    }
+    val d30 = dailySince(30)
+    return WedgeStats(
+        counts = counts,
+        totalSec30d = d30.sumOf { it.wedgeS.toLong() },
+        worstSec30d = d30.maxOfOrNull { it.wedgeWorstS.toLong() } ?: 0L,
+        episodes30d = d30.sumOf { it.wedgeEpisodes },
+        daysMeasured30d = d30.count { it.wedgeEpisodes > 0 || it.wedgeUpS > 0 || it.wedgeS > 0 },
+        wedgedSince = wedgedSince,
+    )
 }
 
 /** Sync-pipeline heartbeat, read from the NVR's sync_status.json. */

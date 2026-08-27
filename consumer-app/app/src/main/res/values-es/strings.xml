@@ -164,6 +164,12 @@
     <string name="alert_people_only_on_toast">Alertas solo cuando se detecta una persona. Todos los clips siguen apareciendo en la app.</string>
     <string name="alert_people_only_off_toast">Solo personas desactivado: las alertas suenan para cualquier movimiento.</string>
     <string name="badge_person">Persona</string>
+    <string name="detect_frames_title">Fotogramas analizados por clip</string>
+    <plurals name="detect_frames_option">
+        <item quantity="one">%1$d fotograma</item>
+        <item quantity="other">%1$d fotogramas</item>
+    </plurals>
+    <string name="detect_frames_toast">Analizando %1$d fotogramas por clip</string>
     <string name="label_backfill">🏷️ Etiquetar historial (personas)</string>
     <string name="label_backfill_toast">Clasificando el historial de clips en segundo plano — los badges aparecen a medida que termina.</string>
     <string name="backfill_running">🏷️ Etiquetando personas (más nuevas primero)…</string>
@@ -311,6 +317,30 @@
     <string name="health_sum_sync_ok">sin backlog</string>
     <string name="health_sum_worst_day">peor día: %1$s (%2$s)</string>
     <string name="health_stat_ok">OK</string>
+    <string name="health_stat_nodata">sin datos</string>
+    <string name="health_sum_flap_drops">%1$d reconexiones</string>
+    <string name="health_sum_svc_outages">%1$d cortes · peor %2$s</string>
+    <!-- Cámara colgada (necesita desenchufarla físicamente) -->
+    <string name="health_wedge_section">Cámara colgada</string>
+    <string name="health_wedge_now">Cámara colgada desde hace %1$s — necesita desenchufarla</string>
+    <string name="health_wedge_cost">%1$d episodios en 30 días · %2$s perdidos · el peor %3$s</string>
+    <string name="health_wedge_none">Sin episodios registrados en los últimos 30 días.</string>
+    <string name="health_wedge_none_partial">Sin episodios por ahora — pero solo se han medido %1$d de los últimos 30 días, así que todavía no es un veredicto.</string>
+    <string name="health_wedge_partial">Las ventanas con — son más largas que el log de eventos que guarda el NVR; los conteos de 7 y 30 días vienen del resumen diario y se irán llenando desde ahora.</string>
+    <string name="health_lane_name_wedge">Colgada</string>
+    <!-- Tendencias -->
+    <string name="health_trend_section">Evolución en el tiempo</string>
+    <string name="health_trend_metric_uptime">Uptime</string>
+    <string name="health_trend_metric_failures">Fallos</string>
+    <string name="health_trend_scale_7d">7 días</string>
+    <string name="health_trend_scale_30d">30 días</string>
+    <string name="health_trend_scale_12w">12 semanas</string>
+    <string name="health_trend_caption">sobre %1$d periodos con datos</string>
+    <string name="health_trend_hint">Toca la gráfica para ver un periodo.</string>
+    <string name="health_trend_week">semana del %1$s</string>
+    <string name="health_trend_partial">aún acumulando</string>
+    <string name="health_trend_nodata_bucket">sin datos</string>
+    <string name="health_trend_empty">Aún no hay histórico de este servicio. El NVR empezó a medir uptime por servicio con esta versión, así que la gráfica se irá llenando día a día.</string>
     <string name="health_30d_unavailable">Aún no disponible — el NVR está acumulando el resumen diario. El registro de eventos se recorta al llenarse, así que el detalle fino solo llega unos días atrás. Para meses, el NVR guarda una línea de resumen por día — barato y suficiente para horizontes largos.</string>
 
     <!-- Gráfico de historial de batería -->

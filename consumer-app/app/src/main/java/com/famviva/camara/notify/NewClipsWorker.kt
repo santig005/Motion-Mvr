@@ -18,6 +18,7 @@ import com.famviva.camara.data.BatteryHistoryStore
 import com.famviva.camara.data.CameraHealth
 import com.famviva.camara.data.Clip
 import com.famviva.camara.data.ClipClassifier
+import com.famviva.camara.data.ClipFrames
 import com.famviva.camara.data.DriveClient
 import com.famviva.camara.data.LabelStore
 import com.famviva.camara.data.LocationProvider
@@ -62,22 +63,36 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 } else {
                     val newOnes = recent.filter { it.name > last }
                     if (newOnes.isNotEmpty()) {
+                        // Auto-download FIRST (Wi-Fi only, if enabled), BEFORE classifying: the on-device
+                        // multi-frame classifier reads frames from the local mp4, so downloading first
+                        // means it reuses the already-downloaded copy instead of fetching its own temp —
+                        // zero extra network for users with auto-download on. When it's off/metered the
+                        // classifier falls back to a small temp fetch (or the thumbnail). Downloads happen
+                        // regardless of Away, so this placement doesn't change what gets downloaded.
+                        if (offline.shouldAutoDownloadNow()) {
+                            newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }
+                        }
+
                         // Phase-1 people detection — LABELLING, run independently of any alert setting so
                         // every new clip's card can get a 👤/🚗/🐾 badge over time. When a model is on the
-                        // device, classify each new clip's thumbnail once and persist the verdict; the
-                        // thumbnails fetched here are cached and reused for the alert gate below, so
-                        // nothing is downloaded twice, and an already-labelled clip is never re-fetched.
+                        // device, sample several frames across each new clip (not just the one thumbnail
+                        // frame Drive picked — the reason clips with a brief person were being missed) and
+                        // persist the verdict. Falls back to the single thumbnail if the mp4 can't be read;
+                        // an already-labelled clip is never reprocessed. Frame count is user-tunable.
                         val labelStore = LabelStore(ctx)
                         val classifier = ClipClassifier(ctx)
+                        val frameSamples = store.detectionFrames
                         val thumbCache = HashMap<String, android.graphics.Bitmap?>()
                         if (classifier.available) {
                             newOnes.forEach { clip ->
                                 val base = clip.name.removeSuffix(".mp4")
                                 if (!labelStore.has(base)) {
-                                    val thumb = thumbCache.getOrPut(clip.id) {
+                                    val label = ClipFrames.classifyClip(
+                                        ctx, clip, token, offline, classifier, frameSamples, allowDownload = true,
+                                    ) ?: thumbCache.getOrPut(clip.id) {
                                         runCatching { drive.fetchClipThumbnail(clip) }.getOrNull()
-                                    }
-                                    thumb?.let { classifier.classify(it) }?.let { labelStore.put(base, it) }
+                                    }?.let { classifier.classify(it) }
+                                    label?.let { labelStore.put(base, it) }
                                 }
                             }
                         }
@@ -125,9 +140,6 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         }
                         classifier.close()
                         store.setLastNotified(newest)
-                        if (offline.shouldAutoDownloadNow()) {
-                            newOnes.forEach { clip -> runCatching { offline.download(clip, token) } }
-                        }
                     }
                 }
             }

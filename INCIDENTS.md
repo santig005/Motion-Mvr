@@ -29,6 +29,7 @@ committed, that is stated.
 | 7 | 2026-08-12 | Recording but blind | 4 h 20 m of clean 2K, 0 clips | Detector health scored by run duration; every failure cleared the bar | `26854fe`, `63d2ef8` |
 | 8 | 2026-08-14 | "Drive full" | Uploads stopped ~08:30; 4.8 GiB of phantom usage | Retention deleted to the Drive **trash**, which still counts against quota | uncommitted (working tree) |
 | 9 | 2026-08-16 | Three separate outages in one day | 13 h 40 m blind; 18 zero-second clips since July; 20 min at a dead IP | (a) camera globally degraded + watchdog blind to the detector, (b) truncated segment read as duration 0, (c) camera moved by DHCP | `c4ebe40`, `0b6b112`, `063c1d9` |
+| 10 | 2026-08-26 | Camera wedge reported as healthy | 10 h 17 m with no clips, while status.json said "recording in 2K" | Camera RTSP wedged (as 07-27); every detector of it lived in RAM the watchdog kept restarting | uncommitted (working tree) |
 
 ---
 
@@ -606,9 +607,111 @@ been restarting itself pointlessly, because no local restart fixes a camera that
 
 ---
 
+## 10. 2026-08-26 — A camera wedge the dashboard reported as healthy
+
+**Symptom.** "The service has been degraded for several hours." The Salud screen showed long red
+stretches of "not recording", broken every few minutes by short slivers claiming recording was up,
+some of them in 360p. Read directly off the phone at 21:09, `status.json` said:
+
+```
+{"ok":true,"recording_ok":true,"rec_mode":"2K","rec_2k_drops_1h":0,"detector_ok":true,...}
+ring segs: 0
+```
+
+Recording in 2K, all healthy, zero segments in the ring — and no clip written since `mt_20260826_105231`,
+ten hours and seventeen minutes earlier.
+
+**Hypotheses ruled out.**
+
+| Hypothesis | How it died |
+|---|---|
+| Wi-Fi degradation | RSSI did drop −68 → −71 dBm at ~11:30, temptingly close to the start. But 12/12 pings to the camera returned at 4.0 ms average, 0% loss, and the gateway was equally clean. The link was fine; the timing was a coincidence. |
+| 2K too heavy for a weak link | The 360p sub-stream was failing on the *same* 10–15 s cadence. Both channels, identically. |
+| Phone resource exhaustion | 3.47 GiB of 3.64 used, 1.27 GiB of swap — alarming at a glance. But the ffmpeg sessions were spawning fine and failing at the RTSP *read*, not at fork or allocation. |
+| An app rendering bug | The app was drawing exactly the events it had been given. Everything wrong was upstream, in what the NVR chose to publish. |
+
+**Root cause.** Two faults, stacked — and the second is the interesting one.
+
+*The fault.* The camera's RTSP subsystem was wedged, the same failure as 2026-07-27. `ffmpeg`
+completed the TCP connect and the RTSP handshake and then received no video at all:
+
+```
+Failed reading RTSP data: Connection timed out
+```
+
+on `ch1` (2K) and on the sub-stream alike. Nothing phone-side clears this; it needs a power-cycle.
+
+*Why nobody knew.* Five separate mechanisms should have named that fault. All five were disarmed by
+the same thing: **the watchdog was restarting the keeper every ~368 s, and every one of those
+mechanisms kept its state in the memory of the process being restarted.**
+
+| What should have happened | Why it did not |
+|---|---|
+| `recording_ok:false` | The "no segments yet" grace window is keyed off process start, so each restart bought a fresh 75 s of `true` against an empty ring |
+| No `recording up` event | It was emitted on the first tick of any fresh process, before a single segment had been observed |
+| No `recording restored "started in 2K"` | The startup orphan-close ran unconditionally, painting a 2K recovery once per cycle |
+| `rec_down_s > 0` in the daily rollup | Outages were credited only when they *closed*, from an in-RAM `DOWN_SINCE` that each restart reset — so on a day with ~43 recording outages the rollup read `rec_down_s: 0, rec_outages: 0` |
+| `camera_wedged: true` | `WEDGE_AFTER_SECS` is 360 s; the restarts arrived every ~368 s; `firstfail` was a local of `segmenter_loop`. The classifier lost the race by about nine seconds, every cycle, for ten hours |
+
+The loop was self-sustaining. After each kick the fresh session published a non-DOWN `.det_state`
+within seconds; the watchdog read that as recovery and zeroed its attempt counter; the next kick was
+therefore "attempt 1/3" again. `DET_KICK_MAX` and the exponential backoff — the two guards written
+specifically to prevent a restart loop — were unreachable code for the entire incident. The watchdog
+log shows the same three lines repeating for ten hours.
+
+One counter came out correct: `rec_sub_s`, 23 322 s. It was the only one accrued **per tick and
+persisted** instead of credited on an edge. That contrast is the whole design lesson.
+
+**Fix.** (deployed 2026-08-26 23:27–23:38, five 5-second recording gaps; uncommitted at time of writing)
+
+- Health is asserted only from observed evidence. `INIT` is a real third state, counted as neither up
+  nor down, and startup no longer writes `2K` / `OK` / `not wedged` into the state files.
+- Per-service accounting is **level-triggered**: every tick adds its real elapsed seconds to
+  `<svc>_up` or `<svc>_down` for recording, detector, segmenter and sync alike, and the open-outage
+  watermark is persisted the moment a service transitions. A `kill -9` now costs one tick, not an
+  incident. `daily_health.jsonl` carries all four.
+- The wedge timer (`firstfail`) and the segmenter's capture state moved to `.seg_state` on disk, so
+  the classifier can outlive the restart and actually reach its own threshold.
+- `reboot_camera` and the watchdog decide wedged-vs-unreachable on five pings rather than one — a
+  single dropped ICMP on a −71 dBm link had been flipping the verdict to the non-actionable branch.
+- Watchdog recovery must **hold** for `DET_RECOVER_SECS` (600 s) before an episode is closed, and
+  `INIT` never counts as recovery. The ceiling and backoff are reachable again.
+- Camera wedges became a first-class KPI: episodes, seconds stuck and worst episode per day, so
+  "is a smart plug worth buying?" finally has a number behind it.
+- Tests: 60 in the NVR suite (was 31) and 28 in the watchdog suite (was 24), including a replay of
+  this incident that asserts a blip-recovery cannot refill the restart budget.
+
+**Four defects this fix introduced, all caught by running it rather than by reading it.** Three of
+them were the *same* bug as the one being fixed, in the mirror: changing a startup default from
+"assume healthy" to "unknown" is only safe if health is published somewhere other than at startup.
+
+| Defect | Cause |
+|---|---|
+| `rec_2k_drops_1h` published an epoch, and `rec_mode:"INIT"` reached an app that has no such value | The new `INIT <ts>` marker was written into a file whose second field means "2K flap count" |
+| A healthy detector stayed `INIT` forever and accrued no uptime at all | `.det_state` was only set to `OK` when a run *ended*, and a healthy run never does. It had worked purely because startup asserted `OK` |
+| The segmenter lane would have reported a dead capture forever after recovering | Same shape, `.seg_state`, caught before deploy |
+| Three restarts inside five minutes banked zero seconds | The accumulator was only flushed on the daily 300 s cadence; `ACC_SAVE_SECS=60` now bounds it |
+
+The app side had its own three, all of the shape *absent data rendered as good data*: reconnect
+totals summed over resolved spans (which repeat their parent's count once per overlapping outage,
+reporting 23 668 reconnects against ~760 real ones); segmenter and sync claiming 100 % uptime from an
+NVR that emits no up/down events for them; and the wedge chart drawing thirty days of confident zero
+where nothing had ever been counted — which would have read as evidence that a smart plug is
+unnecessary.
+
+**What it changed about the design.** Pattern 1 ("alive is not producing") had been swept through the
+segmenter and the detector, and this incident is its third instance in a new disguise: not a *duration*
+standing in for work delivered, but a *process lifetime* standing in for a fault's lifetime. The
+generalised rule is now pattern 9 below. It also retires a fix that had been made twice in the other
+direction — the 2026-08-17 orphan-close, which cured a stuck "degraded" lane by unconditionally
+announcing recovery at startup, and thereby created the phantom recoveries seen here. Both the `down`
+and the `up` side have to be evidence-based; curing one by asserting the other just moves the lie.
+
+---
+
 ## Cross-cutting patterns
 
-Eight things that recurred often enough to be treated as rules rather than anecdotes.
+Nine things that recurred often enough to be treated as rules rather than anecdotes.
 
 **1. Alive is not producing.** The single most repeated bug in this system. A segmenter run that
 outlived `HEALTHY_SECS` but wrote no segment (07-15, 07-16). A detector run that outlived the same bar
@@ -653,6 +756,15 @@ in every case a fraction of the cost of building the wrong fix.
 look exactly like missing uploads (07-18). Stubbing `tmux` in a test hid the two-minute recording gap
 that the code under test actually caused (08-16). A `>` continuation prompt silently swallowed three
 rounds of commands (08-01). Validate the instrument before trusting the reading.
+
+**9. State that outlives the process must live outside the process.** Every detector of the
+2026-08-26 wedge was defeated the same way: `DOWN_SINCE`, `firstfail`, `rec_mode_seen`, `det_seen` and
+the watchdog's attempt counter were all in-RAM, and the recovery machinery restarted the process that
+held them every six minutes. A timer that measures a fault must survive the restarts that the fault
+provokes — otherwise the more aggressively the system tries to heal, the more thoroughly it erases the
+evidence of what is wrong. The corollary is the accounting rule: **accrue per tick and persist the
+watermark; never credit an incident only at its edge**, because the edge is exactly what a restart
+eats. `rec_sub_s` was correct on the worst day of the year for no other reason.
 
 **8. Configuration describes intent, not reality.** `SEG_TIME=4` against a measured ~12 s GOP (07-20).
 The deployed `POSTROLL=12` against 3 in the example file (07-20). A camera IP written literally into

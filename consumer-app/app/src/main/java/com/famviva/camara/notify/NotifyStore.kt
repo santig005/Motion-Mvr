@@ -44,6 +44,18 @@ class NotifyStore(context: Context) {
         get() = prefs.getBoolean(KEY_PEOPLE_ONLY, false)
         set(value) = prefs.edit().putBoolean(KEY_PEOPLE_ONLY, value).apply()
 
+    /** How many frames the on-device classifier samples per clip. Drive's thumbnail is a single frame
+     *  Google picks, so a person present in only part of a clip is the dominant false negative;
+     *  sampling several frames evenly across the clip catches them. 1 keeps the old single-frame cost
+     *  (and skips the mp4 fetch — falls back to the thumbnail). Higher = better recall at the cost of
+     *  one small mp4 fetch + N inferences per new clip. Clamped so a stray value can't ask for hundreds
+     *  of decodes. Exposed as a picker so the frame/cost trade-off can be tuned on-device. */
+    var detectionFrames: Int
+        get() = prefs.getInt(KEY_DET_FRAMES, DETECTION_FRAMES_DEFAULT)
+            .coerceIn(DETECTION_FRAMES_MIN, DETECTION_FRAMES_MAX)
+        set(value) = prefs.edit()
+            .putInt(KEY_DET_FRAMES, value.coerceIn(DETECTION_FRAMES_MIN, DETECTION_FRAMES_MAX)).apply()
+
     /** True if quiet-hours is enabled and [now] falls in the (possibly midnight-spanning) window. */
     fun inQuietHours(now: LocalTime = LocalTime.now()): Boolean {
         if (!quietHours) return false
@@ -79,6 +91,10 @@ class NotifyStore(context: Context) {
         const val KEY_QUIET = "quiet_hours"
         const val KEY_ALERT_LEVEL = "alert_level"
         const val KEY_PEOPLE_ONLY = "people_only"
+        const val KEY_DET_FRAMES = "detection_frames"
+        const val DETECTION_FRAMES_DEFAULT = 4
+        const val DETECTION_FRAMES_MIN = 1
+        const val DETECTION_FRAMES_MAX = 32
         val QUIET_START: LocalTime = LocalTime.of(23, 0)   // 11 p.m.
         val QUIET_END: LocalTime = LocalTime.of(7, 0)      // 7 a.m.
     }
