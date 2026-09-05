@@ -2688,18 +2688,6 @@ private fun CameraStatusCard(
             title = stringResource(R.string.status_stale_title, h.camera),
             body = stringResource(R.string.status_stale_body, h.sinceLabel(context, now)),
         )
-        h.etaCritical() -> StatusBanner(
-            bg = MaterialTheme.colorScheme.errorContainer,
-            fg = MaterialTheme.colorScheme.onErrorContainer,
-            title = stringResource(R.string.status_critical_title, etaTxt ?: ""),
-            body = stringResource(R.string.status_critical_body),
-        )
-        h.lowBattery -> StatusBanner(
-            bg = MaterialTheme.status.warningContainer,
-            fg = MaterialTheme.status.onWarningContainer,
-            title = stringResource(R.string.status_lowbatt_title, h.battery ?: 0),
-            body = stringResource(R.string.status_lowbatt_body),
-        )
         h.recordingInSub -> StatusBanner(
             bg = MaterialTheme.status.warningContainer,
             fg = MaterialTheme.status.onWarningContainer,
@@ -2720,6 +2708,12 @@ private fun CameraStatusCard(
             fg = MaterialTheme.status.onWarningContainer,
             title = stringResource(R.string.status_battunknown_title, h.camera),
             body = stringResource(R.string.status_battunknown_body),
+        )
+        h.canUnplug -> StatusBanner(
+            bg = MaterialTheme.colorScheme.primaryContainer,
+            fg = MaterialTheme.colorScheme.onPrimaryContainer,
+            title = stringResource(R.string.status_canunplug_title, h.camera),
+            body = stringResource(R.string.status_canunplug_body),
         )
         else -> Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
@@ -2746,6 +2740,19 @@ private fun CameraStatusCard(
             }
         }
       }
+        // Battery state is rendered OUTSIDE the when so it stacks with whatever camera status is
+        // shown above — a wedged or offline camera doesn't mask a low battery or critical ETA.
+        if (h.etaCritical()) StatusBanner(
+            bg = MaterialTheme.colorScheme.errorContainer,
+            fg = MaterialTheme.colorScheme.onErrorContainer,
+            title = stringResource(R.string.status_critical_title, etaTxt ?: ""),
+            body = stringResource(R.string.status_critical_body),
+        ) else if (h.lowBattery) StatusBanner(
+            bg = MaterialTheme.status.warningContainer,
+            fg = MaterialTheme.status.onWarningContainer,
+            title = stringResource(R.string.status_lowbatt_title, h.battery ?: 0),
+            body = stringResource(R.string.status_lowbatt_body),
+        )
         // Wi-Fi signal is shown in EVERY state — especially the banner ones — because a weak link is
         // the prime suspect behind the recording drops it sits above. Hidden entirely if the NVR build
         // doesn't report it yet.

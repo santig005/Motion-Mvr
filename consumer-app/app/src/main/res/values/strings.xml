@@ -219,6 +219,8 @@
     <string name="status_battunknown_body">The NVR can\'t read the battery level, so low-battery alerts won\'t fire. Set Termux, Termux:Boot and Termux:API to Unrestricted battery usage on the NVR phone.</string>
     <string name="status_critical_title">🔋 Battery critical: ~%s left</string>
     <string name="status_critical_body">Plug in the phone before it dies.</string>
+    <string name="status_canunplug_title">🔌 %s: phone fully charged</string>
+    <string name="status_canunplug_body">The NVR phone has been at 100%% for 20+ min — safe to unplug the charger.</string>
     <string name="status_recording">✅ %s recording</string>
     <string name="wifi_nvr_label">NVR Wi-Fi</string>
     <string name="wifi_nvr_value">📶 %1$s: %2$d dBm%3$s</string>
@@ -403,6 +405,7 @@
     <string name="health_not_reporting">%s: not reporting (check the phone)</string>
     <string name="health_low_battery">%1$s: low battery %2$d%% (plug it in)</string>
     <string name="health_disk_low">%1$s: storage almost full (%2$.1f GB free)</string>
+    <string name="health_can_unplug">%s: phone fully charged (100%%) — safe to unplug the charger</string>
     <string name="health_sync_down">Cloud upload down (no sync heartbeat)</string>
     <string name="health_sync_failing">Clips aren\'t uploading to Drive</string>
     <string name="health_drive_90">Drive %1$d%% full (%2$.1f GB free) — free up space soon</string>

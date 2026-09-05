@@ -237,6 +237,9 @@ data class CameraHealth(
      *  keeps dropping" into something you can actually see and correlate. null on older NVR builds. */
     val rssi: Int? = null,
     val wifiFreqMhz: Int? = null,
+    /** The NVR phone has been at 100 % while charging for ≥ 20 min: safe to unplug the charger.
+     *  Resets to false as soon as the phone drops below 100 % or stops charging. */
+    val canUnplug: Boolean = false,
 ) {
     /** Coarse Wi-Fi quality from [rssi] (dBm): GOOD ≥ −60, OK −60..−70, WEAK < −70. null when the NVR
      *  doesn't report signal. This house's −66/−68 link sits right at the OK/WEAK boundary. */

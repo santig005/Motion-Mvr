@@ -119,6 +119,7 @@ WIFI_LOG="${WIFI_LOG:-$(dirname "$OUT_DIR")/wifi.jsonl}"         # dense Wi-Fi t
 WIFI_SAMPLE_SECS="${WIFI_SAMPLE_SECS:-120}"                      # how often to sample the Wi-Fi radio. Fine enough to correlate an RTSP wedge with RF (20min was useless for that); cheap on a charging phone
 WIFI_MAX_LINES="${WIFI_MAX_LINES:-2000}"                         # line cap on wifi.jsonl (~2.8 days at 120s); bounds the re-upload cost over the very weak link it exists to diagnose
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
+FULL_SINCE=0          # epoch when battery first reached 100 % while charging; 0 = not tracking
 BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
 BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"                                # cap on the cam log before it's trimmed to its newest half
@@ -315,6 +316,15 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
       extra="${extra},\"discharge_pct_per_h\":${eta% *},\"eta_minutes\":${eta#* }"
     fi
     BATTERY_UNKNOWN=0
+    # Track how long the phone has been at 100 % while charging so the app can signal "safe to
+    # unplug". FULL_SINCE is a process-global and resets to 0 on NVR restart, which is fine: one
+    # more HEARTBEAT_SECS cycle of delay before the alert fires is harmless.
+    if [ "$pct" = 100 ] && [ "$chg" = true ]; then
+      [ "$FULL_SINCE" -eq 0 ] && FULL_SINCE=$now
+      [ "$((now - FULL_SINCE))" -ge 1200 ] && extra="${extra},\"can_unplug\":true"
+    else
+      FULL_SINCE=0
+    fi
   else
     # The battery sensor CAN fail silently: Android may restrict/sleep the Termux:API app, the
     # termux-api package may be missing, or the helper may hang past its timeout. Emitting nothing
@@ -325,6 +335,7 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     extra="${extra},\"battery_unknown\":true"
     [ "${BATTERY_UNKNOWN:-0}" = 1 ] || log "🔋 battery unreadable (termux-api not responding) — reporting battery_unknown"
     BATTERY_UNKNOWN=1
+    FULL_SINCE=0
   fi
   # Recording-quality signal (from the segmenter via REC_STATE): rec_mode = "2K" | "SUB",
   # rec_2k_drops_1h = how many times the 2K flapped in the last hour. Lets the app flag "recording in

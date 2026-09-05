@@ -171,6 +171,7 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     h.isStale(now) -> ctx.getString(R.string.health_not_reporting, h.camera)
                     h.lowBattery -> ctx.getString(R.string.health_low_battery, h.camera, h.battery ?: 0)
                     h.diskLow() -> ctx.getString(R.string.health_disk_low, h.camera, (h.diskFreeMb ?: 0) / 1024.0)
+                    h.canUnplug -> ctx.getString(R.string.health_can_unplug, h.camera)
                     else -> null
                 }
             }.toMutableList()
