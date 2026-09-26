@@ -2761,12 +2761,28 @@ private fun CameraStatusCard(
     }
 }
 
-/** One compact line: "📶 NVR Wi-Fi: −66 dBm · 2.4 GHz · weak", with the quality word coloured
- *  (weak = error, ok = neutral, good = primary). Renders nothing when there's no signal report. */
+/** One compact line with the quality word coloured (weak = error, ok = neutral, good = primary):
+ *  "📶 NVR→camera link: 4 ms (p90 5) · 0% loss · 2.4 GHz · good" from the ping probe, or — on NVR
+ *  builds without it — the legacy "📶 NVR Wi-Fi: −66 dBm · 2.4 GHz · weak". The probe wins because the
+ *  RSSI freezes while the NVR's screen is off. Renders nothing when there's neither. */
 @Composable
 private fun NvrWifiRow(h: com.famviva.camara.data.CameraHealth) {
-    val q = h.wifiQuality ?: return
-    val rssi = h.rssi ?: return
+    val band = h.wifiBand?.let { " · $it" } ?: ""
+    val loss = h.linkLossPct
+    val (q, text) = if (loss != null) {
+        val label = stringResource(R.string.wifi_link_label)
+        val med = h.linkMedMs
+        val p90 = h.linkP90Ms
+        h.linkQuality to if (med != null && p90 != null) {
+            stringResource(R.string.wifi_link_value, label, med, p90, loss, band)
+        } else {
+            stringResource(R.string.wifi_link_dead, label, band)
+        }
+    } else {
+        val rssi = h.rssi ?: return
+        h.wifiQuality to stringResource(R.string.wifi_nvr_value, stringResource(R.string.wifi_nvr_label), rssi, band)
+    }
+    q ?: return
     val (qualityRes, qualityColor) = when (q) {
         com.famviva.camara.data.WifiQuality.GOOD -> R.string.wifi_quality_good to MaterialTheme.colorScheme.primary
         com.famviva.camara.data.WifiQuality.OK -> R.string.wifi_quality_ok to MaterialTheme.colorScheme.onSurfaceVariant
@@ -2777,12 +2793,7 @@ private fun NvrWifiRow(h: com.famviva.camara.data.CameraHealth) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            stringResource(
-                R.string.wifi_nvr_value,
-                stringResource(R.string.wifi_nvr_label),
-                rssi,
-                h.wifiBand?.let { " · $it" } ?: "",
-            ),
+            text,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -2979,13 +2990,91 @@ private fun serviceName(svc: String): String = when (svc) {
     else -> svc
 }
 
-/** The Wi-Fi signal trend: a sparkline of rssi (dBm) over the recent samples, with now/min/max and a
- *  reference line at the weak threshold (−70 dBm). Lets you SEE the RF sag that leads into a wedge. */
+/** The Wi-Fi trend card. Prefers the ping probe (see [LinkTrendCard]) as soon as any sample carries
+ *  it; falls back to the legacy RSSI sparkline for NVR builds without the probe. */
 @Composable
 private fun WifiTrendCard(samples: List<com.famviva.camara.data.WifiSample>) {
+    val link = remember(samples) { samples.filter { it.linkLossPct != null }.takeLast(360) }
+    if (link.isNotEmpty()) LinkTrendCard(link) else RssiTrendCard(samples)
+}
+
+/** Phone->camera link trend: p90 latency on a log scale with loss marks along the bottom — the two
+ *  things that actually preceded the 2026-09-22 drop storm (the RSSI stayed flat through it). */
+@Composable
+private fun LinkTrendCard(recent: List<com.famviva.camara.data.WifiSample>) {
+    val last = recent.last()
+    val dash = "—"
+    val worstP90 = recent.maxOfOrNull { if (it.linkLossPct == 100) Int.MAX_VALUE else it.linkP90Ms ?: 0 }
+    val lossy = recent.count { (it.linkLossPct ?: 0) > 0 }
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+            Text(
+                stringResource(
+                    R.string.wifi_link_trend_stats,
+                    last.linkP90Ms?.let { "$it ms" } ?: dash,
+                    last.linkLossPct ?: 0,
+                    worstP90?.let { if (it == Int.MAX_VALUE) dash else "$it ms" } ?: dash,
+                    lossy,
+                    recent.size,
+                ),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(10.dp))
+            LinkSparkline(recent, Modifier.fillMaxWidth().height(96.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                stringResource(R.string.wifi_link_trend_caption, recent.size),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+}
+
+/** p90 sparkline on a fixed log scale 1..1000 ms (a healthy 5 ms and a bad 370 ms both stay legible),
+ *  newest at the right, with a reference line at the 150 ms weak threshold. A sample with no reply at
+ *  all pins to the top. Loss draws as red bars up from the bottom, height ∝ % lost. */
+@Composable
+private fun LinkSparkline(samples: List<com.famviva.camara.data.WifiSample>, modifier: Modifier) {
+    val lineColor = MaterialTheme.colorScheme.primary
+    val weakColor = MaterialTheme.colorScheme.error.copy(alpha = 0.55f)
+    val lossColor = MaterialTheme.colorScheme.error
+    androidx.compose.foundation.Canvas(modifier) {
+        fun y(ms: Int?): Float {
+            val v = (ms ?: 1000).coerceIn(1, 1000)
+            return (1f - kotlin.math.log10(v.toFloat()) / 3f) * size.height
+        }
+        val yWeak = y(150)
+        drawLine(weakColor, Offset(0f, yWeak), Offset(size.width, yWeak), strokeWidth = 2f)
+        val n = samples.size
+        fun x(i: Int) = if (n == 1) size.width else i.toFloat() / (n - 1) * size.width
+        samples.forEachIndexed { i, s ->
+            val loss = s.linkLossPct ?: 0
+            if (loss > 0) {
+                val h = size.height * 0.35f * (loss.coerceAtMost(100) / 100f).coerceAtLeast(0.12f)
+                drawLine(lossColor, Offset(x(i), size.height), Offset(x(i), size.height - h), strokeWidth = 3f)
+            }
+        }
+        if (n >= 2) {
+            val path = Path()
+            samples.forEachIndexed { i, s ->
+                val yy = y(if (s.linkLossPct == 100) null else s.linkP90Ms)
+                if (i == 0) path.moveTo(x(i), yy) else path.lineTo(x(i), yy)
+            }
+            drawPath(path, lineColor, style = Stroke(width = 3f))
+        }
+    }
+}
+
+/** Legacy trend for NVR builds without the ping probe: a sparkline of rssi (dBm) over the recent
+ *  samples, with now/min/max and a reference line at the weak threshold (−70 dBm). */
+@Composable
+private fun RssiTrendCard(samples: List<com.famviva.camara.data.WifiSample>) {
     // Cap to the most recent stretch so the line stays readable (samples are ~2 min apart → ~12 h).
-    val recent = remember(samples) { samples.takeLast(360) }
-    val rssis = recent.map { it.rssi }
+    val recent = remember(samples) { samples.filter { it.rssi != null }.takeLast(360) }
+    val rssis = recent.mapNotNull { it.rssi }
     val cur = rssis.lastOrNull() ?: 0
     val mn = rssis.minOrNull() ?: 0
     val mx = rssis.maxOrNull() ?: 0
@@ -3028,7 +3117,7 @@ private fun WifiSparkline(samples: List<com.famviva.camara.data.WifiSample>, mod
             val path = Path()
             samples.forEachIndexed { i, s ->
                 val x = i.toFloat() / (n - 1) * size.width
-                val yy = y(s.rssi)
+                val yy = y(s.rssi ?: -90)
                 if (i == 0) path.moveTo(x, yy) else path.lineTo(x, yy)
             }
             drawPath(path, lineColor, style = Stroke(width = 3f))

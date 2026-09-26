@@ -252,6 +252,9 @@ class DriveClient(
                             wedgedSince = if (j.has("wedged_since")) j.optLong("wedged_since") else null,
                             rssi = if (j.has("rssi")) j.optInt("rssi") else null,
                             wifiFreqMhz = if (j.has("wifi_freq_mhz")) j.optInt("wifi_freq_mhz") else null,
+                            linkLossPct = if (j.has("link_loss_pct")) j.optInt("link_loss_pct") else null,
+                            linkMedMs = if (j.has("link_med_ms")) j.optInt("link_med_ms") else null,
+                            linkP90Ms = if (j.has("link_p90_ms")) j.optInt("link_p90_ms") else null,
                             canUnplug = j.optBoolean("can_unplug", false),
                         )
                     }

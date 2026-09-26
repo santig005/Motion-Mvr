@@ -224,7 +224,12 @@
     <string name="wifi_quality_good">buena</string>
     <string name="wifi_quality_ok">aceptable</string>
     <string name="wifi_quality_weak">débil</string>
-    <string name="health_wifi_section">Señal Wi-Fi del NVR</string>
+    <string name="wifi_link_label">Enlace NVR→cámara</string>
+    <string name="wifi_link_value">📶 %1$s: %2$d ms (p90 %3$d) · %4$d%% pérdida%5$s</string>
+    <string name="wifi_link_dead">📶 %1$s: sin respuesta%2$s</string>
+    <string name="wifi_link_trend_stats">ahora p90 %1$s · %2$d%% pérdida · peor p90 %3$s · %4$d de %5$d muestras con pérdida</string>
+    <string name="wifi_link_trend_caption">%1$d muestras · la más reciente a la derecha · línea = latencia p90 (escala log) · barras rojas = pérdida · línea roja = débil (150 ms)</string>
+    <string name="health_wifi_section">Enlace Wi-Fi del NVR</string>
     <string name="wifi_trend_stats">ahora %1$d dBm · mín %2$d · máx %3$d</string>
     <string name="wifi_trend_caption">%1$d muestras · la más reciente a la derecha · línea roja = débil (−70 dBm)</string>
     <string name="battery_eta_hm">%1$dh %2$dm</string>

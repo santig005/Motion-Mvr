@@ -193,6 +193,17 @@ data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Doubl
  *  thresholds. See [CameraHealth.wifiQuality]. */
 enum class WifiQuality { GOOD, OK, WEAK }
 
+/** Link quality from the NVR's phone->camera ping probe (20 pings every ~2 min): GOOD = no loss and
+ *  p90 ≤ 30 ms; WEAK = ≥ 10 % loss, p90 ≥ 150 ms, or no reply at all; OK in between. Calibrated on
+ *  2026-09-22: the healthy link measured 0 % / p90 5 ms, the night recording dropped ~50 times
+ *  measured 5 % / p90 368 ms. One lost ping in 20 (5 %) with a fast p90 is noise, hence OK not WEAK.
+ *  null when there's no probe data (older NVR build). */
+fun linkQualityOf(lossPct: Int?, p90Ms: Int?): WifiQuality? {
+    if (lossPct == null) return null
+    if (p90Ms == null || lossPct >= 10 || p90Ms >= 150) return WifiQuality.WEAK
+    return if (lossPct == 0 && p90Ms <= 30) WifiQuality.GOOD else WifiQuality.OK
+}
+
 /** NVR/camera health, read from the status.json the NVR writes. */
 data class CameraHealth(
     val camera: String,
@@ -237,6 +248,13 @@ data class CameraHealth(
      *  keeps dropping" into something you can actually see and correlate. null on older NVR builds. */
     val rssi: Int? = null,
     val wifiFreqMhz: Int? = null,
+    /** Phone->camera ping probe: % lost, median and p90 round-trip (ms). This — not [rssi] — is the
+     *  trustworthy link signal: Android only refreshes the RSSI while the screen is on, so on the
+     *  headless NVR it can stay frozen for days. Latencies are null at 100 % loss; all null on older
+     *  NVR builds. */
+    val linkLossPct: Int? = null,
+    val linkMedMs: Int? = null,
+    val linkP90Ms: Int? = null,
     /** The NVR phone has been at 100 % while charging for ≥ 20 min: safe to unplug the charger.
      *  Resets to false as soon as the phone drops below 100 % or stops charging. */
     val canUnplug: Boolean = false,
@@ -250,6 +268,9 @@ data class CameraHealth(
             else -> WifiQuality.WEAK
         }
     }
+
+    /** Link quality from the ping probe (see [linkQualityOf]); null on NVR builds without it. */
+    val linkQuality: WifiQuality? get() = linkQualityOf(linkLossPct, linkP90Ms)
 
     /** "2.4 GHz" / "5 GHz" from [wifiFreqMhz], or null. */
     val wifiBand: String? get() = wifiFreqMhz?.let { if (it >= 5000) "5 GHz" else "2.4 GHz" }
@@ -330,24 +351,38 @@ fun parseOutageLine(line: String): OutageEvent? {
     }.getOrNull()
 }
 
-/** One line of the NVR's wifi.jsonl: the Wi-Fi radio state sampled every ~2 min, so an outage/wedge
- *  can be lined up against RF strength over time (the whole reason the dense series exists). */
-data class WifiSample(val ts: Long, val cam: String?, val rssi: Int, val freqMhz: Int)
+/** One line of the NVR's wifi.jsonl, sampled every ~2 min so an outage/wedge can be lined up against
+ *  the link over time (the whole reason the dense series exists). Either half may be missing: [rssi]
+ *  when termux-api fails, the link fields on NVR builds without the ping probe. */
+data class WifiSample(
+    val ts: Long,
+    val cam: String?,
+    val rssi: Int?,
+    val freqMhz: Int,
+    val linkLossPct: Int? = null,
+    val linkMedMs: Int? = null,
+    val linkP90Ms: Int? = null,
+)
 
-/** Parses one wifi.jsonl line ({"ts":..,"cam":..,"rssi":-66,"freq_mhz":2412}). Null for blanks /
- *  malformed JSON / missing ts|rssi, so one bad line never drops the series. */
+/** Parses one wifi.jsonl line ({"ts":..,"cam":..,"rssi":-66,"freq_mhz":2412,"link_loss_pct":0,
+ *  "link_med_ms":4,"link_p90_ms":5}). Null for blanks / malformed JSON / missing ts / a line with
+ *  neither rssi nor link data, so one bad line never drops the series. */
 fun parseWifiLine(line: String): WifiSample? {
     val t = line.trim()
     if (!t.startsWith("{")) return null
     return runCatching {
         val j = JSONObject(t)
         val ts = j.optLong("ts", 0L)
-        if (ts <= 0L || !j.has("rssi")) return null
+        if (ts <= 0L || (!j.has("rssi") && !j.has("link_loss_pct"))) return null
+        fun intOrNull(k: String) = if (j.has(k)) j.optInt(k) else null
         WifiSample(
             ts = ts,
             cam = if (j.has("cam") && !j.isNull("cam")) j.optString("cam").ifBlank { null } else null,
-            rssi = j.optInt("rssi"),
+            rssi = intOrNull("rssi"),
             freqMhz = j.optInt("freq_mhz", 0),
+            linkLossPct = intOrNull("link_loss_pct"),
+            linkMedMs = intOrNull("link_med_ms"),
+            linkP90Ms = intOrNull("link_p90_ms"),
         )
     }.getOrNull()
 }
