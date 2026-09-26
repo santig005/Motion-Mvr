@@ -59,6 +59,7 @@ RETRY_2K_SECS="${RETRY_2K_SECS:-180}"           # while on the sub-stream, re-pr
 # sfails keeps resetting and it hammers the 2K forever (hundreds of drops/hour) instead of recording
 # a stable sub-stream. These vars add a rolling-window count so that pattern also falls back to SUB.
 SUSTAINED_2K_SECS="${SUSTAINED_2K_SECS:-90}"    # a 2K run lasting >= this = genuinely stable -> clears the flap history
+SEG_STALL_SECS="${SEG_STALL_SECS:-45}"          # a live capture that lands no segment this long is stalled -> kill it (healthy: one every <=~12s)
 FLAP_WINDOW_SECS="${FLAP_WINDOW_SECS:-180}"     # rolling window (s) over which short-lived 2K drops are counted
 FLAP_MAX_DROPS="${FLAP_MAX_DROPS:-4}"           # that many 2K drops within FLAP_WINDOW_SECS -> fall back to the sub-stream
 DET_FPS="${DET_FPS:-6}"
@@ -113,11 +114,19 @@ STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => 
 WEDGE_AFTER_SECS="${WEDGE_AFTER_SECS:-360}"      # continuous produced=0 this long while the camera still pings => RTSP wedged (reboot candidate)
 REBOOT_EVERY_SECS="${REBOOT_EVERY_SECS:-600}"    # min gap between camera-reboot attempts (avoid reboot loops)
 WEDGE_RETRY_SECS="${WEDGE_RETRY_SECS:-60}"       # once classified wedged, retry at this slow cadence (the 5s dance changes nothing and costs battery)
+# Power-cycle lever for a wedged camera (e.g. a smart plug). Empty = alert only, as before. The command
+# must cut power, wait, and restore it; it runs under `timeout`. Guarded by a PERSISTED gap + daily cap:
+# `last_reboot` in segmenter_loop is process RAM, which the watchdog's restarts wipe -- the same trap as
+# 2026-08-26 -- and a guard that resets is how a flaky camera turns into a power-cycling loop.
+CAM_POWER_CMD="${CAM_POWER_CMD:-}"
+REBOOT_MAX_PER_DAY="${REBOOT_MAX_PER_DAY:-6}"
+REBOOT_STATE="$RING_DIR/.reboots"                 # "<YYYYMMDD> <count today> <last attempt epoch>"
 CAM_HOST="${CAM_HOST:-$(printf '%s' "$RTSP_MAIN" | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')}"  # camera IP/host for ping + control
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
 WIFI_LOG="${WIFI_LOG:-$(dirname "$OUT_DIR")/wifi.jsonl}"         # dense Wi-Fi time series at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl lane; keeper is its ONLY writer
 WIFI_SAMPLE_SECS="${WIFI_SAMPLE_SECS:-120}"                      # how often to sample the Wi-Fi radio. Fine enough to correlate an RTSP wedge with RF (20min was useless for that); cheap on a charging phone
 WIFI_MAX_LINES="${WIFI_MAX_LINES:-2000}"                         # line cap on wifi.jsonl (~2.8 days at 120s); bounds the re-upload cost over the very weak link it exists to diagnose
+LINK_PINGS="${LINK_PINGS:-20}"                                   # pings to the camera per Wi-Fi sample (0.2s apart -> ~4s); 20 gives 5% loss resolution. 0 disables the link probe
 BATTERY_HIST="${BATTERY_HIST:-$HOME/.battery_hist_$CAM_LABEL}"   # local-only (NOT uploaded): recent (epoch,pct) while discharging
 FULL_SINCE=0          # epoch when battery first reached 100 % while charging; 0 = not tracking
 BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression window for the discharge rate (~4h)
@@ -150,6 +159,7 @@ touch "$RING_DIR/.nomedia" 2>/dev/null            # keep the gallery from indexi
 # (Recording's "down since" used to be this in-RAM global. It now lives in the persisted accumulator
 # as ACC_rec_SINCE -- a process-local watermark is exactly what the watchdog restart kept erasing.)
 LAST_RSSI=""; LAST_WIFI_FREQ=""; LAST_RSSI_TS=0    # cached Wi-Fi sample (set by sample_wifi); write_status emits it WITHOUT its own termux-api call
+LAST_LINK_LOSS=""; LAST_LINK_MED="-"; LAST_LINK_P90="-"; LAST_LINK_TS=0   # cached phone->camera ping sample (set by sample_wifi), same contract
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
 # Global event log (one short JSON object per line) at the CAMERAS_DIR root. cloud-sync uploads it
@@ -279,19 +289,62 @@ read_rssi(){
   printf '%s %s' "$rssi" "${freq:-0}"
 }
 
-# Periodic Wi-Fi sampler. This is the ONLY place the radio is read (the single termux-api call): it
-# caches the value for write_status to emit, and appends a compact line to wifi.jsonl — a dense time
-# series so an outage/wedge can be correlated against RF strength AFTER the fact. The −68 dBm 2.4 GHz
-# link has coincided with every RTSP wedge, but until now the signal was never recorded alongside the
-# events, and a 20-minute heartbeat was far too coarse to line up against a wedge. Capped like
-# daily_health so a file re-uploaded over that same weak link can't grow without bound.
+# Reads iputils ping output on stdin and prints "LOSS_PCT MED_MS P90_MS" (integers, rounded), or
+# "LOSS_PCT - -" when nothing came back. Fails if there's no summary line (ping never ran). Separate
+# from read_link so the parsing is testable against real captured output.
+parse_ping(){
+  awk '
+    /time=/ { for (i = 1; i <= NF; i++) if ($i ~ /^time=/) t[++n] = substr($i, 6) + 0 }
+    / packet loss/ { for (i = 1; i <= NF; i++) if ($i ~ /%$/) { loss = $i; sub(/%/, "", loss) } }
+    END {
+      if (loss == "") exit 1
+      if (n == 0) { printf "%d - -", loss + 0.5; exit 0 }
+      for (i = 2; i <= n; i++) { x = t[i]; j = i - 1; while (j > 0 && t[j] > x) { t[j+1] = t[j]; j-- } t[j+1] = x }
+      k = int(n * 0.9 + 0.999); if (k > n) k = n
+      printf "%d %d %d", loss + 0.5, t[int((n + 1) / 2)] + 0.5, t[k] + 0.5
+    }'
+}
+
+# Probes the phone->camera Wi-Fi path with LINK_PINGS pings. This is the link-quality signal the RSSI
+# above can't be: Android only refreshes the RSSI while the SCREEN IS ON, so on this headless NVR it
+# sat at −68 for 53h straight and read a "normal" −72 through the 2026-09-22 night where the link
+# lost 5% of packets at a 368ms p90 and recording dropped ~50 times (found by pinging from the PC).
+# Pinging the camera measures exactly the path the RTSP stream takes, both Wi-Fi hops included.
+read_link(){
+  [ "${LINK_PINGS:-0}" -gt 0 ] && [ -n "$CAM_HOST" ] || return 1
+  command -v ping >/dev/null 2>&1 || return 1
+  timeout $((LINK_PINGS / 5 + 6)) ping -n -c "$LINK_PINGS" -i 0.2 -W 1 "$CAM_HOST" 2>/dev/null | parse_ping
+}
+
+# JSON fragment for the cached link sample (,"link_loss_pct":N[,"link_med_ms":N,"link_p90_ms":N]).
+# The latencies are omitted at 100% loss, where there are none. Shared by wifi.jsonl and status.json so
+# the two files can't drift apart on field names.
+link_json(){
+  printf ',"link_loss_pct":%s' "$LAST_LINK_LOSS"
+  [ "$LAST_LINK_MED" != "-" ] && printf ',"link_med_ms":%s,"link_p90_ms":%s' "$LAST_LINK_MED" "$LAST_LINK_P90"
+  return 0
+}
+
+# Periodic Wi-Fi sampler. This is the ONLY place the radio and the link are read: it caches both for
+# write_status to emit, and appends a compact line to wifi.jsonl — a dense time series so an
+# outage/wedge can be correlated against the link AFTER the fact (a 20-minute heartbeat was far too
+# coarse to line up against a wedge). The two reads are independent: a line is written if EITHER
+# succeeded, so a broken termux-api no longer silences the ping series. Capped like daily_health so a
+# file re-uploaded over that same weak link can't grow without bound.
 sample_wifi(){
-  local r now n
-  r=$(read_rssi) || return 0
+  local r l now n fields=""
   now=$(date +%s)
-  LAST_RSSI="${r% *}"; LAST_WIFI_FREQ="${r#* }"; LAST_RSSI_TS="$now"
-  printf '{"ts":%d,"cam":"%s","rssi":%s,"freq_mhz":%s}\n' \
-    "$now" "$CAM_LABEL" "$LAST_RSSI" "$LAST_WIFI_FREQ" >> "$WIFI_LOG" 2>/dev/null || return 0
+  if r=$(read_rssi); then
+    LAST_RSSI="${r% *}"; LAST_WIFI_FREQ="${r#* }"; LAST_RSSI_TS="$now"
+    fields=",\"rssi\":${LAST_RSSI},\"freq_mhz\":${LAST_WIFI_FREQ}"
+  fi
+  if l=$(read_link); then
+    read -r LAST_LINK_LOSS LAST_LINK_MED LAST_LINK_P90 <<< "$l"
+    LAST_LINK_TS="$now"
+    fields="${fields}$(link_json)"
+  fi
+  [ -n "$fields" ] || return 0
+  printf '{"ts":%d,"cam":"%s"%s}\n' "$now" "$CAM_LABEL" "$fields" >> "$WIFI_LOG" 2>/dev/null || return 0
   # Trim to the newest WIFI_MAX_LINES only once we're a margin past it, so we're not rewriting the
   # whole file on every sample.
   n=$(wc -l < "$WIFI_LOG" 2>/dev/null || echo 0)
@@ -386,6 +439,9 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   if [ -n "$LAST_RSSI" ] && [ "$((now - LAST_RSSI_TS))" -le "$((WIFI_SAMPLE_SECS * 3))" ]; then
     extra="${extra},\"rssi\":${LAST_RSSI},\"wifi_freq_mhz\":${LAST_WIFI_FREQ}"
   fi
+  if [ -n "$LAST_LINK_LOSS" ] && [ "$((now - LAST_LINK_TS))" -le "$((WIFI_SAMPLE_SECS * 3))" ]; then
+    extra="${extra}$(link_json)"
+  fi
   # Free space on the recording filesystem, so the app can warn BEFORE a full disk kills recording.
   local dfmb; dfmb=$(disk_free_mb); [ -n "$dfmb" ] && extra="${extra},\"disk_free_mb\":${dfmb}"
   # While recording is DOWN, surface WHEN it went down so the app can show the outage length live.
@@ -478,6 +534,21 @@ cam_pings(){ # $1 = attempts
   return 1
 }
 
+# Has the RUNNING capture stopped producing? $1 = run start (epoch), $2 = now. A session can hold the
+# socket open while the camera sends no usable video: on 2026-09-25 a 2K run wrote one segment at
+# 22:30 and then sat silent for 17 min with ffmpeg alive, so nothing was recorded, and nothing
+# noticed -- the run loop only asked "is ffmpeg alive?", the RTSP timeout never fired, and the
+# watchdog only watches the detector (which was healthy). The ring pruner even deleted the stuck
+# segment, so "no segment at all" must count as stalled too. Grace for the first SEG_STALL_SECS
+# covers the connect/handshake, and a segment left over from an earlier run is simply too old.
+seg_stalled(){
+  local t0="$1" now="$2" newest m=0
+  [ "$((now - t0))" -ge "$SEG_STALL_SECS" ] || return 1
+  newest=$(ls -t "$RING_DIR"/seg_*.mp4 2>/dev/null | head -1)
+  [ -n "$newest" ] && m=$(stat -c %Y "$newest" 2>/dev/null || echo 0)
+  [ "$((now - m))" -ge "$SEG_STALL_SECS" ]
+}
+
 reboot_camera(){ # $1 = seconds we've been failing continuously
   local downfor="$1"
   local since; since=$(( $(date +%s) - downfor ))
@@ -494,15 +565,43 @@ reboot_camera(){ # $1 = seconds we've been failing continuously
   # Once per TRANSITION into wedged, not once per retry: the classifier is re-evaluated on a slow
   # cadence for as long as the camera stays stuck, and events.jsonl is a small, trimmed budget that a
   # repeating alert would burn (2026-08-26: 1475 lines in 4.5h left only ~4h of history).
-  local prev; read -r prev _ < "$WEDGE_STATE" 2>/dev/null || prev=0
+  local prev; read -r prev _ 2>/dev/null < "$WEDGE_STATE" || prev=0
   [ "${prev:-0}" = 1 ] || log_event recording wedged "rtsp dead ${downfor}s, host up"
   # Publish it for the keeper -> status.json -> app. Before this, the classifier's verdict lived ONLY
   # in the local log: on 2026-08-12 it printed "REBOOT REQUIRED" 68 times over ~11h and nothing that
   # could reach the user ever learned about it.
   printf '1 %s\n' "$since" > "$WEDGE_STATE" 2>/dev/null || true
-  # --- TODO(reboot): issue the captured FAMVIVA reboot command here (P2P/UDP; see _private notes). ---
-  # e.g.  send_p2p_reboot "$CAM_HOST"   # once the capture confirms the exact packet/endpoint.
+  power_cycle_camera "$downfor"
   return 0
+}
+
+# Cut and restore the camera's power via CAM_POWER_CMD, at most once per REBOOT_EVERY_SECS and
+# REBOOT_MAX_PER_DAY times a day -- both read from disk, so no restart can reset them. Returns 0 only
+# when the command was actually run and succeeded. (The P2P reboot the vendor app uses was captured
+# 2026-07-28 but can't be replayed: per-session tokens + unknown cipher; see INCIDENTS.md.)
+power_cycle_camera(){ # $1 = seconds we've been failing continuously
+  [ -n "$CAM_POWER_CMD" ] || return 1
+  local now day rday=0 rcount=0 rlast=0 rc
+  now=$(date +%s); day=$(date +%Y%m%d)
+  read -r rday rcount rlast 2>/dev/null < "$REBOOT_STATE" || true
+  case "$rcount" in ''|*[!0-9]*) rcount=0;; esac
+  case "${rlast#-}" in ''|*[!0-9]*) rlast=0;; esac          # -1 = "cap already announced"
+  [ "$rday" = "$day" ] || rcount=0
+  if [ "$((now - rlast))" -lt "$REBOOT_EVERY_SECS" ]; then return 1; fi
+  if [ "$rcount" -ge "$REBOOT_MAX_PER_DAY" ]; then
+    # Say it once per stuck spell (rlast only moves on an attempt), then stay quiet.
+    [ "$rlast" = -1 ] || { log "🛑 camera power-cycle cap reached ($rcount today) — leaving it to a human"
+                           log_event recording reboot_capped "$rcount power-cycles today"; }
+    printf '%s %s %s\n' "$day" "$rcount" -1 > "$REBOOT_STATE" 2>/dev/null || true
+    return 1
+  fi
+  rcount=$((rcount+1))
+  printf '%s %s %s\n' "$day" "$rcount" "$now" > "$REBOOT_STATE" 2>/dev/null || true   # BEFORE running: a crash mid-cycle still counts
+  log "🔌 power-cycling camera ($rcount/$REBOOT_MAX_PER_DAY today, wedged ${1}s)"
+  timeout 90 sh -c "$CAM_POWER_CMD" >>"$LOG" 2>&1; rc=$?
+  if [ "$rc" = 0 ]; then log_event recording power_cycled "attempt $rcount today after ${1}s wedged"
+  else log "!! power-cycle command failed (rc=$rc)"; log_event recording power_cycle_failed "rc=$rc"; fi
+  return "$rc"
 }
 
 # 1) SEGMENTER (supervised) -------------------------------------------------------
@@ -517,7 +616,7 @@ reboot_camera(){ # $1 = seconds we've been failing continuously
 # motion intensity stays real instead of collapsing to a spurious zero.
 segmenter_loop(){
   local sfails=0 t0 ran delay mode="2K" src probe last_2k now subcap flaps="" flapn=0 d1h="" d1hn=0
-  local fpid sustained newest produced firstfail=0 last_reboot=0 segst segsince
+  local fpid sustained stallkill newest produced firstfail=0 last_reboot=0 segst segsince
   # Inherit the failing-since watermark. WEDGE_AFTER_SECS (360s) is LONGER than the watchdog's restart
   # cadence during an incident (~368s), so starting this at 0 every time meant the wedge classifier
   # restarted its clock just before it would have fired -- for 10 hours straight on 2026-08-26. The
@@ -550,9 +649,21 @@ segmenter_loop(){
     # ends left it (-> status.json -> app) frozen on the PREVIOUS mode for hours: on 2026-07-16 the
     # app still said "360p" 3h after the 2K had recovered. Once the run SUSTAINS, publish the mode
     # and clear the flap history right away (and log the recovery the moment it is true).
-    sustained=0
+    sustained=0; stallkill=""
     while kill -0 "$fpid" 2>/dev/null; do
       sleep 5
+      # A silent session is a dead one: end it so the loop reconnects (and, if the camera is really
+      # stuck, the produced=0 spell below starts counting toward the wedge/reboot escalation).
+      # SIGTERM first; if ffmpeg is wedged in a blocking read and ignores it, SIGKILL next tick.
+      if seg_stalled "$t0" "$(date +%s)"; then
+        if [ -z "$stallkill" ]; then
+          log "⏱ segmenter stalled: session open but no new segment for >${SEG_STALL_SECS}s [$mode] — ending it"
+          kill "$fpid" 2>/dev/null; stallkill=TERM
+        else
+          kill -9 "$fpid" 2>/dev/null
+        fi
+        continue
+      fi
       # "Sustained" must mean PRODUCING, not merely still-connected. A session that holds the socket
       # open while the camera sends nothing outlives any duration threshold, and this branch both
       # publishes the recording mode and clears the wedge verdict -- so scoring it on elapsed time
@@ -1334,7 +1445,8 @@ keeper_loop(){
     if [ "$((now - last_maint))" -ge 60 ]; then
       emergency_prune; trim_log; last_maint=$now
     fi
-    # Wi-Fi sample: the single radio read, on its own cadence, feeding wifi.jsonl + the status cache.
+    # Wi-Fi sample: the single radio read + link probe (~4s of pings; motion windows just wait for the
+    # next tick), on its own cadence, feeding wifi.jsonl + the status cache.
     if [ "$((now - last_wifi))" -ge "$WIFI_SAMPLE_SECS" ]; then
       sample_wifi; last_wifi=$now
     fi

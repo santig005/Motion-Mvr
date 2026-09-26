@@ -29,6 +29,7 @@ eq(){ # $1=label $2=expected $3=actual
   if [ "$2" = "$3" ]; then ok "$1"; else no "$1" "$2" "$3"; fi
 }
 describe(){ CURRENT="$1"; printf '\n\033[1m%s\033[0m\n' "$1"; }
+jf(){ printf '%s' "$2" | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }   # read one int from a JSON line
 
 # ---------------------------------------------------------------------------------------------
 # Harness: load the real script as a library into a throwaway sandbox.
@@ -250,6 +251,7 @@ describe "sample_wifi — Wi-Fi telemetry (cache for status.json + capped wifi.j
 # write_status to emit on every write (incl. the down transition) AND appended to a bounded series.
 export WIFI_LOG="$SANDBOX/wifi.jsonl"; : > "$WIFI_LOG"
 read_rssi(){ echo "-68 2412"; }
+read_link(){ return 1; }                 # no ping here: the link half is covered below
 LAST_RSSI=""; LAST_WIFI_FREQ=""; LAST_RSSI_TS=0
 sample_wifi
 eq "caches the rssi for write_status"   "-68"   "$LAST_RSSI"
@@ -266,6 +268,71 @@ eq "wifi.jsonl trimmed to the cap"      "5"     "$(wc -l < "$WIFI_LOG")"
 WIFI_MAX_LINES=2000
 
 # =============================================================================================
+describe "parse_ping / link probe — the RSSI Android freezes while the screen is off"
+# =============================================================================================
+# 2026-09-22: the RSSI read a flat −68 for 53h and a "normal" −72 through a night where the link lost
+# 5% of packets at a 368ms p90. The probe pings the camera instead. Fixtures are real output of the
+# NVR phone's /system/bin/ping (iputils).
+PING_OK='PING 192.168.101.2 (192.168.101.2) 56(84) bytes of data.
+64 bytes from 192.168.101.2: icmp_seq=1 ttl=64 time=2.69 ms
+64 bytes from 192.168.101.2: icmp_seq=2 ttl=64 time=4.77 ms
+64 bytes from 192.168.101.2: icmp_seq=3 ttl=64 time=3.98 ms
+
+--- 192.168.101.2 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 401ms
+rtt min/avg/max/mdev = 2.698/3.817/4.772/0.857 ms'
+eq "clean link: loss, median, p90"      "0 4 5"   "$(printf '%s\n' "$PING_OK" | parse_ping)"
+
+# A bad-night sample: 18 replies out of 20, most fast, a slow tail. Sorted, the median is the 9th
+# (10ms) and the p90 the 17th (ceil(0.9*18)) — the tail is what the median alone would hide.
+PING_BAD=$( for t in 3 4 5 6 7 8 9 9 10 11 12 14 20 45 90 370 368 1044; do
+              echo "64 bytes from 192.168.101.2: icmp_seq=1 ttl=64 time=$t ms"; done
+            echo "20 packets transmitted, 18 received, 10% packet loss, time 3811ms" )
+eq "lossy link: loss, median, p90"      "10 10 370" "$(printf '%s\n' "$PING_BAD" | parse_ping)"
+
+PING_DEAD='PING 192.168.101.250 (192.168.101.250) 56(84) bytes of data.
+
+--- 192.168.101.250 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 405ms'
+eq "no replies: 100% and no latency"    "100 - -" "$(printf '%s\n' "$PING_DEAD" | parse_ping)"
+# With errors iputils inserts "+N errors" before the loss; the % token must still be found.
+eq "tolerates '+N errors'"              "100 - -" \
+   "$(echo '5 packets transmitted, 0 received, +5 errors, 100% packet loss, time 4005ms' | parse_ping)"
+parse_ping < /dev/null >/dev/null; eq "no summary line -> fails" "1" "$?"
+
+: > "$WIFI_LOG"
+read_link(){ echo "10 10 370"; }
+LAST_LINK_LOSS=""; LAST_LINK_MED="-"; LAST_LINK_P90="-"; LAST_LINK_TS=0
+sample_wifi
+eq "caches the link sample"             "10 10 370" "$LAST_LINK_LOSS $LAST_LINK_MED $LAST_LINK_P90"
+eq "line carries rssi AND link"         '{"ts":TS,"cam":"out","rssi":-68,"freq_mhz":2412,"link_loss_pct":10,"link_med_ms":10,"link_p90_ms":370}' \
+   "$(sed -E 's/"ts":[0-9]+/"ts":TS/' "$WIFI_LOG")"
+
+# The two reads are independent: a dead termux-api must not silence the ping series (the old code
+# returned before writing anything when the RSSI read failed).
+: > "$WIFI_LOG"
+read_rssi(){ return 1; }
+read_link(){ echo "100 - -"; }
+sample_wifi
+eq "link-only line, no latency at 100%" '{"ts":TS,"cam":"out","link_loss_pct":100}' \
+   "$(sed -E 's/"ts":[0-9]+/"ts":TS/' "$WIFI_LOG")"
+
+: > "$WIFI_LOG"
+read_link(){ return 1; }
+sample_wifi
+eq "both reads failing writes nothing"  "0" "$(wc -l < "$WIFI_LOG")"
+read_rssi(){ echo "-68 2412"; }
+
+# status.json gets the same fields, from the cache, and only while the sample is fresh.
+LAST_LINK_LOSS=5; LAST_LINK_MED=4; LAST_LINK_P90=60; LAST_LINK_TS=$(date +%s)
+write_status 1
+eq "status.json carries the link"       "5 4 60" \
+   "$(jf link_loss_pct "$(cat "$HEALTH_FILE")") $(jf link_med_ms "$(cat "$HEALTH_FILE")") $(jf link_p90_ms "$(cat "$HEALTH_FILE")")"
+LAST_LINK_TS=$(( $(date +%s) - WIFI_SAMPLE_SECS * 3 - 10 ))
+write_status 1
+eq "a stale link sample is not published" "" "$(jf link_loss_pct "$(cat "$HEALTH_FILE")")"
+
+# =============================================================================================
 describe "per-service health accounting — the 2026-08-26 lesson"
 # =============================================================================================
 # The old accounting only ever credited an outage at the moment it CLOSED, from an in-RAM watermark.
@@ -273,7 +340,6 @@ describe "per-service health accounting — the 2026-08-26 lesson"
 # daily_health reported rec_down_s=0 and rec_outages=0 on a day with ~43 outages and 10h of no
 # footage. These tests pin the two properties that make that impossible to repeat — seconds accrue
 # per tick, and the open-outage watermark is persisted — plus the honest handling of "unknown".
-jf(){ printf '%s' "$2" | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }   # read one int from a JSON line
 # The accumulator is keyed by the LOCAL day, and acc_load deliberately rolls over when the persisted
 # day is not today. A hard-coded date therefore passes until midnight and then fails for the right
 # reason at the wrong time -- which is exactly what happened the first night this suite existed.
@@ -353,6 +419,66 @@ acc_tick sync 0 60 1180
 acc_carry 20260827 2000
 eq "an open outage carries into the new day" "2000" "$ACC_sync_SINCE"
 eq "…with the new day's counters reset"      "0"    "$ACC_sync_DOWN"
+
+# =============================================================================================
+describe "seg_stalled — a live session that stops producing is dead (2026-09-25)"
+# The incident: after the camera came back, a 2K run wrote one segment and then held the socket open
+# for 17 min with nothing arriving. ffmpeg stayed alive, so the run loop never ended it, and the ring
+# pruner deleted the one stuck segment. SEG_STALL_SECS=45 in production; segments land every <=~12s.
+SAVED_RING="$RING_DIR"; RING_DIR="$SANDBOX/stallring"; mkdir -p "$RING_DIR"; SEG_STALL_SECS=45
+st(){ if seg_stalled "$1" "$2"; then echo stalled; else echo live; fi; }
+eq "a fresh run gets connect grace"               "live"    "$(st 1000 1030)"
+touch -d @1090 "$RING_DIR/seg_a.mp4"
+eq "a segment 10s ago = producing"                "live"    "$(st 1000 1100)"
+eq "the newest segment 60s old = stalled"         "stalled" "$(st 1000 1150)"
+rm -f "$RING_DIR"/seg_*.mp4
+eq "no segment at all past the grace = stalled"   "stalled" "$(st 1000 1100)"
+touch -d @500 "$RING_DIR/seg_old.mp4"
+eq "a previous run's segment doesn't count"       "stalled" "$(st 1000 1100)"
+eq "…but the grace still applies to a new run"    "live"    "$(st 1000 1020)"
+RING_DIR="$SAVED_RING"
+
+# =============================================================================================
+describe "power_cycle_camera — the smart-plug lever, with guards that survive restarts"
+mkdir -p "$(dirname "$LOG")"
+REBOOT_STATE="$SANDBOX/.reboots"; REBOOT_EVERY_SECS=600; REBOOT_MAX_PER_DAY=2
+CYCLES="$SANDBOX/cycles"; : > "$CYCLES"
+FAKE_NOW=10000; FAKE_DAY=20260925
+date(){ case "${1:-}" in +%s) echo "$FAKE_NOW";; +%Y%m%d) echo "$FAKE_DAY";; *) command date "$@";; esac; }
+ncycles(){ grep -c . "$CYCLES"; }
+
+CAM_POWER_CMD=""
+power_cycle_camera 400
+eq "no command configured = alert only"           "0" "$(ncycles)"
+
+CAM_POWER_CMD="echo x >> '$CYCLES'"; rm -f "$REBOOT_STATE"
+power_cycle_camera 400
+eq "first wedge power-cycles"                     "1" "$(ncycles)"
+FAKE_NOW=10300; power_cycle_camera 700
+eq "not again inside REBOOT_EVERY_SECS"           "1" "$(ncycles)"
+# THE regression guard: the gap must come from disk, not RAM. Restarting the process (fresh locals)
+# is modeled by nothing at all here -- the function keeps no state of its own; only $REBOOT_STATE.
+FAKE_NOW=10700; power_cycle_camera 1100
+eq "after the gap it may cycle again"             "2" "$(ncycles)"
+FAKE_NOW=11400; power_cycle_camera 1800
+eq "the daily cap stops a power-cycling loop"     "2" "$(ncycles)"
+FAKE_NOW=12100; power_cycle_camera 2500
+eq "…and stays stopped for the day"               "2" "$(ncycles)"
+FAKE_DAY=20260926; FAKE_NOW=90000; power_cycle_camera 400
+eq "a new day restores the budget"                "3" "$(ncycles)"
+
+CAM_POWER_CMD="exit 3"; FAKE_NOW=100000; FAKE_DAY=20260927
+if power_cycle_camera 400; then r=ok; else r=fail; fi
+eq "a failing plug command is reported"           "fail" "$r"
+eq "…and still counts against the budget"         "1" "$(cut -d' ' -f2 "$REBOOT_STATE")"
+
+# Wiring: only a WEDGED camera (pings, RTSP dead) is power-cycled; unreachable is power/network.
+CAM_POWER_CMD="echo x >> '$CYCLES'"; rm -f "$REBOOT_STATE"; : > "$CYCLES"; FAKE_NOW=200000
+cam_pings(){ return 1; }; reboot_camera 400
+eq "an unreachable camera is not power-cycled"    "0" "$(ncycles)"
+cam_pings(){ return 0; }; reboot_camera 400
+eq "a wedged camera is power-cycled"              "1" "$(ncycles)"
+unset -f date
 
 # =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"

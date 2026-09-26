@@ -73,6 +73,27 @@ mutate "guard 4: reset on recovery" watchdog.sh test-watchdog.sh \
 mutate "guard 5: revive in the same pass" watchdog.sh test-watchdog.sh \
   's/  sleep 1\n  ensure_session "\$cam" "\$\(cam_cmd "\$cam"\)"\n//s'
 
+printf '\n\033[1mSegmenter stall + camera power-cycle (2026-09-25)\033[0m\n'
+
+# Without the grace every run is killed during its own RTSP handshake: a reconnect loop.
+mutate "stall: connect grace" record-preroll.sh run-tests.sh \
+  's/  \[ "\$\(\(now - t0\)\)" -ge "\$SEG_STALL_SECS" \] \|\| return 1\n//s'
+
+# The original bug: liveness judged only by "ffmpeg is still running".
+mutate "stall: judge by the ring, not the process" record-preroll.sh run-tests.sh \
+  's/(seg_stalled\(\)\{\n  local t0="\$1" now="\$2" newest m=0\n)/$1  return 1\n/s'
+
+# The gap read from RAM instead of disk = a restart re-arms it = power-cycle loop.
+mutate "power-cycle: persisted gap" record-preroll.sh run-tests.sh \
+  's/  if \[ "\$\(\(now - rlast\)\)" -lt "\$REBOOT_EVERY_SECS" \]; then return 1; fi\n//s'
+
+mutate "power-cycle: daily cap" record-preroll.sh run-tests.sh \
+  's/  if \[ "\$rcount" -ge "\$REBOOT_MAX_PER_DAY" \]; then/  if false; then/s'
+
+# Power-cycling an unreachable camera hides power/network faults behind pointless relay clicks.
+mutate "power-cycle: only when wedged" record-preroll.sh run-tests.sh \
+  's/(log_event recording unreachable "no ping \$\{downfor\}s"\n)/$1    power_cycle_camera "\$downfor"\n/s'
+
 echo
 if [ "$SURVIVED" -eq 0 ]; then
   printf '\033[1mAll mutants killed — every fix and every guard is covered by a test that fails without it.\033[0m\n'
