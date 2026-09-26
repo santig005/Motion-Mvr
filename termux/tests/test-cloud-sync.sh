@@ -53,5 +53,15 @@ trim_events; rc=$?
 eq "a missing system log does not stop the camera logs" "50" "$(wc -l < "$CAMERAS_DIR/Camara2/events.jsonl")"
 eq "…and trim_events still succeeds"                    "0"  "$rc"
 
+# =================================================================================================
+describe "fav_basenames — favourites spare exactly their own clip"
+# =================================================================================================
+favs=$(printf '%s' '["mt_20260601_143200","mt_20260926_125715_Camara2","mt_20260926_125715_Camara2"]' | fav_basenames | tr '\n' ' ')
+eq "legacy + tagged names, deduplicated" "mt_20260601_143200 mt_20260926_125715_Camara2 " "$favs"
+# The tag must survive: cut back to the bare timestamp, a Camara2 star would also spare Camara1's
+# same-second clip from the 30-day purge.
+case "$favs" in *"mt_20260926_125715 "*) no "the camera tag is kept" "…_Camara2" "$favs" ;;
+                *) ok "the camera tag is kept" ;; esac
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

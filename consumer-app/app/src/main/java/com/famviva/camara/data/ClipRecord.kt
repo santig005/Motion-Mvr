@@ -40,6 +40,8 @@ data class ClipRecord(
     /** Absolute path of the archived thumbnail jpg on this phone, if any. */
     val thumbLocalPath: String? = null,
     val favorite: Boolean = false,
+    /** Camera id (its Drive folder, e.g. "Camara1"); null for entries whose camera is unknown. */
+    val camera: String? = null,
 ) {
     private val stamp: String? =
         Regex("""mt_(\d{8})_(\d{6})""").find(name)?.let { "${it.groupValues[1]}_${it.groupValues[2]}" }

@@ -32,6 +32,7 @@ class CatalogStore(context: Context) {
                     videoLocalPath = o.optString("videoPath").ifBlank { null },
                     thumbLocalPath = o.optString("thumbPath").ifBlank { null },
                     favorite = o.optBoolean("fav", false),
+                    camera = o.optString("camera").ifBlank { null },
                 )
             }
         }.getOrDefault(emptyList())
@@ -53,6 +54,7 @@ class CatalogStore(context: Context) {
                     r.videoLocalPath?.let { put("videoPath", it) }
                     r.thumbLocalPath?.let { put("thumbPath", it) }
                     put("fav", r.favorite)
+                    r.camera?.let { put("camera", it) }
                 },
             )
         }
@@ -91,6 +93,7 @@ class CatalogStore(context: Context) {
                     onDrive = true,
                     driveFileId = c.id,
                     thumbFileId = c.thumbFileId,
+                    camera = c.camera,
                 )
             }
 
@@ -105,6 +108,7 @@ class CatalogStore(context: Context) {
                         yavgMax = m.yavgMax,
                         framesMov = m.framesMov,
                         onDrive = false,
+                        camera = m.camera,
                     )
                 } else {
                     byName[base] = existing.copy(
@@ -112,6 +116,7 @@ class CatalogStore(context: Context) {
                         durationSec = existing.durationSec ?: m.durSec,
                         yavgMax = existing.yavgMax ?: m.yavgMax,
                         framesMov = existing.framesMov ?: m.framesMov,
+                        camera = existing.camera ?: m.camera,
                     )
                 }
             }

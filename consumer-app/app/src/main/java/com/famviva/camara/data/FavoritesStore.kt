@@ -33,6 +33,7 @@ class FavoritesStore(context: Context) {
                     yavgMax = if (o.has("yavg")) o.optDouble("yavg") else null,
                     framesMov = if (o.has("frames")) o.optInt("frames") else null,
                     durationSec = if (o.has("dur")) o.optDouble("dur") else null,
+                    camera = o.optString("camera").ifBlank { null },
                 )
             }
         }.toList()
@@ -62,13 +63,17 @@ class FavoritesStore(context: Context) {
     }
 
     /** Enrich stored favorite metadata from a fresh Drive listing — backfills id-only favorites
-     *  migrated from the old format, so they keep full data once the Drive original is purged. */
+     *  migrated from the old format, so they keep full data once the Drive original is purged, and
+     *  the camera of favorites starred before clips carried one. */
     fun backfill(clips: List<Clip>) {
         val m = meta()
         var changed = false
         clips.forEach { clip ->
-            if (m.has(clip.id) && m.optJSONObject(clip.id)?.optString("name").isNullOrBlank()) {
+            val o = m.optJSONObject(clip.id) ?: return@forEach
+            if (o.optString("name").isBlank()) {
                 m.put(clip.id, metaOf(clip)); changed = true
+            } else if (clip.camera != null && o.optString("camera").isBlank()) {
+                o.put("camera", clip.camera); changed = true
             }
         }
         if (changed) save(m)
@@ -82,6 +87,7 @@ class FavoritesStore(context: Context) {
         clip.yavgMax?.let { put("yavg", it) }
         clip.framesMov?.let { put("frames", it) }
         clip.durationSec?.let { put("dur", it) }
+        clip.camera?.let { put("camera", it) }
     }
 
     private fun save(m: JSONObject) = prefs.edit().putString(KEY_META, m.toString()).apply()

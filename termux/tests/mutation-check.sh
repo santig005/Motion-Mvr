@@ -114,6 +114,19 @@ mutate "watchdog: event into the root log" watchdog.sh test-watchdog.sh \
 mutate "trim: only the system log" cloud-sync.sh test-cloud-sync.sh \
   's/for f in "\$EVENTS_LOG" "\$CAMERAS_DIR"\/\*\/events\.jsonl; do/for f in "\$EVENTS_LOG"; do/s'
 
+printf '\n\033[1mCamera-tagged clip names (multi-camera F1, 2026-09-26)\033[0m\n'
+
+# A bare timestamp: two cameras' same-second clips collide in every name-keyed store of the app.
+mutate "clip name without the camera tag" record-preroll.sh run-tests.sh \
+  's/printf .mt_%s_%s. "\$1" "\$CLIP_TAG"/printf "mt_%s" "\$1"/s'
+
+mutate "metrics datetime carries the tag" record-preroll.sh run-tests.sh \
+  's/\$\{dt:0:15\}/\$dt/s'
+
+# Cut back to the timestamp, one camera's star would spare every camera's same-second clip.
+mutate "favourites drop the camera tag" cloud-sync.sh test-cloud-sync.sh \
+  's/\(_\[A-Za-z0-9-\]\+\)\?//s'
+
 echo
 if [ "$SURVIVED" -eq 0 ]; then
   printf '\033[1mAll mutants killed — every fix and every guard is covered by a test that fails without it.\033[0m\n'

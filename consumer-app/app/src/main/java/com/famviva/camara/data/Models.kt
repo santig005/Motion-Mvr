@@ -52,6 +52,8 @@ data class Clip(
     /** Drive `createdTime`: server-assigned at actual upload — when the clip became visible on Drive.
      *  The gap to [recordedEndDateTime] is the real end-to-end upload latency ([uploadDelaySeconds]). */
     val driveCreatedTime: Instant? = null,
+    /** Camera id (its Drive folder, e.g. "Camara1"); null when unknown — see [cameraOfFolder]. */
+    val camera: String? = null,
 ) {
     private val stamp: String? =
         Regex("""mt_(\d{8})_(\d{6})""").find(name)?.let { "${it.groupValues[1]}_${it.groupValues[2]}" }
@@ -187,7 +189,14 @@ fun estimateBatteryEtaMinutes(samples: List<BatterySample>): Int? {
 
 /** Metrics of a clip read from the NVR's metrics.csv. [sizeKb] backs the local catalog's size for
  *  clips whose video is gone from Drive (so a metadata-only entry still knows how big it was). */
-data class ClipMetric(val yavgMax: Double, val framesMov: Int, val durSec: Double?, val sizeKb: Long? = null)
+data class ClipMetric(
+    val yavgMax: Double,
+    val framesMov: Int,
+    val durSec: Double?,
+    val sizeKb: Long? = null,
+    /** Camera whose metrics.csv the row came from (null if its folder couldn't be resolved). */
+    val camera: String? = null,
+)
 
 /** Coarse Wi-Fi signal buckets for the NVR link, so the UI can badge it without repeating the dBm
  *  thresholds. See [CameraHealth.wifiQuality]. */

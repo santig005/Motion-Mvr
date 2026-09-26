@@ -1504,6 +1504,7 @@ private fun ClipsScreen(
                                 isDownloaded = vm.isDownloaded(clip),
                                 isFavorite = vm.isFavorite(clip),
                                 label = labels[clip.name.removeSuffix(".mp4")],
+                                camera = clip.camera.takeIf { vm.multiCamera },
                                 onClick = { nav.navigate("player/${clip.id}") },
                                 onLongClick = { actionClip = clip },
                             )
@@ -1652,6 +1653,7 @@ private fun FavoritesScreen(
                         isDownloaded = vm.isDownloaded(clip),
                         isFavorite = true,
                         label = labels[clip.name.removeSuffix(".mp4")],
+                        camera = clip.camera.takeIf { vm.multiCamera },
                         onClick = { nav.navigate("player/${clip.id}") },
                         onLongClick = { actionClip = clip },
                     )
@@ -1792,6 +1794,7 @@ private fun HistoryScreen(
                             HistoryRow(
                                 record = record,
                                 token = token,
+                                camera = record.camera.takeIf { vm.multiCamera },
                                 // Playable while the video is reachable — streamed from Drive (CLOUD)
                                 // or from the local archive (ARCHIVED), even after Drive purged it.
                                 // vm.find() resolves the Drive id or the base name to a playable clip.
@@ -1939,7 +1942,7 @@ private fun CalendarDayCell(
  *  tier badge. Tappable to play only when [onClick] is non-null (i.e. the video is still reachable);
  *  a metadata-only entry shows a "video no disponible" caption and doesn't react to taps. */
 @Composable
-private fun HistoryRow(record: ClipRecord, token: String?, onClick: (() -> Unit)?) {
+private fun HistoryRow(record: ClipRecord, token: String?, camera: String? = null, onClick: (() -> Unit)?) {
     val context = LocalContext.current
     Card(
         modifier = Modifier
@@ -1983,6 +1986,7 @@ private fun HistoryRow(record: ClipRecord, token: String?, onClick: (() -> Unit)
                 }
                 Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    camera?.let { CameraTag(it) }
                     record.period?.let {
                         Text(
                             "${it.emoji} ${stringResource(it.labelRes)}",
@@ -2329,6 +2333,8 @@ private fun ClipCard(
     isDownloaded: Boolean,
     isFavorite: Boolean,
     label: com.famviva.camara.data.ClipLabel? = null,
+    /** Camera to tag the clip with; null hides the tag (single-camera installs). */
+    camera: String? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -2472,6 +2478,7 @@ private fun ClipCard(
                 }
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    camera?.let { CameraTag(it) }
                     clip.period?.let {
                         Text(
                             "${it.emoji} ${stringResource(it.labelRes)}",
@@ -2543,6 +2550,17 @@ private fun IntensityBars(level: Int) {
             )
         }
     }
+}
+
+/** Which camera a clip came from ("📷 Camara2 · "), leading the period line; shown only with 2+ cameras. */
+@Composable
+private fun CameraTag(camera: String) {
+    Text(
+        "📷 $camera · ",
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.Medium,
+        color = MaterialTheme.colorScheme.primary,
+    )
 }
 
 /** Small pill overlaid on the thumbnail (NEW / duration). */

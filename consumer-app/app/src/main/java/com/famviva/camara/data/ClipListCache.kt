@@ -32,6 +32,7 @@ class ClipListCache(context: Context) {
                     durationSec = if (o.has("durationSec")) o.optDouble("durationSec") else null,
                     driveModifiedTime = if (o.has("driveModifiedMs")) Instant.ofEpochMilli(o.getLong("driveModifiedMs")) else null,
                     driveCreatedTime = if (o.has("driveCreatedMs")) Instant.ofEpochMilli(o.getLong("driveCreatedMs")) else null,
+                    camera = o.optString("camera").ifBlank { null },
                 )
             }
         }.getOrDefault(emptyList())
@@ -53,6 +54,7 @@ class ClipListCache(context: Context) {
                     c.durationSec?.let { put("durationSec", it) }
                     c.driveModifiedTime?.let { put("driveModifiedMs", it.toEpochMilli()) }
                     c.driveCreatedTime?.let { put("driveCreatedMs", it.toEpochMilli()) }
+                    c.camera?.let { put("camera", it) }
                 },
             )
         }

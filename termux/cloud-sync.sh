@@ -70,6 +70,9 @@ log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
     "$(date +%s)" "$camf" "$2" "$3" "$d" "$4" >> "$EVENTS_LOG" 2>/dev/null || true
 }
 
+# Clip base names out of the app's favorites.json (stdin), one per line, deduplicated.
+fav_basenames(){ grep -oE 'mt_[0-9]{8}_[0-9]{6}(_[A-Za-z0-9-]+)?' | sort -u; }
+
 # Trim an event log to its newest half at LINE boundaries (tail -n, never -c, so no half JSON line
 # survives). cloud-sync is the ONLY trimmer of every events.jsonl — the system one AND each camera's —
 # so the keepers and the watchdog only ever append, and never race another rewriter.
@@ -241,11 +244,13 @@ while true; do
       # so a starred clip's ORIGINAL survives the purge (re-streamable/re-downloadable on any device).
       # Exclude rules go first (first match wins) so a favourite is spared before the *.mp4/*.jpg
       # includes select it. A missing/empty/unreadable marker => the normal purge (fail-open).
+      # The optional _<camera> tag (clips since 2026-09-26) keeps a favourite from also sparing another
+      # camera's same-second clip; a legacy untagged name still matches its own mp4 + jpg.
       fav_excl=""
-      favs=$(rclone cat "${ROOT_REMOTE}favorites.json" 2>/dev/null | grep -oE 'mt_[0-9]{8}_[0-9]{6}' | sort -u)
+      favs=$(rclone cat "${ROOT_REMOTE}favorites.json" 2>/dev/null | fav_basenames)
       if [ -n "$favs" ]; then
         fav_excl="$HOME/.fav_excludes"
-        printf '%s.*\n' $favs > "$fav_excl" 2>/dev/null    # one "mt_YYYYMMDD_HHMMSS.*" rule per favourite (mp4 + jpg)
+        printf '%s.*\n' $favs > "$fav_excl" 2>/dev/null    # one "mt_YYYYMMDD_HHMMSS[_cam].*" rule per favourite (mp4 + jpg)
         log "cloud retention: sparing $(printf '%s\n' "$favs" | grep -c .) favourite(s) from the >${CLOUD_KEEP_DAYS}d purge"
       fi
       # --drive-use-trash=false: delete for real. Without it the sweep only moves clips to the Drive

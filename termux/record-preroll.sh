@@ -109,6 +109,11 @@ HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (upl
 # camera = one rewriter per file. The app finds them by name anywhere on Drive and merges.
 EVENTS_LOG="${EVENTS_LOG:-$OUT_DIR/events.jsonl}"                # THIS camera's event log (depth 2, next to status.json); keeper + watchdog append, cloud-sync uploads it and is its ONLY trimmer
 CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # canonical camera id, e.g. "Camara1" (OUT_DIR = camera root)
+# Suffix on every clip name (mt_YYYYMMDD_HHMMSS_<tag>.mp4). With several cameras, two clips can start in
+# the same second; the app keys favourites, labels, its catalog and offline files by clip NAME, so a
+# bare timestamp would make them collide. Filename-safe form of CAM_LABEL. Clips from before 2026-09-26
+# have no suffix; every parser (app, cloud-sync favourites) reads only the leading mt_<date>_<time>.
+CLIP_TAG="${CLIP_TAG:-$(printf '%s' "$CAM_LABEL" | tr -c 'A-Za-z0-9-' '_')}"
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
 # Camera-level recovery. The segmenter can reconnect ffmpeg forever, but if the CAMERA's own RTSP
 # service is wedged (accepts TCP yet returns "Invalid data" on BOTH channels) no reconnect helps —
@@ -455,6 +460,10 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
 }
 
+clip_base(){ # $1=YYYYMMDD_HHMMSS -> clip base name (no extension)
+  printf 'mt_%s_%s' "$1" "$CLIP_TAG"
+}
+
 seg_epoch(){ # seg_YYYYMMDD_HHMMSS -> epoch
   local ts=${1#seg_}
   date -d "${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}:${ts:13:2}" +%s 2>/dev/null
@@ -462,12 +471,12 @@ seg_epoch(){ # seg_YYYYMMDD_HHMMSS -> epoch
 
 # Writes the metrics row with values ALREADY computed by the profiler (no re-decoding).
 write_metrics_row(){ # $1=final file  $2=yavg_max  $3=yavg_mean  $4=motion_frames
-  local f="$1" mx="$2" mean="$3" n="$4" dur sz base
+  local f="$1" mx="$2" mean="$3" n="$4" dur sz base dt
   dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$f" 2>/dev/null)
   sz=$(( $(stat -c %s "$f" 2>/dev/null) / 1024 ))
   [ -f "$METRICS" ] || echo "clip,datetime,dur_s,size_kb,yavg_max,yavg_mean,motion_frames" > "$METRICS"
-  base=$(basename "$f" .mp4)
-  echo "$base,${base#mt_},${dur:-0},$sz,$mx,$mean,$n" >> "$METRICS"
+  base=$(basename "$f" .mp4); dt=${base#mt_}
+  echo "$base,${dt:0:15},${dur:-0},$sz,$mx,$mean,$n" >> "$METRICS"    # datetime = YYYYMMDD_HHMMSS only, never the camera tag
   am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://$f" >/dev/null 2>&1
   log "📊 $(basename "$f") dur=${dur}s yavg_max=$mx motion_frames=$n -> gallery"
 }
@@ -850,14 +859,14 @@ ring_detector_loop(){
 # Split out of build_clip so a camera dropout INSIDE a motion window yields SEPARATE clips instead of
 # one clip that time-jumps across the missing footage (see build_clip's gap-split).
 render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcount
-  local list="$1" first_start="$2" clip_start="$3" clip_end="$4" segcount="$5" offset dur ts dst
+  local list="$1" first_start="$2" clip_start="$3" clip_end="$4" segcount="$5" offset dur ts dst name
   offset=$((clip_start - first_start)); [ "$offset" -lt 0 ] && offset=0
   dur=$((clip_end - clip_start)); [ "$dur" -lt 1 ] && dur=1
   ts=$(date -d "@$clip_start" "+%Y%m%d_%H%M%S" 2>/dev/null)
   # Organized as Camera/Year/Month/Day: the clip (and its thumbnail) go to OUT_DIR/YYYY/MM/DD/.
   local datedir; datedir="$OUT_DIR/$(date -d "@$clip_start" "+%Y/%m/%d" 2>/dev/null)"
   mkdir -p "$datedir"
-  dst="$datedir/mt_${ts}.mp4"
+  name=$(clip_base "$ts"); dst="$datedir/$name.mp4"
   # Profile (one decode) to find the last REAL motion and the tail to trim. Pick the crop from the
   # clip's actual width, so a sub-stream (360p) clip during a 2K-fallback spell still gets a real
   # metric (via DET_CROP) instead of a spurious zero from the out-of-range 2K crop.
@@ -868,7 +877,7 @@ render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcoun
   prof=$(profile_motion "$list" "$offset" "$dur" "$mcrop")
   if [ "$prof" = "NOMOTION" ] || [ -z "$prof" ]; then
     final_dur="$dur"; mx=0; mean=0; n=0; m1="NA"
-    log "… no measurable motion on 2K for mt_${ts}; keeping full window (${dur}s)"
+    log "… no measurable motion on 2K for $name; keeping full window (${dur}s)"
   else
     read -r m0 m1 cut mx mean n <<<"$prof"
     final_dur=$(awk "BEGIN{d=$cut; if(d>$dur)d=$dur; if(d<1)d=1; printf \"%.3f\", d}")
@@ -884,9 +893,9 @@ render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcoun
     mv -f "$part" "$dst"
     make_thumb "$dst" "$final_dur"
     rm -f "$list"; write_metrics_row "$dst" "$mx" "$mean" "$n"
-    log "✂️ mt_${ts} (offset=${offset}s window=${dur}s -> trimmed=${final_dur}s, motion_end=${m1}s, $segcount seg)"
+    log "✂️ $name (offset=${offset}s window=${dur}s -> trimmed=${final_dur}s, motion_end=${m1}s, $segcount seg)"
   else
-    rm -f "$list" "$part"; log "!! trim failed for mt_${ts}"
+    rm -f "$list" "$part"; log "!! trim failed for $name"
   fi
 }
 

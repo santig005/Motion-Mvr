@@ -32,6 +32,7 @@ class DriveClient(
     suspend fun listClips(): List<Clip> = withContext(Dispatchers.IO) {
         val clips = mutableListOf<Clip>()           // the mp4 files
         val thumbs = HashMap<String, String>()      // base name (no extension) -> jpg id
+        val parentOf = HashMap<String, String>()    // mp4 id -> its (day) folder id, to resolve the camera
         var pageToken: String? = null
         do {
             val token = tokenProvider()
@@ -44,7 +45,7 @@ class DriveClient(
                 .addQueryParameter("pageSize", "1000")
                 .addQueryParameter(
                     "fields",
-                    "nextPageToken, files(id, name, size, mimeType, thumbnailLink, createdTime, modifiedTime, videoMediaMetadata(durationMillis))",
+                    "nextPageToken, files(id, name, size, mimeType, parents, thumbnailLink, createdTime, modifiedTime, videoMediaMetadata(durationMillis))",
                 )
                 .addQueryParameter("spaces", "drive")
             pageToken?.let { urlBuilder.addQueryParameter("pageToken", it) }
@@ -76,6 +77,8 @@ class DriveClient(
                                 ?.let { runCatching { Instant.parse(it) }.getOrNull() }
                             val created = f.optString("createdTime").ifBlank { null }
                                 ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+                            f.optJSONArray("parents")?.optString(0)?.ifBlank { null }
+                                ?.let { parentOf[f.getString("id")] = it }
                             clips += Clip(
                                 id = f.getString("id"),
                                 name = name,
@@ -92,13 +95,17 @@ class DriveClient(
             }
         } while (pageToken != null)
 
-        val metrics = runCatching { fetchMetrics(tokenProvider()) }.getOrDefault(emptyMap())
+        // One extra listing resolves every clip's camera from its folder chain. Fail-open: without it
+        // clips are simply camera-less, exactly as before multi-camera.
+        val folders = runCatching { fetchFolders(tokenProvider()) }.getOrDefault(emptyMap())
+        val metrics = runCatching { fetchMetrics(tokenProvider(), folders) }.getOrDefault(emptyMap())
 
         clips
             .map { c ->
                 val base = c.name.removeSuffix(".mp4")
                 val m = metrics[base]
                 c.copy(
+                    camera = cameraOfFolder(parentOf[c.id], folders),
                     thumbFileId = thumbs[base],
                     yavgMax = m?.yavgMax,
                     framesMov = m?.framesMov,
@@ -399,36 +406,73 @@ class DriveClient(
      *  whole file is tiny (~3 MB/yr) and never purged, so this is the complete motion history — clips
      *  long gone from Drive still contribute a metadata-only entry. */
     suspend fun fetchAllMetrics(): Map<String, ClipMetric> = withContext(Dispatchers.IO) {
-        runCatching { fetchMetrics(tokenProvider()) }.getOrDefault(emptyMap())
+        runCatching {
+            val token = tokenProvider()
+            fetchMetrics(token, runCatching { fetchFolders(token) }.getOrDefault(emptyMap()))
+        }.getOrDefault(emptyMap())
+    }
+
+    /** Every folder visible to the app (id -> name + parent), paginated: the input to
+     *  [cameraOfFolder]. The camera tree is small (cameras x a few dozen date folders). */
+    private fun fetchFolders(token: String): Map<String, DriveFolder> {
+        val out = HashMap<String, DriveFolder>()
+        var pageToken: String? = null
+        do {
+            val b = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
+                .addQueryParameter("q", "mimeType = 'application/vnd.google-apps.folder' and trashed = false")
+                .addQueryParameter("fields", "nextPageToken, files(id, name, parents)")
+                .addQueryParameter("pageSize", "1000")
+                .addQueryParameter("spaces", "drive")
+            pageToken?.let { b.addQueryParameter("pageToken", it) }
+            http.newCall(Request.Builder().url(b.build()).header("Authorization", "Bearer $token").get().build())
+                .execute().use { resp ->
+                    if (!resp.isSuccessful) error("Drive folders ${resp.code}")
+                    val json = JSONObject(resp.body?.string() ?: "{}")
+                    val files = json.optJSONArray("files")
+                    if (files != null) for (i in 0 until files.length()) {
+                        val f = files.getJSONObject(i)
+                        out[f.getString("id")] = DriveFolder(
+                            name = f.optString("name"),
+                            parent = f.optJSONArray("parents")?.optString(0)?.ifBlank { null },
+                        )
+                    }
+                    pageToken = json.optString("nextPageToken").ifBlank { null }
+                }
+        } while (pageToken != null)
+        return out
     }
 
     /** Downloads the metrics.csv files across the tree and returns: clip_name -> metrics (yavg_max, frames, dur_s). */
-    private fun fetchMetrics(token: String): Map<String, ClipMetric> {
+    private fun fetchMetrics(token: String, folders: Map<String, DriveFolder>): Map<String, ClipMetric> {
         val out = HashMap<String, ClipMetric>()
-        // Locate the metrics.csv files
+        // Locate the metrics.csv files (one per camera folder); the parent says whose rows they are.
         val listUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
             .addQueryParameter("q", "name = 'metrics.csv' and trashed = false")
-            .addQueryParameter("fields", "files(id)")
+            .addQueryParameter("fields", "files(id, parents)")
             .addQueryParameter("pageSize", "100")
             .build()
-        val ids = mutableListOf<String>()
+        val files = mutableListOf<Pair<String, String?>>()   // file id -> camera
         http.newCall(Request.Builder().url(listUrl).header("Authorization", "Bearer $token").get().build())
             .execute().use { resp ->
                 if (!resp.isSuccessful) return emptyMap()
-                val files = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files") ?: return emptyMap()
-                for (i in 0 until files.length()) ids += files.getJSONObject(i).getString("id")
+                val arr = JSONObject(resp.body?.string() ?: "{}").optJSONArray("files") ?: return emptyMap()
+                for (i in 0 until arr.length()) {
+                    val f = arr.getJSONObject(i)
+                    val parent = f.optJSONArray("parents")?.optString(0)?.ifBlank { null }
+                    files += f.getString("id") to cameraOfFolder(parent, folders)
+                }
             }
-        for (id in ids) {
+        for ((id, camera) in files) {
             val mediaUrl = "https://www.googleapis.com/drive/v3/files/$id?alt=media"
             http.newCall(Request.Builder().url(mediaUrl).header("Authorization", "Bearer $token").get().build())
                 .execute().use { resp ->
-                    if (resp.isSuccessful) parseMetricsCsv(resp.body?.string().orEmpty(), out)
+                    if (resp.isSuccessful) parseMetricsCsv(resp.body?.string().orEmpty(), camera, out)
                 }
         }
         return out
     }
 
-    private fun parseMetricsCsv(csv: String, into: MutableMap<String, ClipMetric>) {
+    private fun parseMetricsCsv(csv: String, camera: String?, into: MutableMap<String, ClipMetric>) {
         // Header: clip,datetime,dur_s,size_kb,yavg_max,yavg_mean,motion_frames
         csv.lineSequence().drop(1).forEach { line ->
             if (line.isBlank()) return@forEach
@@ -440,7 +484,7 @@ class DriveClient(
                 val yavg = c[4].trim().toDoubleOrNull()
                 val frames = c[6].trim().toIntOrNull()
                 if (name.isNotEmpty() && yavg != null) {
-                    into[name] = ClipMetric(yavgMax = yavg, framesMov = frames ?: 0, durSec = durSec, sizeKb = sizeKb)
+                    into[name] = ClipMetric(yavgMax = yavg, framesMov = frames ?: 0, durSec = durSec, sizeKb = sizeKb, camera = camera)
                 }
             }
         }

@@ -1,6 +1,7 @@
 package com.famviva.camara
 
 import androidx.annotation.StringRes
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -76,6 +77,10 @@ class MainViewModel(
     // rebuilt on each successful load (see [load]).
     var catalog by mutableStateOf<List<ClipRecord>>(catalogStore.load())
         private set
+
+    /** True once clips from more than one camera exist. Only then does each clip carry a camera tag,
+     *  so a single-camera install looks exactly as before (multi-camera F1). */
+    val multiCamera: Boolean by derivedStateOf { clips.mapNotNullTo(HashSet()) { it.camera }.size > 1 }
 
     // Bumped on every download/delete so Compose recomposes reads of offline state below — the
     // filesystem itself isn't observable, so this is the invalidation signal.

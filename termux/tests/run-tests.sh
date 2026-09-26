@@ -500,5 +500,22 @@ p_ev=$(EVENTS_LOG="$SANDBOX/events_cam2.jsonl"; OUT_DIR="$SANDBOX/Camaras/Camara
 eq "an explicit EVENTS_LOG in the env still wins"       "$SANDBOX/events_cam2.jsonl"                  "$p_ev"
 
 # =============================================================================================
+describe "clip names carry the camera (multi-camera F1, 2026-09-26)"
+# =============================================================================================
+# Two cameras can start a clip in the same second; the app keys favourites, labels, its catalog and
+# offline files by clip NAME, so the name itself must be unique across cameras.
+eq "the clip name ends with the camera tag"   "mt_20260926_125715_out" "$(clip_base 20260926_125715)"
+tag=$(unset CLIP_TAG; CAM_LABEL="Patio trasero/2"; OUT_DIR="$SANDBOX/out"
+      RECORD_PREROLL_LIB=1 . "$SUT" >/dev/null 2>&1; printf '%s' "$CLIP_TAG")
+eq "the tag is filename-safe"                 "Patio_trasero_2" "$tag"
+# metrics.csv 'datetime' stays the bare timestamp even though the clip column now carries the tag.
+export METRICS="$SANDBOX/metrics.csv"; rm -f "$METRICS"
+printf '12.5' > "$SANDBOX/out/mt_20260926_125715_out.mp4"
+write_metrics_row "$SANDBOX/out/mt_20260926_125715_out.mp4" 7.8 1.2 40 >/dev/null 2>&1
+row=$(tail -1 "$METRICS")
+eq "metrics row: clip = full name"            "mt_20260926_125715_out" "${row%%,*}"
+eq "metrics row: datetime = timestamp only"   "20260926_125715" "$(printf '%s' "$row" | cut -d, -f2)"
+
+# =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
