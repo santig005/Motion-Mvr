@@ -103,8 +103,12 @@ WEDGE_STATE="$RING_DIR/.wedge_state"              # segmenter -> keeper: "1 <sin
 # cycle. Persisting it is what makes the wedge classifier able to fire at all.
 SEG_STATE="$RING_DIR/.seg_state"
 HEALTH_FILE="${HEALTH_FILE:-$OUT_DIR/status.json}"          # camera health (uploaded to Drive; read by the app)
-EVENTS_LOG="${EVENTS_LOG:-$(dirname "$OUT_DIR")/events.jsonl}"  # shared event log at CAMERAS_DIR root (depth 1); cloud-sync uploads it and is its ONLY trimmer
-CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # e.g. "cam1" (OUT_DIR = camera root)
+# Telemetry lives in the CAMERA's folder, not at CAMERAS_DIR root (2026-09-26, multi-camera step 1).
+# wifi.jsonl and daily_health.jsonl are REWRITTEN by their keeper (cap trim, per-day upsert); with two
+# keepers sharing one root file, one camera's rewrite could drop the other's lines. One folder per
+# camera = one rewriter per file. The app finds them by name anywhere on Drive and merges.
+EVENTS_LOG="${EVENTS_LOG:-$OUT_DIR/events.jsonl}"                # THIS camera's event log (depth 2, next to status.json); keeper + watchdog append, cloud-sync uploads it and is its ONLY trimmer
+CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # canonical camera id, e.g. "Camara1" (OUT_DIR = camera root)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
 # Camera-level recovery. The segmenter can reconnect ffmpeg forever, but if the CAMERA's own RTSP
 # service is wedged (accepts TCP yet returns "Invalid data" on BOTH channels) no reconnect helps —
@@ -123,7 +127,7 @@ REBOOT_MAX_PER_DAY="${REBOOT_MAX_PER_DAY:-6}"
 REBOOT_STATE="$RING_DIR/.reboots"                 # "<YYYYMMDD> <count today> <last attempt epoch>"
 CAM_HOST="${CAM_HOST:-$(printf '%s' "$RTSP_MAIN" | sed -E 's#^[a-z]+://([^@]*@)?([^:/]+).*#\2#')}"  # camera IP/host for ping + control
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-1200}"         # periodic status.json refresh (heartbeat + battery), ~20min
-WIFI_LOG="${WIFI_LOG:-$(dirname "$OUT_DIR")/wifi.jsonl}"         # dense Wi-Fi time series at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl lane; keeper is its ONLY writer
+WIFI_LOG="${WIFI_LOG:-$OUT_DIR/wifi.jsonl}"                     # dense Wi-Fi time series, per camera (depth 2); rides cloud-sync's *.jsonl lane; keeper is its ONLY writer
 WIFI_SAMPLE_SECS="${WIFI_SAMPLE_SECS:-120}"                      # how often to sample the Wi-Fi radio. Fine enough to correlate an RTSP wedge with RF (20min was useless for that); cheap on a charging phone
 WIFI_MAX_LINES="${WIFI_MAX_LINES:-2000}"                         # line cap on wifi.jsonl (~2.8 days at 120s); bounds the re-upload cost over the very weak link it exists to diagnose
 LINK_PINGS="${LINK_PINGS:-20}"                                   # pings to the camera per Wi-Fi sample (0.2s apart -> ~4s); 20 gives 5% loss resolution. 0 disables the link probe
@@ -133,7 +137,7 @@ BATTERY_HIST_WINDOW_SECS="${BATTERY_HIST_WINDOW_SECS:-14400}"    # regression wi
 BATTERY_FLOOR_PCT="${BATTERY_FLOOR_PCT:-5}"                      # % the ETA extrapolates to (phone effectively dead)
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"                                # cap on the cam log before it's trimmed to its newest half
 DISK_FREE_MIN_MB="${DISK_FREE_MIN_MB:-500}"                     # emergency floor: below this, prune oldest clips so recording never dies on a full disk
-DAILY_HEALTH="${DAILY_HEALTH:-$(dirname "$OUT_DIR")/daily_health.jsonl}"        # long-horizon rollup at CAMERAS_DIR root (depth 1); rides cloud-sync's *.jsonl refresh lane; keeper is its ONLY writer
+DAILY_HEALTH="${DAILY_HEALTH:-$OUT_DIR/daily_health.jsonl}"                    # long-horizon rollup, per camera (depth 2); rides cloud-sync's *.jsonl refresh lane; keeper is its ONLY writer
 HEALTH_ACC="${HEALTH_ACC:-$HOME/.health_acc_$CAM_LABEL}"                        # local-only (NOT uploaded) running per-day accumulator; single writer = keeper, no concurrency
 SYNC_STATUS_FILE="${SYNC_STATUS_FILE:-$(dirname "$OUT_DIR")/sync_status.json}"  # cloud-sync's health file; keeper READS it to fold sync failures in (never shared-write)
 SYNC_STALE_SECS="${SYNC_STALE_SECS:-900}"                       # cloud-sync's fast lane not completing for this long => sync is DOWN (it runs every ~60s)

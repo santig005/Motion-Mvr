@@ -108,19 +108,27 @@ existence** (`~/camN.env` exists ⇒ camera exists), the **app owns enabled/disa
 - Per-camera reboot/power-cycle (smart plug) already keys its guards per camera via `$RING_DIR/.reboots`
   — one plug per camera, or a plug map, later.
 
-### B4. Per-camera telemetry — remove the shared-file concurrency hazard
+### B4. Per-camera telemetry — remove the shared-file concurrency hazard — ✅ DONE 2026-09-26
 
-`status.json`, ring, `.health_acc_*`, `.battery_hist_*` are already per-camera. But `events.jsonl`,
-`wifi.jsonl`, `daily_health.jsonl` are **shared files at `CAMERAS_DIR` root**, written by each
-camera's keeper — with two keepers this is a concurrent-append hazard (this session sidestepped it by
-pointing cam2 at `*_cam2.jsonl` files). Productized options:
+`status.json`, ring, `.health_acc_*`, `.battery_hist_*` were already per-camera; `events.jsonl`,
+`wifi.jsonl`, `daily_health.jsonl` were **shared files at `CAMERAS_DIR` root**. The real hazard was
+not the appends but the *rewrites*: the keeper cap-trims `wifi.jsonl` and upserts today's line into
+`daily_health.jsonl` by rewriting the whole file, so two keepers would drop each other's lines.
 
-- **(a) Per-camera files** `events_<cam>.jsonl`, `wifi_<cam>.jsonl`, `daily_health_<cam>.jsonl`; the
-  app reads and merges. Simplest, zero contention, natural for per-camera views. **Recommended.**
-- (b) A single **serializer** process that owns the shared logs; keepers hand it lines over a fifo.
-  More moving parts on a phone; only worth it if a truly global ordered event stream is needed.
-
-Recommend (a): it also makes per-camera health/storage in the app a direct read.
+**Decided:** the three files move into **each camera's folder, same names**
+(`Camaras/Camara1/{events,wifi,daily_health}.jsonl`, depth 2 like `status.json`).
+- One rewriter per file: the keeper owns its `wifi`/`daily_health`; the keeper + watchdog only
+  *append* to their camera's `events.jsonl`; cloud-sync is the only trimmer of every `events.jsonl`.
+- The root keeps `events.jsonl` as the **system log** (cloud-sync only) and its legacy Camara1 history,
+  which ages out through the trim.
+- **No app change for N=1:** the app already looks files up by exact name anywhere on Drive and merges
+  them, so `Camara1/events.jsonl` + root `events.jsonl` read as one continuous history.
+- **Canonical camera id = the folder name (`Camara1`)**, already in every existing record and Drive
+  path. The watchdog used to write `"cam1"` (the env name); fixed. `cameras.json` (B2) should key on
+  the same id.
+- A camera can still be kept out of the app's view with `EVENTS_LOG`/`WIFI_LOG`/`DAILY_HEALTH`
+  overrides in its env (cam2 does this until the app filters by camera, F2/F3 — otherwise its
+  360p/drops would be painted into Camara1's Salud lanes and Wi-Fi chart).
 
 ### B5. Retention & Drive quota with N cameras
 

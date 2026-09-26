@@ -195,5 +195,33 @@ le "blip 'recovery' cannot refill the budget" "$DET_KICK_MAX" "$KILLED"
 case "$EVENTS" in *giveup*) ok "it still stands down explicitly" ;;
                   *) no "it still stands down explicitly" "…,giveup" "$EVENTS" ;; esac
 
+# =================================================================================================
+describe "wlog_event writes where the camera's keeper writes, with the same camera id"
+# =================================================================================================
+# The ladder tests above stub wlog_event and cam_env_var; this re-sources the REAL ones in a subshell.
+# Before 2026-09-26 it wrote "cam1" (the env name) into the ROOT log while the keeper wrote "Camara1".
+mkdir -p "$SANDBOX/Camaras/Camara3"
+cat > "$SANDBOX/cam3.env" <<ENV
+OUT_DIR="$SANDBOX/Camaras/Camara3"
+ENV
+cat > "$SANDBOX/cam4.env" <<ENV
+OUT_DIR="$SANDBOX/Camaras/Camara4"
+EVENTS_LOG="$SANDBOX/Camaras/events_cam4.jsonl"
+CAM_LABEL="Patio"
+ENV
+( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1
+  date(){ command date "$@"; }
+  wlog_event cam3 restart "detector blind 400s, attempt 1"
+  wlog_event cam4 giveup "blind 9000s after 3 restarts" )
+line3=$(cat "$SANDBOX/Camaras/Camara3/events.jsonl" 2>/dev/null)
+eq "a camera's watchdog event lands in <cam>/events.jsonl" \
+   '{"ts":TS,"cam":"Camara3","svc":"watchdog","ev":"restart","msg":"detector blind 400s, attempt 1"}' \
+   "$(printf '%s' "$line3" | sed -E 's/"ts":[0-9]+/"ts":TS/')"
+eq "nothing is written to the shared root log" "absent" \
+   "$([ -e "$SANDBOX/Camaras/events.jsonl" ] && echo present || echo absent)"
+line4=$(cat "$SANDBOX/Camaras/events_cam4.jsonl" 2>/dev/null)
+case "$line4" in *'"cam":"Patio"'*'"ev":"giveup"'*) ok "env EVENTS_LOG / CAM_LABEL overrides are honoured" ;;
+                 *) no "env EVENTS_LOG / CAM_LABEL overrides are honoured" '…"cam":"Patio"…giveup…' "$line4" ;; esac
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

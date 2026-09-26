@@ -129,12 +129,17 @@ a power-cycle, not a wait), **blind detector** (recording fine but nothing detec
 and **low battery** — each with its own wording, because "no signal" is easy to scroll past while
 "unplug the camera" is not.
 
-A few more files at the cameras root make outages *reconstructable after the fact*, not just visible
-live (they ride the same csv/json refresh lane):
+A few more files make outages *reconstructable after the fact*, not just visible live (they ride the
+same csv/json refresh lane). Since 2026-09-26 the per-camera ones live in **each camera's folder**
+(`<CamaraN>/events.jsonl`, `wifi.jsonl`, `daily_health.jsonl`, next to its `status.json`), so every
+file has exactly one rewriter even with several cameras; the root keeps only cloud-sync's
+`events.jsonl` (system/sync events) and `sync_status.json`. The app finds each name anywhere on Drive
+and merges the files; every line carries a `cam` id (= the camera folder name, e.g. `Camara1`).
 
 - **`events.jsonl`** — an append-only event log (one JSON object per line): recording `down`/`up`
   with the outage duration, segmenter/detector drops with how long the run lasted, wedge verdicts,
-  and sync failures. Trimmed at line boundaries past ~256 KB by cloud-sync (its only trimmer). The
+  watchdog recoveries, and sync failures. The keeper and the watchdog append to their camera's log;
+  cloud-sync writes the root one and trims all of them at line boundaries past ~256 KB. The
   app's **Salud** screen renders it as a per-service coverage timeline (zoomable 1h → 30d): which
   service fell, when, and for how long.
 - **`sync_status.json`** — cloud-sync's own health, written once per cycle: per-lane last-success

@@ -481,5 +481,24 @@ eq "a wedged camera is power-cycled"              "1" "$(ncycles)"
 unset -f date
 
 # =============================================================================================
+describe "telemetry paths — each camera owns its files (multi-camera step 1, 2026-09-26)"
+# =============================================================================================
+# The harness above exports explicit paths, so the DEFAULTS are checked by re-sourcing in a subshell
+# with them unset. At CAMERAS_DIR root, two keepers would rewrite the same wifi/daily_health file.
+paths=$(unset EVENTS_LOG WIFI_LOG DAILY_HEALTH CAM_LABEL
+        OUT_DIR="$SANDBOX/Camaras/Camara2" RECORD_PREROLL_LIB=1 . "$SUT" >/dev/null 2>&1
+        printf '%s|%s|%s|%s' "$EVENTS_LOG" "$WIFI_LOG" "$DAILY_HEALTH" "$CAM_LABEL")
+IFS='|' read -r p_ev p_wifi p_daily p_label <<<"$paths"
+eq "events.jsonl defaults into the camera folder"       "$SANDBOX/Camaras/Camara2/events.jsonl"       "$p_ev"
+eq "wifi.jsonl defaults into the camera folder"         "$SANDBOX/Camaras/Camara2/wifi.jsonl"         "$p_wifi"
+eq "daily_health.jsonl defaults into the camera folder" "$SANDBOX/Camaras/Camara2/daily_health.jsonl" "$p_daily"
+eq "the camera id is the folder name"                   "Camara2"                                     "$p_label"
+# The env override still wins: that is how a test camera is kept out of the app's view.
+# (Plain assignments, not `VAR=x . file`: a prefix assignment to `.` is undone when the source returns.)
+p_ev=$(EVENTS_LOG="$SANDBOX/events_cam2.jsonl"; OUT_DIR="$SANDBOX/Camaras/Camara2"
+       RECORD_PREROLL_LIB=1 . "$SUT" >/dev/null 2>&1; printf '%s' "$EVENTS_LOG")
+eq "an explicit EVENTS_LOG in the env still wins"       "$SANDBOX/events_cam2.jsonl"                  "$p_ev"
+
+# =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

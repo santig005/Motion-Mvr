@@ -94,6 +94,26 @@ mutate "power-cycle: daily cap" record-preroll.sh run-tests.sh \
 mutate "power-cycle: only when wedged" record-preroll.sh run-tests.sh \
   's/(log_event recording unreachable "no ping \$\{downfor\}s"\n)/$1    power_cycle_camera "\$downfor"\n/s'
 
+printf '\n\033[1mPer-camera telemetry (multi-camera step 1, 2026-09-26)\033[0m\n'
+
+# Back at CAMERAS_DIR root, two keepers rewrite the same file and drop each other's lines.
+mutate "daily_health back at the shared root" record-preroll.sh run-tests.sh \
+  's/DAILY_HEALTH="\$\{DAILY_HEALTH:-\$OUT_DIR\/daily_health\.jsonl\}"/DAILY_HEALTH="\${DAILY_HEALTH:-\$(dirname "\$OUT_DIR")\/daily_health.jsonl}"/s'
+
+mutate "wifi.jsonl back at the shared root" record-preroll.sh run-tests.sh \
+  's/WIFI_LOG="\$\{WIFI_LOG:-\$OUT_DIR\/wifi\.jsonl\}"/WIFI_LOG="\${WIFI_LOG:-\$(dirname "\$OUT_DIR")\/wifi.jsonl}"/s'
+
+# The pre-fix watchdog: the env name as the camera id, i.e. a phantom second camera in the app.
+mutate "watchdog: env name as camera id" watchdog.sh test-watchdog.sh \
+  's/"\$\(date \+%s\)" "\$label" "\$2" "\$3"/"\$(date +%s)" "\$1" "\$2" "\$3"/s'
+
+mutate "watchdog: event into the root log" watchdog.sh test-watchdog.sh \
+  's/ev_log="\$out\/events\.jsonl"/ev_log="\$(dirname "\$out")\/events.jsonl"/s'
+
+# Only the root log trimmed: every camera's log grows forever.
+mutate "trim: only the system log" cloud-sync.sh test-cloud-sync.sh \
+  's/for f in "\$EVENTS_LOG" "\$CAMERAS_DIR"\/\*\/events\.jsonl; do/for f in "\$EVENTS_LOG"; do/s'
+
 echo
 if [ "$SURVIVED" -eq 0 ]; then
   printf '\033[1mAll mutants killed — every fix and every guard is covered by a test that fails without it.\033[0m\n'

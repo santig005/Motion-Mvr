@@ -54,14 +54,14 @@ QUOTA_EVERY="${QUOTA_EVERY:-900}"
 LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 SYNC_STATUS="${SYNC_STATUS:-$CAMERAS_DIR/sync_status.json}"   # per-cycle sync health (depth 1; uploaded by the refresh lane); app infers "sync caído" from a stale 'updated'
-EVENTS_LOG="${EVENTS_LOG:-$CAMERAS_DIR/events.jsonl}"         # shared event log (record-preroll also appends); this is the ONLY writer that trims it
-EVENTS_MAX_KB="${EVENTS_MAX_KB:-256}"                         # trim events.jsonl to its newest half past this (line boundaries)
+EVENTS_LOG="${EVENTS_LOG:-$CAMERAS_DIR/events.jsonl}"         # SYSTEM event log (sync/quota; only cloud-sync writes it). Per-camera logs live at <cam>/events.jsonl
+EVENTS_MAX_KB="${EVENTS_MAX_KB:-256}"                         # trim each events.jsonl to its newest half past this (line boundaries)
 mkdir -p "$(dirname "$LOG")" "$CAMERAS_DIR"
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
-# Global event log at the CAMERAS_DIR root (one short JSON object per line; never URLs/creds). This is
-# the ONLY place that trims it (line-boundary, newest half) so a concurrent append from record-preroll
-# is safe. cam empty => JSON null (whole-tree events); the *.jsonl refresh include uploads the file.
+# System event log at the CAMERAS_DIR root (one short JSON object per line; never URLs/creds). Only
+# cloud-sync writes it; camera events go to each camera's own <cam>/events.jsonl (keeper + watchdog).
+# cam empty => JSON null (whole-tree events); the *.jsonl refresh include uploads the file.
 log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
   local camf="null" d=""
   [ -n "$1" ] && camf="\"$1\""
@@ -70,15 +70,23 @@ log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
     "$(date +%s)" "$camf" "$2" "$3" "$d" "$4" >> "$EVENTS_LOG" 2>/dev/null || true
 }
 
-# Trim events.jsonl to its newest half at LINE boundaries (tail -n, never -c, so no half JSON line
-# survives). Only cloud-sync trims it, so keeper's concurrent appends can't lose a partial line.
-trim_events(){
-  local sz lines
-  sz=$(stat -c %s "$EVENTS_LOG" 2>/dev/null) || return 0
+# Trim an event log to its newest half at LINE boundaries (tail -n, never -c, so no half JSON line
+# survives). cloud-sync is the ONLY trimmer of every events.jsonl — the system one AND each camera's —
+# so the keepers and the watchdog only ever append, and never race another rewriter.
+trim_events_file(){ # $1 = events file
+  local f="$1" sz lines
+  sz=$(stat -c %s "$f" 2>/dev/null) || return 0
   [ "$sz" -gt $((EVENTS_MAX_KB * 1024)) ] || return 0
-  lines=$(wc -l < "$EVENTS_LOG" 2>/dev/null) || return 0
+  lines=$(wc -l < "$f" 2>/dev/null) || return 0
   [ "${lines:-0}" -gt 1 ] || return 0
-  tail -n $((lines / 2)) "$EVENTS_LOG" > "$EVENTS_LOG.tmp" 2>/dev/null && mv -f "$EVENTS_LOG.tmp" "$EVENTS_LOG" 2>/dev/null
+  tail -n $((lines / 2)) "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null
+}
+trim_events(){
+  local f
+  for f in "$EVENTS_LOG" "$CAMERAS_DIR"/*/events.jsonl; do
+    [ -f "$f" ] && trim_events_file "$f"
+  done
+  return 0
 }
 
 # Sync health for the app (atomic tmp+mv), written once per cycle. A stale 'updated' => sync is down.
@@ -147,6 +155,10 @@ trim_log(){
   [ "$sz" -gt $((LOG_MAX_KB * 1024)) ] || return 0
   tail -c $((LOG_MAX_KB * 1024 / 2)) "$LOG" > "$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
 }
+
+# Test hook: `CLOUD_SYNC_LIB=1 . cloud-sync.sh` loads the config and functions without entering the
+# sync loop. Must stay the last line before the loop.
+[ "${CLOUD_SYNC_LIB:-0}" = 1 ] && return 0
 
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | fast lane (today) every ${INTERVAL}s, self-heal every ${HEAL_EVERY}s, retention every ${RETENTION_EVERY}s ==="
 last_heal=0

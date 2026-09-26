@@ -76,15 +76,19 @@ cam_env_var(){ # $1=cam  $2=var name
   ( set +u; . "$HOME/$1.env" 2>/dev/null; eval "printf '%s' \"\${$2:-}\"" )
 }
 
-# One short JSON line into the shared event log, same shape record-preroll.sh emits, so a recovery
-# attempt is reconstructible afterwards instead of living only in this log. The whole reason the
-# 2026-08-16 analysis had to be done by reading cam logs by hand is that nothing recorded WHY.
-wlog_event(){ # $1=cam  $2=ev  $3=msg
-  local out ev_log
+# One short JSON line into THAT camera's event log, same shape and same file record-preroll.sh uses,
+# so a recovery attempt is reconstructible afterwards instead of living only in this log. The whole
+# reason the 2026-08-16 analysis had to be done by reading cam logs by hand is that nothing recorded WHY.
+# The path and the "cam" id are resolved exactly as the keeper resolves them (env override, else
+# OUT_DIR/events.jsonl and basename OUT_DIR): until 2026-09-26 this wrote "cam1" — the env name —
+# while every other line said "Camara1", so the app would have shown them as two cameras.
+wlog_event(){ # $1=cam (env name)  $2=ev  $3=msg
+  local out ev_log label
   out=$(cam_env_var "$1" OUT_DIR); [ -n "$out" ] || return 0
-  ev_log="$(dirname "$out")/events.jsonl"
+  ev_log=$(cam_env_var "$1" EVENTS_LOG); [ -n "$ev_log" ] || ev_log="$out/events.jsonl"
+  label=$(cam_env_var "$1" CAM_LABEL);   [ -n "$label" ]  || label=$(basename "$out")
   printf '{"ts":%d,"cam":"%s","svc":"watchdog","ev":"%s","msg":"%s"}\n' \
-    "$(date +%s)" "$1" "$2" "$3" >> "$ev_log" 2>/dev/null || true
+    "$(date +%s)" "$label" "$2" "$3" >> "$ev_log" 2>/dev/null || true
 }
 
 # A detector that has been delivering NO frames for DET_BLIND_KICK seconds is not going to fix itself

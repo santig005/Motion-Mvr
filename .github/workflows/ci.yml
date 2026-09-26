@@ -22,6 +22,9 @@ jobs:
       - name: Unit tests — watchdog recovery ladder
         run: bash termux/tests/test-watchdog.sh
 
+      - name: Unit tests — cloud-sync event-log housekeeping
+        run: bash termux/tests/test-cloud-sync.sh
+
       - name: Mutation check
         run: bash termux/tests/mutation-check.sh
 
