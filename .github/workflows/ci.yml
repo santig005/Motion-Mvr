@@ -65,8 +65,13 @@ jobs:
       # Accepts SDK licenses and makes sdkmanager available. The repo's local.properties (sdk.dir)
       # is gitignored/machine-local, so AGP falls back to ANDROID_HOME/ANDROID_SDK_ROOT, which this
       # action sets up.
+      # packages: the action's default is "tools platform-tools", but the legacy `tools` package no
+      # longer exists in the SDK repo; once the runner image moved to cmdline-tools 16.0 (Sep 2026)
+      # sdkmanager started failing on it with "Failed to find package 'tools'".
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # compileSdk/targetSdk = 36 (app/build.gradle.kts). Pre-fetch the platform explicitly; AGP
       # auto-downloads matching build-tools during the build itself since licenses are accepted.
