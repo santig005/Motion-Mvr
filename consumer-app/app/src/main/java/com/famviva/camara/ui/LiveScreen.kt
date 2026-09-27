@@ -5,6 +5,10 @@ import android.content.Intent
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +36,8 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -83,12 +89,17 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
 import com.famviva.camara.R
+import com.famviva.camara.data.CameraConfig
 import com.famviva.camara.data.CameraConfigStore
+import com.famviva.camara.data.isValidCameraId
 import com.famviva.camara.media.ClipActions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class LiveStatus { CONNECTING, PLAYING, ERROR }
+
+/** Placeholder route argument for "add a new camera" in the camera editor. */
+const val NEW_CAMERA = "__new__"
 
 // Filter logcat by this tag to diagnose live playback (e.g. the 2K/HD freeze):  adb logcat -s LiveRTSP
 private const val LIVE_TAG = "LiveRTSP"
@@ -127,29 +138,44 @@ private const val WATCHDOG_MS = 9_000L
 private const val MAX_AUTO_RETRIES = 3
 
 /**
- * Live view of the camera over RTSP (Media3). Works on the camera's local network: the app opens its
- * own RTSP connection straight to the camera (the camera tolerates this alongside the NVR's two
- * connections), so it doesn't depend on the NVR phone being up. Falls back to a setup prompt until
- * the camera's connection details have been entered.
+ * Live view over RTSP (Media3). Works on the cameras' local network (or over Tailscale): the app opens
+ * its own RTSP connection straight to each camera (a camera tolerates this alongside the NVR's two
+ * connections), so it doesn't depend on the NVR phone being up.
+ *
+ * - No camera configured: a setup prompt.
+ * - ONE camera (or [cameraId] given): the full single-camera player, exactly as before multi-camera.
+ * - TWO OR MORE: a grid of light SD tiles; tapping one opens it full screen, where HD is available.
+ *   Tiles stay on the 360p sub-stream on purpose: N x 2K would swamp the 2.4 GHz link the NVR records
+ *   over, and over Tailscale every stream is relayed by the NVR phone's slow uplink.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LiveScreen(nav: androidx.navigation.NavHostController) {
+fun LiveScreen(nav: androidx.navigation.NavHostController, cameraId: String? = null) {
     val context = LocalContext.current
-    val cfg = remember { CameraConfigStore(context) }
-    var hd by rememberSaveable { mutableStateOf(false) }
-    var fullscreen by rememberSaveable { mutableStateOf(false) }
-    val url = remember(hd) { cfg.rtspUrl(hd) }
-
-    // Hide the system bars while in fullscreen (restored automatically when leaving or on dispose).
-    ImmersiveMode(enabled = fullscreen && url != null)
-
-    if (url == null) {
+    val cameras = remember { CameraConfigStore(context).cameras() }
+    if (cameras.isEmpty()) {
         Scaffold(
             topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
         ) { pad -> Box(Modifier.fillMaxSize().padding(pad)) { LiveSetupPrompt { nav.navigate("camera_settings") } } }
         return
     }
+    val single = cameraId?.let { id -> cameras.firstOrNull { it.id == id } } ?: cameras.singleOrNull()
+    if (single == null) {
+        LiveGrid(cameras, nav)
+    } else {
+        SingleCameraLive(single, nav, title = if (cameras.size > 1) single.id else null)
+    }
+}
+
+/** The full player for one camera (quality, mute, snapshot, fullscreen). [title] names the camera
+ *  when several exist; null keeps the plain "Live" title of a single-camera install. */
+@Composable
+private fun SingleCameraLive(cfg: CameraConfig, nav: androidx.navigation.NavHostController, title: String?) {
+    var hd by rememberSaveable { mutableStateOf(false) }
+    var fullscreen by rememberSaveable { mutableStateOf(false) }
+    val url = remember(cfg, hd) { cfg.rtspUrl(hd) }
+
+    // Hide the system bars while in fullscreen (restored automatically when leaving or on dispose).
+    ImmersiveMode(enabled = fullscreen)
 
     // ONE stable player position for the whole screen — it must survive both the quality switch and
     // the fullscreen toggle. Recreating the player (or moving it in the tree) breaks the video Surface
@@ -163,14 +189,173 @@ fun LiveScreen(nav: androidx.navigation.NavHostController) {
             onQuality = { hd = it },
             onToggleFullscreen = { fullscreen = !fullscreen },
         )
-        if (!fullscreen) LiveOverlayTopBar(nav)
+        if (!fullscreen) LiveOverlayTopBar(nav, title ?: stringResource(R.string.live_title))
+    }
+}
+
+/** 1 or 2 cameras stack full-width (portrait phone); 3-4 go 2x2. */
+@Composable
+private fun LiveGrid(cameras: List<CameraConfig>, nav: androidx.navigation.NavHostController) {
+    val cols = if (cameras.size <= 2) 1 else 2
+    Scaffold(
+        topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
+    ) { pad ->
+        Column(
+            Modifier.fillMaxSize().padding(pad).padding(8.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            cameras.chunked(cols).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { cam ->
+                        LiveTile(cam, Modifier.weight(1f)) { nav.navigate("live/${cam.id}") }
+                    }
+                    repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+            Text(
+                stringResource(R.string.live_grid_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
+        }
+    }
+}
+
+/**
+ * One muted SD tile of the grid, with its OWN small player. Same hard-won rules as the full player:
+ * "playing" means a frame was actually rendered, a watchdog reconnects a silent stall a few times, and
+ * backgrounding the app FREES the camera (a zombie viewer competes with the NVR's recording sessions).
+ * After the retry budget the tile says so and waits for a tap, instead of hammering an unplugged camera.
+ */
+@Composable
+private fun LiveTile(cfg: CameraConfig, modifier: Modifier, onOpen: () -> Unit) {
+    val context = LocalContext.current
+    val tag = "${cfg.id} SD"
+    var status by remember { mutableStateOf(LiveStatus.CONNECTING) }
+    var retryKey by remember { mutableIntStateOf(0) }
+    var attempts by remember { mutableIntStateOf(0) }
+    var stoppedInBackground by remember { mutableStateOf(false) }
+    val url = remember(cfg) { cfg.rtspUrl(hd = false) }
+
+    val player = remember {
+        LiveLog.add("[$tag] creating tile player")
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(1_000, 5_000, 500, 1_000)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+        ExoPlayer.Builder(context).setLoadControl(loadControl).build().apply {
+            volume = 0f
+            addListener(object : Player.Listener {
+                override fun onRenderedFirstFrame() {
+                    LiveLog.add("[$tag] first frame rendered")
+                    status = LiveStatus.PLAYING
+                }
+                override fun onPlayerError(e: PlaybackException) {
+                    LiveLog.add("[$tag] ERROR code=${e.errorCodeName} msg=${e.message}")
+                    if (stoppedInBackground) return
+                    if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+                }
+            })
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> {
+                    LiveLog.add("[$tag] app backgrounded: releasing the RTSP session")
+                    stoppedInBackground = true
+                    player.stop()
+                }
+                Lifecycle.Event.ON_START -> if (stoppedInBackground) {
+                    stoppedInBackground = false
+                    attempts = 0
+                    retryKey++
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(url, retryKey) {
+        if (stoppedInBackground) return@LaunchedEffect
+        status = LiveStatus.CONNECTING
+        LiveLog.add("[$tag] loading attempt=$retryKey")
+        val source = RtspMediaSource.Factory()
+            .setForceUseRtpTcp(true)
+            .setTimeoutMs(8_000)
+            .createMediaSource(MediaItem.fromUri(url))
+        player.setMediaSource(source)
+        player.prepare()
+        player.playWhenReady = true
+    }
+    LaunchedEffect(url, retryKey) {
+        delay(WATCHDOG_MS)
+        if (status == LiveStatus.CONNECTING && !stoppedInBackground) {
+            LiveLog.add("[$tag] watchdog: no frame after ${WATCHDOG_MS}ms, attempts=$attempts")
+            if (attempts < MAX_AUTO_RETRIES) { attempts++; retryKey++ } else status = LiveStatus.ERROR
+        }
+    }
+
+    Box(
+        modifier
+            .aspectRatio(16f / 9f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.Black)
+            .clickable {
+                if (status == LiveStatus.ERROR) {
+                    LiveLog.add("[$tag] manual retry"); attempts = 0; retryKey++
+                } else {
+                    onOpen()
+                }
+            },
+    ) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    this.player = player
+                    useController = false
+                    keepScreenOn = true
+                    setShutterBackgroundColor(android.graphics.Color.BLACK)
+                }
+            },
+        )
+        when (status) {
+            LiveStatus.CONNECTING -> CircularProgressIndicator(
+                color = Color.White,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            LiveStatus.ERROR -> Text(
+                stringResource(R.string.live_tile_offline),
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.align(Alignment.Center).padding(16.dp),
+            )
+            LiveStatus.PLAYING -> Unit
+        }
+        Text(
+            cfg.id,
+            color = Color.White,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(8.dp)
+                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        )
     }
 }
 
 /** Translucent top bar drawn over the live video (used instead of a Scaffold app bar so toggling
  *  fullscreen doesn't move the player in the tree and recreate it). */
 @Composable
-private fun LiveOverlayTopBar(nav: androidx.navigation.NavHostController) {
+private fun LiveOverlayTopBar(nav: androidx.navigation.NavHostController, title: String) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -182,7 +367,7 @@ private fun LiveOverlayTopBar(nav: androidx.navigation.NavHostController) {
         IconButton(onClick = { nav.popBackStack() }) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back), tint = Color.White)
         }
-        Text(stringResource(R.string.live_title), color = Color.White, style = MaterialTheme.typography.titleMedium)
+        Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.weight(1f))
         IconButton(onClick = { nav.navigate("live_logs") }) {
             Icon(Icons.Filled.BugReport, contentDescription = stringResource(R.string.live_logs_title), tint = Color.White)
@@ -582,23 +767,94 @@ fun LiveLogScreen(nav: androidx.navigation.NavHostController) {
     }
 }
 
-/** One-time (editable) form for the camera's RTSP connection details, saved encrypted on-device. */
+/**
+ * Camera setup for live view: one entry per camera. [knownCameras] are the cameras the NVR reports
+ * (status.json); any of them without live details yet is offered as a one-tap "add", pre-named so its
+ * id matches its clips and health.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraSettingsScreen(nav: androidx.navigation.NavHostController) {
+fun CameraSettingsScreen(nav: androidx.navigation.NavHostController, knownCameras: List<String> = emptyList()) {
     val context = LocalContext.current
-    val cfg = remember { CameraConfigStore(context) }
+    val cameras = remember { CameraConfigStore(context).cameras() }
+    val missing = knownCameras.distinct().filter { k -> cameras.none { it.id == k } && isValidCameraId(k) }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(stringResource(R.string.camera_settings_title)) },
+                navigationIcon = {
+                    IconButton(onClick = { nav.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
+                    }
+                },
+            )
+        },
+    ) { pad ->
+        Column(
+            Modifier.fillMaxSize().padding(pad).padding(16.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                stringResource(R.string.camera_list_help),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            cameras.forEach { cam ->
+                Card(Modifier.fillMaxWidth().clickable { nav.navigate("camera_settings/${cam.id}") }) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(cam.id, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "${cam.host}:${cam.port}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (missing.isNotEmpty()) {
+                Text(stringResource(R.string.camera_suggest), style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    missing.forEach { id ->
+                        SuggestionChip(
+                            onClick = { nav.navigate("camera_settings/$NEW_CAMERA?name=$id") },
+                            label = { Text("+ $id") },
+                        )
+                    }
+                }
+            }
+            Button(onClick = { nav.navigate("camera_settings/$NEW_CAMERA") }) {
+                Text(stringResource(R.string.camera_add))
+            }
+            Text(
+                stringResource(R.string.camera_remote_help),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
 
-    var host by rememberSaveable { mutableStateOf(cfg.host) }
-    var port by rememberSaveable { mutableStateOf(if (cfg.port > 0) cfg.port.toString() else "554") }
-    var user by rememberSaveable { mutableStateOf(cfg.user) }
-    var password by rememberSaveable { mutableStateOf(cfg.password) }
+/** Add/edit one camera's RTSP details (saved encrypted on-device). [cameraId] = [NEW_CAMERA] adds one,
+ *  pre-named [suggestedName] when it came from the NVR's list. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: String, suggestedName: String? = null) {
+    val context = LocalContext.current
+    val store = remember { CameraConfigStore(context) }
+    val isNew = cameraId == NEW_CAMERA
+    val existing = remember { if (isNew) null else store.get(cameraId) }
+
+    var name by rememberSaveable { mutableStateOf(existing?.id ?: suggestedName.orEmpty()) }
+    var host by rememberSaveable { mutableStateOf(existing?.host.orEmpty()) }
+    var port by rememberSaveable { mutableStateOf((existing?.port ?: CameraConfigStore.DEFAULT_PORT).toString()) }
+    var user by rememberSaveable { mutableStateOf(existing?.user.orEmpty()) }
+    var password by rememberSaveable { mutableStateOf(existing?.password.orEmpty()) }
     var showPassword by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.camera_settings_title)) },
+                title = { Text(stringResource(if (isNew) R.string.camera_new_title else R.string.camera_edit_title)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
@@ -616,6 +872,15 @@ fun CameraSettingsScreen(nav: androidx.navigation.NavHostController) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.trim() },
+                label = { Text(stringResource(R.string.camera_field_name)) },
+                supportingText = { Text(stringResource(R.string.camera_name_help)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = host,
                 onValueChange = { host = it },
@@ -660,26 +925,30 @@ fun CameraSettingsScreen(nav: androidx.navigation.NavHostController) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
-                        if (host.isBlank()) {
-                            Toast.makeText(context, context.getString(R.string.camera_host_required), Toast.LENGTH_SHORT).show()
+                        val renamed = existing != null && existing.id != name
+                        val msg = when {
+                            !isValidCameraId(name) -> R.string.camera_name_invalid
+                            host.isBlank() -> R.string.camera_host_required
+                            (isNew || renamed) && store.get(name) != null -> R.string.camera_name_taken
+                            else -> null
+                        }
+                        if (msg != null) {
+                            Toast.makeText(context, context.getString(msg), Toast.LENGTH_SHORT).show()
                         } else {
-                            cfg.save(host, port.toIntOrNull() ?: 554, user, password)
+                            if (renamed) store.remove(existing!!.id)
+                            store.save(CameraConfig(name, host.trim(), port.toIntOrNull() ?: CameraConfigStore.DEFAULT_PORT, user.trim(), password))
                             Toast.makeText(context, context.getString(R.string.camera_saved_toast), Toast.LENGTH_SHORT).show()
                             nav.popBackStack()
                         }
                     },
                     modifier = Modifier.weight(1f),
                 ) { Text(stringResource(R.string.camera_save)) }
-                OutlinedButton(
-                    onClick = { cfg.clear(); host = ""; port = "554"; user = ""; password = "" },
-                ) { Text(stringResource(R.string.camera_clear)) }
+                if (existing != null) {
+                    OutlinedButton(onClick = { store.remove(existing.id); nav.popBackStack() }) {
+                        Text(stringResource(R.string.camera_delete))
+                    }
+                }
             }
-            Spacer(Modifier.height(24.dp))
-            Text(
-                stringResource(R.string.camera_remote_help),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

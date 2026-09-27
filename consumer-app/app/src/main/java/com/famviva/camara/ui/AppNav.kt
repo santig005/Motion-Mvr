@@ -133,6 +133,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.famviva.camara.DateFilter
@@ -274,8 +275,13 @@ fun AppNav(
         composable("days") { DaysScreen(vm, nav) }
         composable("health") { HealthScreen(vm, nav, drive) }
         composable("live") { LiveScreen(nav) }
+        composable("live/{cam}") { LiveScreen(nav, it.arguments?.getString("cam")) }
         composable("away_settings") { AwayModeScreen(nav) }
-        composable("camera_settings") { CameraSettingsScreen(nav) }
+        composable("camera_settings") { CameraSettingsScreen(nav, vm.cameraHealth.map { it.camera }) }
+        composable(
+            "camera_settings/{cam}?name={name}",
+            arguments = listOf(navArgument("name") { nullable = true; defaultValue = null }),
+        ) { CameraEditScreen(nav, it.arguments?.getString("cam") ?: NEW_CAMERA, it.arguments?.getString("name")) }
         composable("live_logs") { LiveLogScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
         composable("history") { HistoryScreen(vm, nav, tokenProvider) }
