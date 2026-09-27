@@ -111,6 +111,10 @@
     <string name="camera_live_section">Vista en vivo (opcional)</string>
     <string name="live_tile_disabled">Desactivada</string>
     <string name="camera_switch_help">Desactiva una cámara antes de desenchufarla: el NVR la detiene y no salta ninguna alarma. Sus clips siguen disponibles.</string>
+    <string name="notif_unplug_title">¿Desenchufaste %s?</string>
+    <string name="notif_unplug_text">Lleva %d h sin grabar aunque el NVR funciona bien. Si la quitaste a propósito, desactívala para que deje de alertar. Si sigue instalada, revísala: puede ser un cable cortado o un robo.</string>
+    <string name="action_disable_camera">Desactivar</string>
+    <string name="action_still_installed">Sigue instalada</string>
     <string name="favorites_empty">Aún no tienes favoritos — mantén pulsado un clip y elige «Marcar como favorito». Los favoritos se conservan aunque borres un día.</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>

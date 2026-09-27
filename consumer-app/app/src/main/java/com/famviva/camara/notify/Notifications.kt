@@ -160,6 +160,36 @@ object Notifications {
     }
 
     /**
+     * "Did you unplug [label]?" — one actionable notification per silence episode, with [Disable] and
+     * [Still installed]. Never decides for the user: a silent camera may be a theft or a cut cable.
+     */
+    fun notifyUnplugPrompt(context: Context, camera: String, label: String, hours: Long) {
+        if (!canPost(context)) return
+        ensureChannel(context)
+        val id = unplugNotifId(camera)
+        fun action(act: String, req: Int) = PendingIntent.getBroadcast(
+            context, id * 10 + req,
+            android.content.Intent(context, CameraPromptReceiver::class.java)
+                .setAction(act).putExtra(CameraPromptReceiver.EXTRA_CAMERA, camera),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val text = context.getString(R.string.notif_unplug_text, hours)
+        val notif = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle(context.getString(R.string.notif_unplug_title, label))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openAppIntent(context))
+            .addAction(0, context.getString(R.string.action_disable_camera), action(CameraPromptReceiver.ACTION_DISABLE, 1))
+            .addAction(0, context.getString(R.string.action_still_installed), action(CameraPromptReceiver.ACTION_KEEP, 2))
+            .build()
+        NotificationManagerCompat.from(context).notify(id, notif)
+    }
+
+    /** Stable per-camera notification id, clear of the fixed ids above. */
+    fun unplugNotifId(camera: String): Int = 1000 + (camera.hashCode() and 0x7fff)
+
+    /**
      * Green-light: a camera that had been down (no signal / not reporting) is recording again — the
      * all-clear after a reboot. Reuses [NOTIF_ID_HEALTH] so it visually replaces the ⚠️ warning in the
      * tray with a ✅ instead of leaving a stale alert behind.

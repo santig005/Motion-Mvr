@@ -213,6 +213,16 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 store.setHealthAlert(null)             // all good: reset so we alert again if it recurs
             }
 
+            // "Did you unplug it?": an ENABLED camera silent for 6 h while the NVR keeps reporting gets one
+            // actionable prompt per episode. Never an auto-disable (see SilentPrompt.kt).
+            val silent = active.filter { com.famviva.camara.data.isSilentForPrompt(it, now) }.map { it.camera }.toSet()
+            val (episodes, askNow) = com.famviva.camara.data.stepSilent(store.silentStates(), silent, now, store.silentAskSecs)
+            store.setSilentStates(episodes)
+            askNow.forEach { cam ->
+                val hours = ((now - (episodes[cam]?.since ?: now)) / 3600).coerceAtLeast(1)
+                Notifications.notifyUnplugPrompt(ctx, cam, registry.labelOf(cam), hours)
+            }
+
             // Green-light recovery: a camera that had been DOWN (no signal / not reporting — the reboot
             // scenario the user acts on) is healthy again → tell them it's recording once more. Tracked
             // apart from the alert dedup so a battery/sync/disk advisory clearing doesn't fire it.

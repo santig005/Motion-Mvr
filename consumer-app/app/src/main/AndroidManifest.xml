@@ -42,6 +42,11 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Answers of the "did you unplug it?" notification (internal, never exported). -->
+        <receiver
+            android:name=".notify.CameraPromptReceiver"
+            android:exported="false" />
+
         <!-- Away-mode OS geofence: receives ENTER/EXIT transitions (internal, never exported). -->
         <receiver
             android:name=".data.GeofenceBroadcastReceiver"

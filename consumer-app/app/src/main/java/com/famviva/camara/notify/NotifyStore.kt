@@ -22,6 +22,22 @@ class NotifyStore(context: Context) {
 
     fun setLastNotified(name: String) = prefs.edit().putString(KEY, name).apply()
 
+    /** Per-camera silence episodes for the "did you unplug it?" prompt (see SilentPrompt.kt). */
+    fun silentStates(): Map<String, com.famviva.camara.data.SilentState> =
+        com.famviva.camara.data.decodeSilent(prefs.getString(KEY_SILENT, null))
+
+    fun setSilentStates(states: Map<String, com.famviva.camara.data.SilentState>) =
+        prefs.edit().putString(KEY_SILENT, com.famviva.camara.data.encodeSilent(states)).apply()
+
+    /** "Still installed": stop asking about [camera] until its current silence episode ends. */
+    fun keepSilentCamera(camera: String) {
+        val st = silentStates()
+        st[camera]?.let { setSilentStates(st + (camera to it.copy(keep = true))) }
+    }
+
+    /** Seconds of silence before the prompt; only ever lowered on a debug build to exercise it. */
+    val silentAskSecs: Long get() = prefs.getLong(KEY_SILENT_ASK, com.famviva.camara.data.SILENT_ASK_SECS)
+
     /** When on, motion alerts are muted during the night window [QUIET_START, QUIET_END) to kill
      *  3 a.m. shadow/bug spam. Health warnings are never muted. Off by default. */
     var quietHours: Boolean
@@ -87,6 +103,8 @@ class NotifyStore(context: Context) {
         const val KEY = "last_clip"
         const val KEY_HEALTH = "health_alert"
         const val KEY_CAM_DOWN = "camera_down"
+        const val KEY_SILENT = "silent_episodes"
+        const val KEY_SILENT_ASK = "silent_ask_secs"
         const val KEY_DIGEST = "digest_day"
         const val KEY_QUIET = "quiet_hours"
         const val KEY_ALERT_LEVEL = "alert_level"

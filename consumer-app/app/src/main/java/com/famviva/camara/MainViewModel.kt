@@ -122,6 +122,8 @@ class MainViewModel(
     /** On each load: adopt Drive's registry (another device may have edited it), unless a local edit
      *  newer than it is still waiting to be uploaded — then retry that upload instead. */
     private suspend fun syncRegistry() {
+        // The store is the local truth: the notification's [Disable] writes it while the app may be open.
+        registryStore.load().let { if (it.updated > registry.updated) registry = it }
         val remote = CameraRegistry.parse(runCatching { drive.fetchCameraRegistry() }.getOrNull())
         val (keep, push) = reconcileRegistry(registry, remote, registryStore.pendingUpload)
         if (keep != registry) registry = keep
