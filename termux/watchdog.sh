@@ -20,6 +20,7 @@
 # detector_ok:false, uploaded it, and the phone alerted the user — while this watchdog, on the same
 # device, concluded "all good" and never attempted a single recovery. See kick_blind_detector.
 set -u
+[ -f "$HOME/watchdog.env" ] && . "$HOME/watchdog.env"   # per-install overrides, e.g. CAMS="cam1 cam2"
 INTERVAL="${WATCH_INTERVAL:-120}"                 # how often (seconds) it checks
 LOG="${WATCH_LOG:-$HOME/logs/watchdog.log}"
 CAMS="${CAMS:-cam1}"                              # space-separated camera session names; each has ~/<cam>.env. Do NOT auto-discover cam*.env (cam360.env is a profile, not a camera)
@@ -31,6 +32,10 @@ DET_KICK_MAX="${DET_KICK_MAX:-3}"                 # give up after this many rest
 DET_KICK_BACKOFF="${DET_KICK_BACKOFF:-3}"         # each further attempt waits DET_BLIND_KICK * this^n (300s, 900s, 2700s)
 DET_RECOVER_SECS="${DET_RECOVER_SECS:-600}"       # detector must stay healthy this long before an episode counts as OVER (see kick_blind_detector)
 declare -A DET_KICKS=() DET_LAST=() DET_WELL=()   # per-camera episode state: attempts made, epoch of the last one, epoch it started looking healthy
+REGISTRY="${CAMERA_REGISTRY:-$HOME/.cameras.json}" # local cache of the app's cameras.json (enable/disable per camera)
+REGISTRY_EVERY="${REGISTRY_EVERY:-60}"            # how often to re-read it from Drive (the loop itself runs every INTERVAL)
+REGISTRY_REMOTE="${REGISTRY_REMOTE:-}"            # empty = <root of cloud.env's RCLONE_REMOTE>cameras.json, where the app writes it
+declare -A CAM_OFF=()                             # per camera: 1 while it is disabled (so the stop is logged once)
 mkdir -p "$(dirname "$LOG")"
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 
@@ -89,6 +94,100 @@ wlog_event(){ # $1=cam (env name)  $2=ev  $3=msg
   label=$(cam_env_var "$1" CAM_LABEL);   [ -n "$label" ]  || label=$(basename "$out")
   printf '{"ts":%d,"cam":"%s","svc":"watchdog","ev":"%s","msg":"%s"}\n' \
     "$(date +%s)" "$label" "$2" "$3" >> "$ev_log" 2>/dev/null || true
+}
+
+# CAMERA REGISTRY (multi-camera B2, 2026-09-26). The app writes cameras.json at the Drive root:
+#   {"updated":..,"cameras":{"Camara1":{"enabled":true,"label":"Pasillo Interior"},...}}
+# The NVR owns EXISTENCE (a camera exists when ~/<cam>.env exists and is in CAMS); the app owns
+# ENABLED. A disabled camera gets no session at all: zero RTSP retries, zero power-cycles, zero alarms.
+# FAIL-OPEN, always: no cache, an unreadable/malformed file, or a camera missing from it => ENABLED.
+# A parse failure must never silently stop surveillance; disabling is an explicit, positive act.
+# Drive unreachable => the last cached copy keeps applying (the cache is replaced only by a good read).
+refresh_registry(){
+  local remote="$REGISTRY_REMOTE" root tmp="$REGISTRY.tmp"
+  if [ -z "$remote" ]; then
+    root=$( ( set +u; . "$HOME/cloud.env" 2>/dev/null; printf '%s' "${RCLONE_REMOTE:-gdrive:Cameras}" ) )
+    remote="${root%%:*}:cameras.json"
+  fi
+  # Generous low-level retries: rclone's own pacer backs off on Drive's rateLimitExceeded, which the
+  # shared rclone client_id hits constantly while cloud-sync uploads (2026-09-27: 4 of 5 reads refused,
+  # so re-enabling Camara2 took >5 min to be seen). Slow is fine: this runs in the background.
+  if rclone cat "$remote" --contimeout 15s --timeout 30s --retries 3 --low-level-retries 10 \
+       > "$tmp" 2>"$tmp.err" && grep -q '"cameras"' "$tmp"; then
+    mv -f "$tmp" "$REGISTRY"
+    [ -e "$REGISTRY.failing" ] && { rm -f "$REGISTRY.failing"; log "✅ registry: cameras.json readable again"; }
+  else
+    if [ ! -e "$REGISTRY.failing" ]; then
+      : > "$REGISTRY.failing"
+      log "⚠ registry: cannot read cameras.json ($(grep -oE 'rateLimitExceeded|not found|dial tcp|no such host' "$tmp.err" | head -n 1)); keeping the cached copy"
+    fi
+    rm -f "$tmp"
+  fi
+  rm -f "$tmp.err"
+  return 0
+}
+
+# Never let Drive stall supervision: the fetch runs in the background (one at a time) and only swaps
+# the cache file atomically; the loop reads whatever the cache says right now.
+REG_PID=""
+refresh_registry_async(){
+  [ -n "$REG_PID" ] && kill -0 "$REG_PID" 2>/dev/null && return 0
+  refresh_registry &
+  REG_PID=$!
+}
+
+# 0 = enabled (the default for anything unclear); 1 ONLY when the registry explicitly says
+# "enabled":false for this camera id.
+cam_enabled(){ # $1 = camera id (folder name, e.g. Camara2)
+  local obj
+  [ -r "$REGISTRY" ] || return 0
+  obj=$(tr -d '\n' < "$REGISTRY" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\{[^{}]*\}" | head -n 1)
+  printf '%s' "$obj" | grep -qE '"enabled"[[:space:]]*:[[:space:]]*false' && return 1
+  return 0
+}
+
+cam_id(){ # $1 = env name -> canonical camera id (CAM_LABEL, else the OUT_DIR folder name)
+  local id out
+  id=$(cam_env_var "$1" CAM_LABEL); [ -n "$id" ] && { printf '%s' "$id"; return; }
+  out=$(cam_env_var "$1" OUT_DIR); [ -n "$out" ] && basename "$out"
+}
+
+# The keeper is not running for a disabled camera, so the watchdog publishes its state: the app then
+# shows it greyed out ("disabled") instead of "not reporting" / "no signal".
+write_disabled_status(){ # $1 = env name
+  local out f id now
+  out=$(cam_env_var "$1" OUT_DIR); [ -n "$out" ] || return 0
+  f=$(cam_env_var "$1" HEALTH_FILE); [ -n "$f" ] || f="$out/status.json"
+  id=$(cam_id "$1"); now=$(date +%s)
+  mkdir -p "$(dirname "$f")" 2>/dev/null
+  printf '{"camera":"%s","disabled":true,"disabled_since":%d,"updated":%d}\n' "$id" "$now" "$now" \
+    > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null
+  return 0
+}
+
+# One camera, one supervision pass. A disabled camera is stopped ONCE (session killed, event + status
+# written) and then left alone; re-enabling brings it back through the normal ensure_session path.
+supervise_cam(){ # $1 = env name
+  local cam="$1" id
+  id=$(cam_id "$cam")
+  if [ -n "$id" ] && ! cam_enabled "$id"; then
+    if [ "${CAM_OFF[$cam]:-0}" != 1 ]; then
+      CAM_OFF[$cam]=1
+      tmux kill-session -t "$cam" 2>/dev/null || true
+      log "⏸ [$cam] $id disabled in the app: session stopped, no retries"
+      wlog_event "$cam" disabled "disabled in the app: session stopped"
+      write_disabled_status "$cam"
+    fi
+    return 0
+  fi
+  if [ "${CAM_OFF[$cam]:-0}" = 1 ]; then
+    CAM_OFF[$cam]=0
+    log "▶ [$cam] $id re-enabled in the app"
+    wlog_event "$cam" enabled "re-enabled in the app"
+  fi
+  ensure_session "$cam" "$(cam_cmd "$cam")"
+  kick_stuck_segmenter "$cam" "$RING_BASE/$cam"
+  kick_blind_detector "$cam" "$RING_BASE/$cam"
 }
 
 # A detector that has been delivering NO frames for DET_BLIND_KICK seconds is not going to fix itself
@@ -184,13 +283,15 @@ kick_blind_detector(){ # $1=cam  $2=ring_dir
 [ "${WATCHDOG_LIB:-0}" = 1 ] && return 0
 
 log "=== watchdog starts (checks every ${INTERVAL}s; segmenter kick at ${STALE_KICK}s; detector kick at ${DET_BLIND_KICK}s; cams: ${CAMS}) ==="
+last_registry=0
 while true; do
   termux-wake-lock 2>/dev/null || true                      # idempotent: keeps the lock
   pgrep -x sshd >/dev/null 2>&1 || { sshd 2>/dev/null && log "▶ revived sshd"; }
+  if [ "$(( $(date +%s) - last_registry ))" -ge "$REGISTRY_EVERY" ]; then
+    refresh_registry_async; last_registry=$(date +%s)
+  fi
   for cam in $CAMS; do
-    ensure_session "$cam" "$(cam_cmd "$cam")"
-    kick_stuck_segmenter "$cam" "$RING_BASE/$cam"
-    kick_blind_detector "$cam" "$RING_BASE/$cam"
+    supervise_cam "$cam"
   done
   ensure_session cloud "cd ~ && exec ./cloud-sync.sh"
   trim_log

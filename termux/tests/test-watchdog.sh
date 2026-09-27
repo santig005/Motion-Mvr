@@ -223,5 +223,63 @@ line4=$(cat "$SANDBOX/Camaras/events_cam4.jsonl" 2>/dev/null)
 case "$line4" in *'"cam":"Patio"'*'"ev":"giveup"'*) ok "env EVENTS_LOG / CAM_LABEL overrides are honoured" ;;
                  *) no "env EVENTS_LOG / CAM_LABEL overrides are honoured" '…"cam":"Patio"…giveup…' "$line4" ;; esac
 
+# =================================================================================================
+describe "camera registry — the app's enable/disable switch, fail-open (multi-camera B2)"
+# =================================================================================================
+REG="$SANDBOX/cameras.json"
+res=$( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1; export CAMERA_REGISTRY="$REG"; REGISTRY="$REG"
+  chk(){ if cam_enabled "$1"; then printf 'on '; else printf 'off '; fi; }
+  rm -f "$REG";                                                   chk Camara2   # no registry at all
+  echo 'garbage {' > "$REG";                                       chk Camara2   # unreadable
+  echo '{"cameras":{"Camara1":{"enabled":true,"label":"Pasillo Interior"}}}' > "$REG"; chk Camara2   # not listed
+  echo '{"cameras":{"Camara2":{"enabled":false,"label":"Habitación"}}}' > "$REG";      chk Camara2
+  chk Camara1                                                                        # another camera's switch
+  printf '{\n  "cameras": {\n    "Camara2": { "label": "Habitación",\n      "enabled" : false }\n  }\n}\n' > "$REG"; chk Camara2   # pretty-printed
+  echo '{"cameras":{"Camara2":{"enabled":true}}}' > "$REG";        chk Camara2 )
+eq "missing / unreadable / unlisted => enabled; only an explicit false disables" \
+   "on on on off on off on " "$res"
+
+# The cache is replaced only by a good read: an outage or a bad file never changes behaviour.
+res=$( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1; REGISTRY="$REG"; REGISTRY_REMOTE="gdrive:cameras.json"
+  echo '{"cameras":{"Camara2":{"enabled":false}}}' > "$REG"
+  rclone(){ return 1; };                         refresh_registry; grep -c enabled "$REG"
+  rclone(){ echo 'not json'; };                  refresh_registry; grep -c false "$REG"
+  rclone(){ echo '{"cameras":{"Camara2":{"enabled":true}}}'; }; refresh_registry; grep -c true "$REG" )
+eq "Drive down or a bad file keeps the cache; a good read replaces it" "1 1 1" "$(echo $res)"
+
+# Drive refusing (rate limit) is logged once when it starts and once when it ends, never per cycle.
+res=$( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1; REGISTRY="$REG"; REGISTRY_REMOTE="gdrive:cameras.json"
+  LOGGED=0; log(){ LOGGED=$((LOGGED+1)); }; rm -f "$REG.failing"
+  rclone(){ echo 'rateLimitExceeded' >&2; return 1; }
+  refresh_registry; refresh_registry; refresh_registry; printf '%s ' "$LOGGED"
+  rclone(){ echo '{"cameras":{}}'; }; refresh_registry; refresh_registry; printf '%s' "$LOGGED" )
+eq "a failing read is logged once, its recovery once" "1 2" "$res"
+
+# The fetch never blocks the loop, and never runs twice at once.
+res=$( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1; REGISTRY="$REG"
+  STARTS="$SANDBOX/starts"; : > "$STARTS"
+  refresh_registry(){ echo x >> "$STARTS"; command sleep 2; }
+  t0=$SECONDS; refresh_registry_async; refresh_registry_async; refresh_registry_async; t1=$SECONDS
+  wait; printf '%s %s' "$(( t1 - t0 ))" "$(wc -l < "$STARTS" | tr -d ' ')" )
+eq "background fetch: returns at once, one at a time" "0 1" "$res"
+
+# supervise_cam, with the real functions and a sandboxed camera.
+mkdir -p "$SANDBOX/Camaras/Camara5"
+cat > "$SANDBOX/cam5.env" <<ENV
+OUT_DIR="$SANDBOX/Camaras/Camara5"
+RTSP_MAIN="rtsp://u:p@192.168.101.99:554/live/ch0"
+ENV
+res=$( WATCHDOG_LIB=1 . "$SUT" >/dev/null 2>&1; REGISTRY="$REG"; RING_BASE="$SANDBOX/ring"
+  KILLS=0; NEWS=0; ALIVE=1
+  tmux(){ case "$1" in has-session) [ "$ALIVE" = 1 ];; kill-session) KILLS=$((KILLS+1)); ALIVE=0;; new-session) NEWS=$((NEWS+1)); ALIVE=1;; esac; }
+  echo '{"cameras":{"Camara5":{"enabled":false}}}' > "$REG"
+  supervise_cam cam5; supervise_cam cam5; supervise_cam cam5
+  printf 'kills=%s news=%s %s %s ' "$KILLS" "$NEWS"     "$(grep -o '"disabled":true' "$SANDBOX/Camaras/Camara5/status.json")"     "$(grep -c '"ev":"disabled"' "$SANDBOX/Camaras/Camara5/events.jsonl")"
+  echo '{"cameras":{"Camara5":{"enabled":true}}}' > "$REG"
+  supervise_cam cam5
+  printf 'news=%s %s' "$NEWS" "$(grep -c '"ev":"enabled"' "$SANDBOX/Camaras/Camara5/events.jsonl")" )
+eq "disable: stopped once, no revival, status + one event; enable: revived + one event" \
+   'kills=1 news=0 "disabled":true 1 news=1 1' "$res"
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

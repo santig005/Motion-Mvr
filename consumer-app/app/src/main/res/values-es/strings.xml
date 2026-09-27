@@ -100,6 +100,17 @@
     <string name="camera_suggest">Grabando, pero aún sin configurar para ver en vivo:</string>
     <string name="live_tile_offline">Sin conexión · toca para reintentar</string>
     <string name="live_grid_hint">Toca una cámara para verla en pantalla completa (ahí está el HD).</string>
+    <string name="status_disabled_title">📴 %s está desactivada</string>
+    <string name="status_disabled_body">No graba ni envía alertas; sus clips siguen disponibles. Actívala de nuevo en Configuración de cámaras.</string>
+    <string name="status_disabled_applied">El NVR ya la detuvo.</string>
+    <string name="camera_field_label">Nombre visible</string>
+    <string name="camera_label_help">Cómo se muestra en el app y en las notificaciones. Se guarda en Drive.</string>
+    <string name="camera_no_live">sin vista en vivo</string>
+    <string name="camera_off">desactivada</string>
+    <string name="camera_remove_live">Quitar vista en vivo</string>
+    <string name="camera_live_section">Vista en vivo (opcional)</string>
+    <string name="live_tile_disabled">Desactivada</string>
+    <string name="camera_switch_help">Desactiva una cámara antes de desenchufarla: el NVR la detiene y no salta ninguna alarma. Sus clips siguen disponibles.</string>
     <string name="favorites_empty">Aún no tienes favoritos — mantén pulsado un clip y elige «Marcar como favorito». Los favoritos se conservan aunque borres un día.</string>
     <string name="action_delete">Eliminar</string>
     <string name="action_cancel">Cancelar</string>

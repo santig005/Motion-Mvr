@@ -224,7 +224,10 @@ fun AppNav(
 ) {
     val nav = rememberNavController()
     val vm: MainViewModel = viewModel(
-        factory = MainViewModel.Factory(drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, catalogStore, thumbArchive, tokenProvider),
+        factory = MainViewModel.Factory(
+            drive, seenStore, offlineStore, clipListCache, batteryHistory, favoritesStore, catalogStore, thumbArchive,
+            com.famviva.camara.data.CameraRegistryStore(LocalContext.current.applicationContext), tokenProvider,
+        ),
     )
 
     // Returning to the foreground refetches when the in-memory data has gone stale. Without this,
@@ -274,14 +277,16 @@ fun AppNav(
         ) {
         composable("days") { DaysScreen(vm, nav) }
         composable("health") { HealthScreen(vm, nav, drive) }
-        composable("live") { LiveScreen(nav) }
-        composable("live/{cam}") { LiveScreen(nav, it.arguments?.getString("cam")) }
+        composable("live") { LiveScreen(nav, labelOf = vm::displayName, enabledOf = vm::isCameraEnabled) }
+        composable("live/{cam}") {
+            LiveScreen(nav, it.arguments?.getString("cam"), labelOf = vm::displayName, enabledOf = vm::isCameraEnabled)
+        }
         composable("away_settings") { AwayModeScreen(nav) }
-        composable("camera_settings") { CameraSettingsScreen(nav, vm.cameraHealth.map { it.camera }) }
+        composable("camera_settings") { CameraSettingsScreen(vm, nav) }
         composable(
             "camera_settings/{cam}?name={name}",
             arguments = listOf(navArgument("name") { nullable = true; defaultValue = null }),
-        ) { CameraEditScreen(nav, it.arguments?.getString("cam") ?: NEW_CAMERA, it.arguments?.getString("name")) }
+        ) { CameraEditScreen(vm, nav, it.arguments?.getString("cam") ?: NEW_CAMERA, it.arguments?.getString("name")) }
         composable("live_logs") { LiveLogScreen(nav) }
         composable("favorites") { FavoritesScreen(vm, nav, tokenProvider) }
         composable("history") { HistoryScreen(vm, nav, tokenProvider) }
@@ -679,7 +684,10 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
             vm.cameraHealth.forEach { h ->
                 // On the home screen the whole card opens the Health screen; per-camera battery is
                 // reached from inside Health (the same card there routes to the battery graph).
-                CameraStatusCard(h, dataFresh = dataFresh, onClick = { nav.navigate("health") })
+                CameraStatusCard(
+                    h, name = vm.displayName(h.camera), disabled = !vm.isCameraEnabled(h.camera),
+                    dataFresh = dataFresh, onClick = { nav.navigate("health") },
+                )
             }
             DataFreshnessLine(vm, dataFresh, now) { vm.load() }
 
@@ -1510,7 +1518,7 @@ private fun ClipsScreen(
                                 isDownloaded = vm.isDownloaded(clip),
                                 isFavorite = vm.isFavorite(clip),
                                 label = labels[clip.name.removeSuffix(".mp4")],
-                                camera = clip.camera.takeIf { vm.multiCamera },
+                                camera = clip.camera.takeIf { vm.multiCamera }?.let(vm::displayName),
                                 onClick = { nav.navigate("player/${clip.id}") },
                                 onLongClick = { actionClip = clip },
                             )
@@ -1659,7 +1667,7 @@ private fun FavoritesScreen(
                         isDownloaded = vm.isDownloaded(clip),
                         isFavorite = true,
                         label = labels[clip.name.removeSuffix(".mp4")],
-                        camera = clip.camera.takeIf { vm.multiCamera },
+                        camera = clip.camera.takeIf { vm.multiCamera }?.let(vm::displayName),
                         onClick = { nav.navigate("player/${clip.id}") },
                         onLongClick = { actionClip = clip },
                     )
@@ -1800,7 +1808,7 @@ private fun HistoryScreen(
                             HistoryRow(
                                 record = record,
                                 token = token,
-                                camera = record.camera.takeIf { vm.multiCamera },
+                                camera = record.camera.takeIf { vm.multiCamera }?.let(vm::displayName),
                                 // Playable while the video is reachable — streamed from Drive (CLOUD)
                                 // or from the local archive (ARCHIVED), even after Drive purged it.
                                 // vm.find() resolves the Drive id or the base name to a playable clip.
@@ -2687,6 +2695,8 @@ private fun DataFreshnessLine(vm: MainViewModel, dataFresh: Boolean, now: Long, 
 @Composable
 private fun CameraStatusCard(
     h: com.famviva.camara.data.CameraHealth,
+    name: String = h.camera,
+    disabled: Boolean = false,
     dataFresh: Boolean = true,
     onClick: (() -> Unit)? = null,
 ) {
@@ -2700,22 +2710,31 @@ private fun CameraStatusCard(
     Box(clickMod) {
       Column {
       when {
+        // Switched off in the app: not an alarm, not "not reporting" — the NVR gives it no session
+        // at all. Its clips stay browsable. `h.disabled` is the NVR confirming it applied the switch.
+        disabled -> StatusBanner(
+            bg = MaterialTheme.colorScheme.surfaceVariant,
+            fg = MaterialTheme.colorScheme.onSurfaceVariant,
+            title = stringResource(R.string.status_disabled_title, name),
+            body = stringResource(R.string.status_disabled_body) +
+                if (h.disabled) " " + stringResource(R.string.status_disabled_applied) else "",
+        )
         !h.ok -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
             fg = MaterialTheme.colorScheme.onErrorContainer,
-            title = stringResource(R.string.status_down_title, h.camera),
+            title = stringResource(R.string.status_down_title, name),
             body = stringResource(R.string.status_down_body),
         )
         dataFresh && h.isStale(now) -> StatusBanner(
             bg = MaterialTheme.colorScheme.errorContainer,
             fg = MaterialTheme.colorScheme.onErrorContainer,
-            title = stringResource(R.string.status_stale_title, h.camera),
+            title = stringResource(R.string.status_stale_title, name),
             body = stringResource(R.string.status_stale_body, h.sinceLabel(context, now)),
         )
         h.recordingInSub -> StatusBanner(
             bg = MaterialTheme.status.warningContainer,
             fg = MaterialTheme.status.onWarningContainer,
-            title = stringResource(R.string.status_sub_title, h.camera),
+            title = stringResource(R.string.status_sub_title, name),
             body = stringResource(R.string.status_sub_body),
         )
         h.recording2kUnstable() -> StatusBanner(
@@ -2730,13 +2749,13 @@ private fun CameraStatusCard(
         h.batteryUnknown -> StatusBanner(
             bg = MaterialTheme.status.warningContainer,
             fg = MaterialTheme.status.onWarningContainer,
-            title = stringResource(R.string.status_battunknown_title, h.camera),
+            title = stringResource(R.string.status_battunknown_title, name),
             body = stringResource(R.string.status_battunknown_body),
         )
         h.canUnplug -> StatusBanner(
             bg = MaterialTheme.colorScheme.primaryContainer,
             fg = MaterialTheme.colorScheme.onPrimaryContainer,
-            title = stringResource(R.string.status_canunplug_title, h.camera),
+            title = stringResource(R.string.status_canunplug_title, name),
             body = stringResource(R.string.status_canunplug_body),
         )
         else -> Row(
@@ -2744,7 +2763,7 @@ private fun CameraStatusCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                stringResource(R.string.status_recording, h.camera) + (battTxt?.let { " · $it" } ?: ""),
+                stringResource(R.string.status_recording, name) + (battTxt?.let { " · $it" } ?: ""),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2905,7 +2924,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
             } else {
                 items(vm.cameraHealth, key = { "cam_${it.camera}" }) { h ->
                     CameraStatusCard(
-                        h,
+                        h, name = vm.displayName(h.camera), disabled = !vm.isCameraEnabled(h.camera),
                         dataFresh = dataFresh,
                         onClick = if (h.battery != null) ({ nav.navigate("battery/${h.camera}") }) else null,
                     )

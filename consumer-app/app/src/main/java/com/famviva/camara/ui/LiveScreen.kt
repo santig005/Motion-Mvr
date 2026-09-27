@@ -37,7 +37,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.Switch
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -88,6 +88,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
+import com.famviva.camara.MainViewModel
 import com.famviva.camara.R
 import com.famviva.camara.data.CameraConfig
 import com.famviva.camara.data.CameraConfigStore
@@ -149,7 +150,12 @@ private const val MAX_AUTO_RETRIES = 3
  *   over, and over Tailscale every stream is relayed by the NVR phone's slow uplink.
  */
 @Composable
-fun LiveScreen(nav: androidx.navigation.NavHostController, cameraId: String? = null) {
+fun LiveScreen(
+    nav: androidx.navigation.NavHostController,
+    cameraId: String? = null,
+    labelOf: (String) -> String = { it },
+    enabledOf: (String) -> Boolean = { true },
+) {
     val context = LocalContext.current
     val cameras = remember { CameraConfigStore(context).cameras() }
     if (cameras.isEmpty()) {
@@ -160,9 +166,9 @@ fun LiveScreen(nav: androidx.navigation.NavHostController, cameraId: String? = n
     }
     val single = cameraId?.let { id -> cameras.firstOrNull { it.id == id } } ?: cameras.singleOrNull()
     if (single == null) {
-        LiveGrid(cameras, nav)
+        LiveGrid(cameras, nav, labelOf, enabledOf)
     } else {
-        SingleCameraLive(single, nav, title = if (cameras.size > 1) single.id else null)
+        SingleCameraLive(single, nav, title = if (cameras.size > 1) labelOf(single.id) else null)
     }
 }
 
@@ -195,7 +201,12 @@ private fun SingleCameraLive(cfg: CameraConfig, nav: androidx.navigation.NavHost
 
 /** 1 or 2 cameras stack full-width (portrait phone); 3-4 go 2x2. */
 @Composable
-private fun LiveGrid(cameras: List<CameraConfig>, nav: androidx.navigation.NavHostController) {
+private fun LiveGrid(
+    cameras: List<CameraConfig>,
+    nav: androidx.navigation.NavHostController,
+    labelOf: (String) -> String,
+    enabledOf: (String) -> Boolean,
+) {
     val cols = if (cameras.size <= 2) 1 else 2
     Scaffold(
         topBar = { LiveTopBar(stringResource(R.string.live_title), nav, showSettings = true) },
@@ -207,7 +218,12 @@ private fun LiveGrid(cameras: List<CameraConfig>, nav: androidx.navigation.NavHo
             cameras.chunked(cols).forEach { row ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     row.forEach { cam ->
-                        LiveTile(cam, Modifier.weight(1f)) { nav.navigate("live/${cam.id}") }
+                        // A camera switched off in the app gets no RTSP connection from here either.
+                        if (enabledOf(cam.id)) {
+                            LiveTile(cam, labelOf(cam.id), Modifier.weight(1f)) { nav.navigate("live/${cam.id}") }
+                        } else {
+                            DisabledTile(labelOf(cam.id), Modifier.weight(1f))
+                        }
                     }
                     repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
                 }
@@ -229,7 +245,7 @@ private fun LiveGrid(cameras: List<CameraConfig>, nav: androidx.navigation.NavHo
  * After the retry budget the tile says so and waits for a tap, instead of hammering an unplugged camera.
  */
 @Composable
-private fun LiveTile(cfg: CameraConfig, modifier: Modifier, onOpen: () -> Unit) {
+private fun LiveTile(cfg: CameraConfig, label: String, modifier: Modifier, onOpen: () -> Unit) {
     val context = LocalContext.current
     val tag = "${cfg.id} SD"
     var status by remember { mutableStateOf(LiveStatus.CONNECTING) }
@@ -339,16 +355,37 @@ private fun LiveTile(cfg: CameraConfig, modifier: Modifier, onOpen: () -> Unit) 
             )
             LiveStatus.PLAYING -> Unit
         }
+        TileLabel(label, Modifier.align(Alignment.TopStart))
+    }
+}
+
+@Composable
+private fun TileLabel(label: String, modifier: Modifier) {
         Text(
-            cfg.id,
+            label,
             color = Color.White,
             style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier
-                .align(Alignment.TopStart)
+            modifier = modifier
                 .padding(8.dp)
                 .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 8.dp, vertical = 2.dp),
         )
+}
+
+/** Grey tile for a camera switched off in the app: no player, no connection attempts. */
+@Composable
+private fun DisabledTile(label: String, modifier: Modifier) {
+    Box(
+        modifier.aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Text(
+            "📴 " + stringResource(R.string.live_tile_disabled),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.align(Alignment.Center),
+        )
+        TileLabel(label, Modifier.align(Alignment.TopStart))
     }
 }
 
@@ -768,16 +805,16 @@ fun LiveLogScreen(nav: androidx.navigation.NavHostController) {
 }
 
 /**
- * Camera setup for live view: one entry per camera. [knownCameras] are the cameras the NVR reports
- * (status.json); any of them without live details yet is offered as a one-tap "add", pre-named so its
- * id matches its clips and health.
+ * Camera setup: every camera the app knows about (reported by the NVR, in the registry, or set up for
+ * live view), each with its ON/OFF switch and display name. The switch is written to cameras.json on
+ * Drive; the NVR's watchdog stops a switched-off camera within ~2 min (no retries, no alarms).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraSettingsScreen(nav: androidx.navigation.NavHostController, knownCameras: List<String> = emptyList()) {
+fun CameraSettingsScreen(vm: MainViewModel, nav: androidx.navigation.NavHostController) {
     val context = LocalContext.current
-    val cameras = remember { CameraConfigStore(context).cameras() }
-    val missing = knownCameras.distinct().filter { k -> cameras.none { it.id == k } && isValidCameraId(k) }
+    val live = remember { CameraConfigStore(context).cameras() }
+    val ids = vm.knownCameraIds(live.map { it.id })
     Scaffold(
         topBar = {
             TopAppBar(
@@ -795,30 +832,28 @@ fun CameraSettingsScreen(nav: androidx.navigation.NavHostController, knownCamera
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                stringResource(R.string.camera_list_help),
+                stringResource(R.string.camera_switch_help),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            cameras.forEach { cam ->
-                Card(Modifier.fillMaxWidth().clickable { nav.navigate("camera_settings/${cam.id}") }) {
-                    Column(Modifier.padding(16.dp)) {
-                        Text(cam.id, style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "${cam.host}:${cam.port}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-            if (missing.isNotEmpty()) {
-                Text(stringResource(R.string.camera_suggest), style = MaterialTheme.typography.bodyMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    missing.forEach { id ->
-                        SuggestionChip(
-                            onClick = { nav.navigate("camera_settings/$NEW_CAMERA?name=$id") },
-                            label = { Text("+ $id") },
-                        )
+            ids.forEach { id ->
+                val cfg = live.firstOrNull { it.id == id }
+                val enabled = vm.isCameraEnabled(id)
+                Card(Modifier.fillMaxWidth().clickable { nav.navigate("camera_settings/$id") }) {
+                    Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(vm.displayName(id), style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                listOfNotNull(
+                                    id.takeIf { vm.displayName(id) != id },
+                                    cfg?.let { "${it.host}:${it.port}" } ?: stringResource(R.string.camera_no_live),
+                                    stringResource(R.string.camera_off).takeIf { !enabled },
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = enabled, onCheckedChange = { vm.setCameraEnabled(id, it) })
                     }
                 }
             }
@@ -834,17 +869,26 @@ fun CameraSettingsScreen(nav: androidx.navigation.NavHostController, knownCamera
     }
 }
 
-/** Add/edit one camera's RTSP details (saved encrypted on-device). [cameraId] = [NEW_CAMERA] adds one,
- *  pre-named [suggestedName] when it came from the NVR's list. */
+/** One camera: display name (cameras.json, shared) + optional live-view RTSP details (encrypted,
+ *  on-device). [cameraId] = [NEW_CAMERA] adds a camera, pre-named [suggestedName] if given; for an
+ *  existing camera the id (its Drive folder) is fixed and the live details are optional. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: String, suggestedName: String? = null) {
+fun CameraEditScreen(
+    vm: MainViewModel,
+    nav: androidx.navigation.NavHostController,
+    cameraId: String,
+    suggestedName: String? = null,
+) {
     val context = LocalContext.current
     val store = remember { CameraConfigStore(context) }
     val isNew = cameraId == NEW_CAMERA
     val existing = remember { if (isNew) null else store.get(cameraId) }
 
-    var name by rememberSaveable { mutableStateOf(existing?.id ?: suggestedName.orEmpty()) }
+    var name by rememberSaveable { mutableStateOf(if (isNew) suggestedName.orEmpty() else cameraId) }
+    var label by rememberSaveable {
+        mutableStateOf(if (isNew) "" else vm.registry.cameras[cameraId]?.label.orEmpty())
+    }
     var host by rememberSaveable { mutableStateOf(existing?.host.orEmpty()) }
     var port by rememberSaveable { mutableStateOf((existing?.port ?: CameraConfigStore.DEFAULT_PORT).toString()) }
     var user by rememberSaveable { mutableStateOf(existing?.user.orEmpty()) }
@@ -854,7 +898,7 @@ fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: Strin
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(if (isNew) R.string.camera_new_title else R.string.camera_edit_title)) },
+                title = { Text(if (isNew) stringResource(R.string.camera_new_title) else vm.displayName(cameraId)) },
                 navigationIcon = {
                     IconButton(onClick = { nav.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
@@ -866,19 +910,30 @@ fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: Strin
         Column(
             Modifier.fillMaxSize().padding(pad).padding(16.dp).verticalScroll(rememberScrollState()),
         ) {
-            Text(
-                stringResource(R.string.camera_settings_help),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.trim() },
+                enabled = isNew,
                 label = { Text(stringResource(R.string.camera_field_name)) },
                 supportingText = { Text(stringResource(R.string.camera_name_help)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it },
+                label = { Text(stringResource(R.string.camera_field_label)) },
+                supportingText = { Text(stringResource(R.string.camera_label_help)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(20.dp))
+            Text(stringResource(R.string.camera_live_section), style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.camera_settings_help),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
@@ -914,9 +969,9 @@ fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: Strin
                 visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Password),
                 trailingIcon = {
-                    val label = if (showPassword) R.string.camera_pass_hide else R.string.camera_pass_show
+                    val l = if (showPassword) R.string.camera_pass_hide else R.string.camera_pass_show
                     androidx.compose.material3.TextButton(onClick = { showPassword = !showPassword }) {
-                        Text(stringResource(label))
+                        Text(stringResource(l))
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -925,18 +980,21 @@ fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: Strin
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = {
-                        val renamed = existing != null && existing.id != name
                         val msg = when {
                             !isValidCameraId(name) -> R.string.camera_name_invalid
-                            host.isBlank() -> R.string.camera_host_required
-                            (isNew || renamed) && store.get(name) != null -> R.string.camera_name_taken
+                            isNew && host.isBlank() -> R.string.camera_host_required
+                            isNew && (store.get(name) != null || name in vm.knownCameraIds()) -> R.string.camera_name_taken
                             else -> null
                         }
                         if (msg != null) {
                             Toast.makeText(context, context.getString(msg), Toast.LENGTH_SHORT).show()
                         } else {
-                            if (renamed) store.remove(existing!!.id)
-                            store.save(CameraConfig(name, host.trim(), port.toIntOrNull() ?: CameraConfigStore.DEFAULT_PORT, user.trim(), password))
+                            if (host.isNotBlank()) {
+                                store.save(CameraConfig(name, host.trim(), port.toIntOrNull() ?: CameraConfigStore.DEFAULT_PORT, user.trim(), password))
+                            } else if (existing != null) {
+                                store.remove(name)                    // live details cleared on purpose
+                            }
+                            if (label.trim() != vm.registry.cameras[name]?.label.orEmpty()) vm.setCameraLabel(name, label)
                             Toast.makeText(context, context.getString(R.string.camera_saved_toast), Toast.LENGTH_SHORT).show()
                             nav.popBackStack()
                         }
@@ -945,7 +1003,7 @@ fun CameraEditScreen(nav: androidx.navigation.NavHostController, cameraId: Strin
                 ) { Text(stringResource(R.string.camera_save)) }
                 if (existing != null) {
                     OutlinedButton(onClick = { store.remove(existing.id); nav.popBackStack() }) {
-                        Text(stringResource(R.string.camera_delete))
+                        Text(stringResource(R.string.camera_remove_live))
                     }
                 }
             }

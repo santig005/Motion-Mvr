@@ -216,6 +216,8 @@ fun linkQualityOf(lossPct: Int?, p90Ms: Int?): WifiQuality? {
 /** NVR/camera health, read from the status.json the NVR writes. */
 data class CameraHealth(
     val camera: String,
+    /** The NVR's watchdog confirms it stopped this camera because the app disabled it (cameras.json). */
+    val disabled: Boolean = false,
     val ok: Boolean,            // recording_ok: are fresh segments appearing? (what matters)
     val updated: Long,          // epoch (s) of the last report -> heartbeat / "not reporting" detection
     val battery: Int? = null,   // battery % (null if the NVR doesn't report it / no Termux:API)

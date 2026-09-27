@@ -159,7 +159,11 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 if (b != null && h.updated > 0) batteryHistory.record(h.camera, h.updated, b, h.charging == true, h.etaMinutes)
             }
             val now = System.currentTimeMillis() / 1000
-            val issues = health.mapNotNull { h ->
+            // A camera switched off in the app (cameras.json) raises nothing: no "no signal", no
+            // "not reporting". Everything else is named by its alias ("Pasillo Interior").
+            val registry = com.famviva.camara.data.CameraRegistryStore(ctx).load()
+            val active = health.filter { registry.isEnabled(it.camera) }
+            val issues = active.map { it.copy(camera = registry.labelOf(it.camera)) }.mapNotNull { h ->
                 when {
                     // Ordered most-specific first. A wedged camera and a blind-but-recording camera
                     // are both "technically covered" by vaguer states, but the vague wording is what
@@ -215,11 +219,11 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             // "Down" for the recovery notification includes the blind-but-recording case: from the
             // user's side that outage is identical (no videos are arriving), so its recovery is just
             // as worth announcing.
-            val downCam = health.firstOrNull { !it.ok || it.isStale(now) || it.blindWhileRecording }
+            val downCam = active.firstOrNull { !it.ok || it.isStale(now) || it.blindWhileRecording }
             if (downCam != null) {
                 store.setCameraDown(true)
             } else if (store.cameraWasDown()) {
-                val cam = health.firstOrNull()?.camera ?: ctx.getString(R.string.app_name)
+                val cam = active.firstOrNull()?.camera?.let(registry::labelOf) ?: ctx.getString(R.string.app_name)
                 Notifications.notifyHealthRecovered(ctx, cam)
                 store.setCameraDown(false)
             }

@@ -170,6 +170,20 @@ mutate "queue: time budget per cycle" cloud-sync.sh test-cloud-sync.sh \
 mutate "producer: marker leads with finish time" record-preroll.sh run-tests.sh \
   's/m="\$\(date \+%s%N\)\.\$\{CLIP_TAG\}\./m="\${CLIP_TAG}./s'
 
+printf '\n\033[1mCamera registry — enable/disable (multi-camera B2, 2026-09-27)\033[0m\n'
+
+# Fail-closed: a missing/unreadable registry would silently stop surveillance of every camera.
+mutate "registry: missing file => enabled" watchdog.sh test-watchdog.sh \
+  's/\[ -r "\$REGISTRY" \] \|\| return 0/[ -r "\$REGISTRY" ] || return 1/s'
+
+# Disabled but still running: the unplugged camera keeps retrying all night (2026-09-26/27).
+mutate "registry: disable stops the session" watchdog.sh test-watchdog.sh \
+  's/      tmux kill-session -t "\$cam" 2>\/dev\/null \|\| true\n(      log "⏸)/$1/s'
+
+# Falling through to ensure_session would revive the camera the user just switched off.
+mutate "registry: a disabled camera is not revived" watchdog.sh test-watchdog.sh \
+  's/(      write_disabled_status "\$cam"\n    fi\n)    return 0\n/$1/s'
+
 echo
 if [ "$SURVIVED" -eq 0 ]; then
   printf '\033[1mAll mutants killed — every fix and every guard is covered by a test that fails without it.\033[0m\n'

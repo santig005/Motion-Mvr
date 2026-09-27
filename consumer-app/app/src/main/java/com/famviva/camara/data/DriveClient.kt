@@ -142,34 +142,56 @@ class DriveClient(
     /**
      * Publishes the favorited clip basenames to a small `favorites.json` at the Drive root, so the
      * NVR's cloud-sync can exclude them from its 30-day purge (keeping the Drive original of a
-     * starred clip). Creates the file on first use (drive.file scope: the app only ever sees the
-     * files it created), then rewrites it in place. Best-effort — returns false on any failure.
+     * starred clip). Best-effort — returns false on any failure.
      */
-    suspend fun uploadFavorites(names: List<String>): Boolean = withContext(Dispatchers.IO) {
-        val token = tokenProvider()
-        val body = JSONObject().put("favorites", JSONArray(names)).toString()
-        val jsonType = "application/json".toMediaType()
+    suspend fun uploadFavorites(names: List<String>): Boolean =
+        uploadRootJson("favorites.json", JSONObject().put("favorites", JSONArray(names)).toString())
 
-        // Locate our own favorites.json (with drive.file the listing only returns app-created files).
+    /** Publishes the camera registry (`cameras.json`: enabled + label per camera). The NVR's watchdog
+     *  reads it to start/stop each camera; see [CameraRegistry]. Best-effort — false on any failure. */
+    suspend fun uploadCameraRegistry(json: String): Boolean = uploadRootJson("cameras.json", json)
+
+    /** The registry as last published, or null when there is none yet / on any failure. */
+    suspend fun fetchCameraRegistry(): String? = fetchRootJson("cameras.json")
+
+    /** Id of an app-written file at the Drive root (with drive.file the listing only returns files
+     *  this app created), or null. */
+    private fun findRootJson(name: String, token: String): String? {
         val findUrl = "https://www.googleapis.com/drive/v3/files".toHttpUrl().newBuilder()
-            .addQueryParameter("q", "name = 'favorites.json' and trashed = false")
+            .addQueryParameter("q", "name = '$name' and trashed = false")
             .addQueryParameter("spaces", "drive")
             .addQueryParameter("fields", "files(id)")
             .build()
-        var fileId: String? = null
         http.newCall(Request.Builder().url(findUrl).header("Authorization", "Bearer $token").get().build())
             .execute().use { resp ->
                 if (resp.code == 401) { onUnauthorized(); throw UnauthorizedException("Token rejected by Drive") }
-                if (resp.isSuccessful) {
-                    JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
-                        ?.takeIf { it.length() > 0 }
-                        ?.let { fileId = it.getJSONObject(0).getString("id") }
-                }
+                if (!resp.isSuccessful) return null
+                return JSONObject(resp.body?.string() ?: "{}").optJSONArray("files")
+                    ?.takeIf { it.length() > 0 }?.getJSONObject(0)?.getString("id")
             }
+    }
+
+    private suspend fun fetchRootJson(name: String): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val token = tokenProvider()
+            val id = findRootJson(name, token) ?: return@runCatching null
+            http.newCall(
+                Request.Builder().url("https://www.googleapis.com/drive/v3/files/$id?alt=media")
+                    .header("Authorization", "Bearer $token").get().build(),
+            ).execute().use { resp -> if (resp.isSuccessful) resp.body?.string() else null }
+        }.getOrNull()
+    }
+
+    /** Writes [body] to the app's own `name` at the Drive root: creates the file on first use, then
+     *  rewrites it in place (media PATCH). Best-effort — returns false on any failure. */
+    private suspend fun uploadRootJson(name: String, body: String): Boolean = withContext(Dispatchers.IO) {
+        val token = tokenProvider()
+        val jsonType = "application/json".toMediaType()
+        var fileId: String? = findRootJson(name, token)
 
         // Create the metadata-only file first if it's missing, then upload the content via media PATCH.
         if (fileId == null) {
-            val meta = JSONObject().put("name", "favorites.json").put("mimeType", "application/json")
+            val meta = JSONObject().put("name", name).put("mimeType", "application/json")
             http.newCall(
                 Request.Builder()
                     .url("https://www.googleapis.com/drive/v3/files")
@@ -243,6 +265,7 @@ class DriveClient(
                         val j = JSONObject(resp.body?.string() ?: "{}")
                         out += CameraHealth(
                             camera = j.optString("camera", "cam"),
+                            disabled = j.optBoolean("disabled", false),
                             ok = j.optBoolean("recording_ok", j.optBoolean("ok", true)),
                             updated = j.optLong("updated", 0L),
                             battery = if (j.has("battery")) j.optInt("battery") else null,

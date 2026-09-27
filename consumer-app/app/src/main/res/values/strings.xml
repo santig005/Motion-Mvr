@@ -100,6 +100,17 @@
     <string name="camera_suggest">Recording, but not set up for live view yet:</string>
     <string name="live_tile_offline">No connection · tap to retry</string>
     <string name="live_grid_hint">Tap a camera to watch it full screen (HD available there).</string>
+    <string name="status_disabled_title">📴 %s is switched off</string>
+    <string name="status_disabled_body">Not recording and not alerting; its clips stay available. Turn it back on in Camera setup.</string>
+    <string name="status_disabled_applied">The NVR has stopped it.</string>
+    <string name="camera_field_label">Display name</string>
+    <string name="camera_label_help">How it shows in the app and in notifications. Saved on Drive.</string>
+    <string name="camera_no_live">no live view set up</string>
+    <string name="camera_off">off</string>
+    <string name="camera_remove_live">Remove live view</string>
+    <string name="camera_live_section">Live view (optional)</string>
+    <string name="live_tile_disabled">Switched off</string>
+    <string name="camera_switch_help">Switch a camera off before unplugging it: the NVR stops it and no alarms fire. Its clips stay available.</string>
     <string name="favorites_empty">No favorites yet — press and hold a clip, then choose “Mark as favorite”. Favorites are kept even when you clear a day.</string>
     <string name="action_delete">Delete</string>
     <string name="action_cancel">Cancel</string>

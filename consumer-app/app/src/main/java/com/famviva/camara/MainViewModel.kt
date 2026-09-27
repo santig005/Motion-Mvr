@@ -1,5 +1,10 @@
 package com.famviva.camara
 
+import com.famviva.camara.data.CameraEntry
+import com.famviva.camara.data.CameraRegistry
+import com.famviva.camara.data.CameraRegistryStore
+import com.famviva.camara.data.reconcileRegistry
+
 import androidx.annotation.StringRes
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -43,6 +48,7 @@ class MainViewModel(
     private val favorites: FavoritesStore,
     private val catalogStore: CatalogStore,
     private val thumbs: ThumbArchive,
+    private val registryStore: CameraRegistryStore,
     private val tokenProvider: suspend () -> String,
 ) : ViewModel() {
 
@@ -77,6 +83,50 @@ class MainViewModel(
     // rebuilt on each successful load (see [load]).
     var catalog by mutableStateOf<List<ClipRecord>>(catalogStore.load())
         private set
+
+    /** The camera registry (cameras.json): per-camera enabled switch + display alias. Seeded from the
+     *  local cache so labels and switches work before (or without) a Drive round-trip. */
+    var registry by mutableStateOf(registryStore.load())
+        private set
+
+    /** The alias ("Pasillo Interior") when set, else the camera id ("Camara1"). */
+    fun displayName(id: String): String = registry.labelOf(id)
+
+    fun isCameraEnabled(id: String?): Boolean = registry.isEnabled(id)
+
+    /** Every camera the app knows about: reported by the NVR, listed in the registry, or [extra]
+     *  (e.g. set up for live view). The NVR owns existence; this is only what the app has heard of. */
+    fun knownCameraIds(extra: List<String> = emptyList()): List<String> =
+        (cameraHealth.map { it.camera } + registry.cameras.keys + extra).distinct().sorted()
+
+    fun setCameraEnabled(id: String, enabled: Boolean) = editRegistry(id) { it.copy(enabled = enabled) }
+
+    fun setCameraLabel(id: String, label: String) =
+        editRegistry(id) { it.copy(label = label.trim().ifEmpty { null }) }
+
+    private fun editRegistry(id: String, change: (CameraEntry) -> CameraEntry) {
+        registry = registry.edit(id, System.currentTimeMillis() / 1000, change)
+        registryStore.save(registry, pendingUpload = true)
+        pushRegistry()
+    }
+
+    /** Publishes the registry for the NVR; the local edit stays "pending" until Drive confirms it. */
+    private fun pushRegistry() {
+        val snapshot = registry
+        viewModelScope.launch {
+            val ok = runCatching { drive.uploadCameraRegistry(snapshot.toJson()) }.getOrDefault(false)
+            if (ok && snapshot == registry) registryStore.save(snapshot, pendingUpload = false)
+        }
+    }
+
+    /** On each load: adopt Drive's registry (another device may have edited it), unless a local edit
+     *  newer than it is still waiting to be uploaded — then retry that upload instead. */
+    private suspend fun syncRegistry() {
+        val remote = CameraRegistry.parse(runCatching { drive.fetchCameraRegistry() }.getOrNull())
+        val (keep, push) = reconcileRegistry(registry, remote, registryStore.pendingUpload)
+        if (keep != registry) registry = keep
+        if (push) pushRegistry() else registryStore.save(keep, pendingUpload = false)
+    }
 
     /** True once clips from more than one camera exist. Only then does each clip carry a camera tag,
      *  so a single-camera install looks exactly as before (multi-camera F1). */
@@ -236,6 +286,7 @@ class MainViewModel(
                 favoriteIds = favorites.all()
                 syncFavoritesToDrive()
                 cameraHealth = runCatching { drive.fetchCameraHealth() }.getOrDefault(emptyList())
+                syncRegistry()
                 recordBatterySamples()
                 refreshCatalog()
                 loadedOnce = true
@@ -389,10 +440,11 @@ class MainViewModel(
         private val favorites: FavoritesStore,
         private val catalogStore: CatalogStore,
         private val thumbs: ThumbArchive,
+        private val registryStore: CameraRegistryStore,
         private val tokenProvider: suspend () -> String,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            MainViewModel(drive, seen, offline, cache, battery, favorites, catalogStore, thumbs, tokenProvider) as T
+            MainViewModel(drive, seen, offline, cache, battery, favorites, catalogStore, thumbs, registryStore, tokenProvider) as T
     }
 }
