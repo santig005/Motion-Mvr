@@ -163,22 +163,32 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             // "not reporting". Everything else is named by its alias ("Pasillo Interior").
             val registry = com.famviva.camara.data.CameraRegistryStore(ctx).load()
             val active = health.filter { registry.isEnabled(it.camera) }
-            val issues = active.map { it.copy(camera = registry.labelOf(it.camera)) }.mapNotNull { h ->
+            val cameraIssues = active.mapNotNull { h ->
+                val name = registry.labelOf(h.camera)
                 when {
                     // Ordered most-specific first. A wedged camera and a blind-but-recording camera
                     // are both "technically covered" by vaguer states, but the vague wording is what
                     // made these outages easy to ignore — the user can't act on "no signal", they can
                     // act on "unplug the camera" or "it's recording but detecting nothing".
-                    h.cameraWedged -> ctx.getString(R.string.health_camera_wedged, h.camera)
-                    h.blindWhileRecording -> ctx.getString(R.string.health_detector_down, h.camera)
-                    !h.ok -> ctx.getString(R.string.health_no_signal, h.camera)
-                    h.isStale(now) -> ctx.getString(R.string.health_not_reporting, h.camera)
-                    h.lowBattery -> ctx.getString(R.string.health_low_battery, h.camera, h.battery ?: 0)
-                    h.diskLow() -> ctx.getString(R.string.health_disk_low, h.camera, (h.diskFreeMb ?: 0) / 1024.0)
-                    h.canUnplug -> ctx.getString(R.string.health_can_unplug, h.camera)
+                    h.cameraWedged -> ctx.getString(R.string.health_camera_wedged, name)
+                    h.blindWhileRecording -> ctx.getString(R.string.health_detector_down, name)
+                    !h.ok -> ctx.getString(R.string.health_no_signal, name)
+                    h.isStale(now) -> ctx.getString(R.string.health_not_reporting, name)
                     else -> null
                 }
-            }.toMutableList()
+            }
+            // Battery / disk / "can unplug" belong to the NVR PHONE, which every camera's status.json
+            // repeats: judge them once, from the freshest report, instead of once per camera.
+            val nvrName = ctx.getString(R.string.nvr_name)
+            val phoneIssue = active.filter { !it.isStale(now) }.maxByOrNull { it.updated }?.let { h ->
+                when {
+                    h.lowBattery -> ctx.getString(R.string.health_low_battery, nvrName, h.battery ?: 0)
+                    h.diskLow() -> ctx.getString(R.string.health_disk_low, nvrName, (h.diskFreeMb ?: 0) / 1024.0)
+                    h.canUnplug -> ctx.getString(R.string.health_can_unplug, nvrName)
+                    else -> null
+                }
+            }
+            val issues = (cameraIssues + listOfNotNull(phoneIssue)).toMutableList()
             // Sync pipeline: a dead uploader also stops status.json reaching Drive (caught above as
             // "not reporting"), but an alive-but-not-uploading uploader is invisible there — recording
             // looks fine while clips never leave the phone. Alert on a stale heartbeat OR a fast lane
@@ -229,14 +239,13 @@ class NewClipsWorker(context: Context, params: WorkerParameters) : CoroutineWork
             // "Down" for the recovery notification includes the blind-but-recording case: from the
             // user's side that outage is identical (no videos are arriving), so its recovery is just
             // as worth announcing.
-            val downCam = active.firstOrNull { !it.ok || it.isStale(now) || it.blindWhileRecording }
-            if (downCam != null) {
-                store.setCameraDown(true)
-            } else if (store.cameraWasDown()) {
-                val cam = active.firstOrNull()?.camera?.let(registry::labelOf) ?: ctx.getString(R.string.app_name)
-                Notifications.notifyHealthRecovered(ctx, cam)
-                store.setCameraDown(false)
-            }
+            // Per camera: announce the recovery of exactly the camera(s) that had been down and are still
+            // switched on — not "the first camera", which named the wrong one with two cameras.
+            val downNow = active.filter { !it.ok || it.isStale(now) || it.blindWhileRecording }.map { it.camera }.toSet()
+            (store.downCameras() - downNow)
+                .filter { id -> active.any { it.camera == id } }
+                .forEach { id -> Notifications.notifyHealthRecovered(ctx, registry.labelOf(id)) }
+            store.setDownCameras(downNow)
         }
 
         // 3) Persist the home-screen widget summary and refresh any placed widgets. The widget does

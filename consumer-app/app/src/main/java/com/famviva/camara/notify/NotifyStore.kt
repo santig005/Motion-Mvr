@@ -92,6 +92,12 @@ class NotifyStore(context: Context) {
 
     fun setCameraDown(down: Boolean) = prefs.edit().putBoolean(KEY_CAM_DOWN, down).apply()
 
+    /** Cameras that were down at the last poll, so a recovery is announced for the RIGHT camera. */
+    fun downCameras(): Set<String> =
+        prefs.getString(KEY_DOWN_SET, null).orEmpty().split(',').filter { it.isNotBlank() }.toSet()
+
+    fun setDownCameras(ids: Set<String>) = prefs.edit().putString(KEY_DOWN_SET, ids.sorted().joinToString(",")).apply()
+
     /** "YYYYMMDD" of the last day the daily recap was posted, so it isn't posted twice for one day. */
     fun lastDigestDay(): String? = prefs.getString(KEY_DIGEST, null)
 
@@ -104,6 +110,7 @@ class NotifyStore(context: Context) {
         const val KEY_HEALTH = "health_alert"
         const val KEY_CAM_DOWN = "camera_down"
         const val KEY_SILENT = "silent_episodes"
+        const val KEY_DOWN_SET = "down_cameras"
         const val KEY_SILENT_ASK = "silent_ask_secs"
         const val KEY_DIGEST = "digest_day"
         const val KEY_QUIET = "quiet_hours"

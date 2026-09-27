@@ -80,8 +80,14 @@ class CameraRegistryStore(context: Context) {
 
     val pendingUpload: Boolean get() = prefs.getBoolean(KEY_PENDING, false)
 
+    /** The camera the user last filtered the app by; null = "All" (the default). Local to this phone. */
+    var viewFilter: String?
+        get() = prefs.getString(KEY_VIEW, null)
+        set(value) = prefs.edit().putString(KEY_VIEW, value).apply()
+
     private companion object {
         const val KEY = "registry"
         const val KEY_PENDING = "pending_upload"
+        const val KEY_VIEW = "view_filter"
     }
 }

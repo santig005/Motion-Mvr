@@ -99,6 +99,18 @@ class MainViewModel(
     fun knownCameraIds(extra: List<String> = emptyList()): List<String> =
         (cameraHealth.map { it.camera } + registry.cameras.keys + extra).distinct().sorted()
 
+    /** The camera the app is filtered by (null = "All", the default); remembered across launches. */
+    var cameraFilter by mutableStateOf(registryStore.viewFilter)
+        private set
+
+    fun filterByCamera(id: String?) {
+        cameraFilter = id
+        registryStore.viewFilter = id
+    }
+
+    /** The filter in effect: a remembered camera that is no longer known falls back to "All". */
+    val effectiveCameraFilter: String? get() = cameraFilter?.takeIf { it in knownCameraIds() }
+
     fun setCameraEnabled(id: String, enabled: Boolean) = editRegistry(id) { it.copy(enabled = enabled) }
 
     fun setCameraLabel(id: String, label: String) =

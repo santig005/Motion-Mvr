@@ -1181,6 +1181,13 @@ data class SyncStatus(
     val driveFreeMb: Long = 0,
     val driveTotalMb: Long = 0,
     val driveChecked: Long = 0,
+    /** Upload queue depth; -1 = not reported (an NVR from before the queue, 2026-09-26). */
+    val queueLen: Int = -1,
+    /** How long the oldest queued clip has been waiting, seconds. */
+    val queueOldestS: Long = 0,
+    /** Camera-tagged clips a directory scan had to upload because the queue missed them (since the
+     *  uploader last started). Non-zero = a leak in the queue worth a look. */
+    val backstopTotal: Int = 0,
 ) {
     /** No sync heartbeat for more than [maxAgeSec] (default 10 min) -> the sync loop may be stuck. */
     fun isStale(nowSec: Long, maxAgeSec: Long = 600): Boolean = updated > 0 && nowSec - updated > maxAgeSec
@@ -1218,6 +1225,9 @@ fun parseSyncStatus(body: String): SyncStatus? = runCatching {
         driveFreeMb = j.optLong("drive_free_mb", 0L),
         driveTotalMb = j.optLong("drive_total_mb", 0L),
         driveChecked = j.optLong("drive_checked", 0L),
+        queueLen = j.optInt("queue_len", -1),
+        queueOldestS = j.optLong("queue_oldest_s", 0L),
+        backstopTotal = j.optInt("backstop_total", 0),
     )
 }.getOrNull()
 

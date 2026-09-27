@@ -2590,6 +2590,30 @@ private fun OverlayChip(text: String, bg: Color, fg: Color, modifier: Modifier =
     }
 }
 
+/** "All / Pasillo Interior / Habitación": the one camera filter the whole app shares (remembered).
+ *  Hidden with a single camera, so an N=1 install looks exactly as before. */
+@Composable
+private fun CameraFilterChips(vm: MainViewModel) {
+    val ids = vm.knownCameraIds()
+    if (ids.size < 2) return
+    val sel = vm.effectiveCameraFilter
+    ChipsRow {
+        FilterChip(
+            selected = sel == null,
+            onClick = { vm.filterByCamera(null) },
+            label = { Text(stringResource(R.string.camera_filter_all)) },
+        )
+        ids.forEach { id ->
+            Spacer(Modifier.width(8.dp))
+            FilterChip(
+                selected = sel == id,
+                onClick = { vm.filterByCamera(id) },
+                label = { Text(vm.displayName(id)) },
+            )
+        }
+    }
+}
+
 @Composable
 private fun ChipsRow(content: @Composable () -> Unit) {
     Row(
@@ -2878,7 +2902,6 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
 
     var loading by remember { mutableStateOf(true) }
     var rawEvents by remember { mutableStateOf<List<OutageEvent>>(emptyList()) }
-    var timeline by remember { mutableStateOf<List<HealthEvent>>(emptyList()) }
     var daily by remember { mutableStateOf<List<DailyHealth>>(emptyList()) }
     var sync by remember { mutableStateOf<SyncStatus?>(null) }
     var wifi by remember { mutableStateOf<List<com.famviva.camara.data.WifiSample>>(emptyList()) }
@@ -2889,16 +2912,25 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
         loading = true
         val raw = runCatching { drive.fetchOutageEvents() }.getOrDefault(emptyList())
         rawEvents = raw
-        timeline = clusterHealthTimeline(buildHealthTimeline(raw))
         daily = runCatching { drive.fetchDailyHealth() }.getOrDefault(emptyList())
         sync = runCatching { drive.fetchSyncStatus() }.getOrNull()
         wifi = runCatching { drive.fetchWifiSamples() }.getOrDefault(emptyList())
         loading = false
     }
 
+    // Per-camera view: that camera's lines plus the camera-less (system) ones, e.g. sync. "All" keeps
+    // everything, as before multi-camera.
+    val sel = vm.effectiveCameraFilter
+    val events = remember(rawEvents, sel) { if (sel == null) rawEvents else rawEvents.filter { it.cam == null || it.cam == sel } }
+    val timelineSel = remember(events) { clusterHealthTimeline(buildHealthTimeline(events)) }
+    val dailySel = remember(daily, sel) { if (sel == null) daily else daily.filter { it.cam == sel } }
+    // One Wi-Fi/link chart PER camera: interleaving two cameras' samples in one series is meaningless.
+    val wifiByCam = remember(wifi, sel) { wifi.filter { sel == null || it.cam == sel }.groupBy { it.cam.orEmpty() } }
+    val camHealth = if (sel == null) vm.cameraHealth else vm.cameraHealth.filter { it.camera == sel }
+
     // Timeline entries are already newest-first, so groupBy yields days newest-first with each day's
     // entries newest-first too.
-    val byDay = timeline.groupBy { dateKeyOf(it.ts) }
+    val byDay = timelineSel.groupBy { dateKeyOf(it.ts) }
 
     Scaffold(
         topBar = {
@@ -2917,12 +2949,13 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
             contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            item { CameraFilterChips(vm) }
             // Current status (reuses the same card as the home screen; here it routes on to battery).
             item { HealthSectionHeader(stringResource(R.string.health_current_section)) }
-            if (vm.cameraHealth.isEmpty()) {
+            if (camHealth.isEmpty()) {
                 item { HealthEmptyText(stringResource(R.string.health_no_camera_data)) }
             } else {
-                items(vm.cameraHealth, key = { "cam_${it.camera}" }) { h ->
+                items(camHealth, key = { "cam_${it.camera}" }) { h ->
                     CameraStatusCard(
                         h, name = vm.displayName(h.camera), disabled = !vm.isCameraEnabled(h.camera),
                         dataFresh = dataFresh,
@@ -2934,12 +2967,23 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
             // Wi-Fi signal trend (the dense wifi.jsonl series): the RF dip that precedes a wedge is
             // visible here, where the single live value on the status card above can't show it. Only
             // shown once there are samples, so it doesn't sit empty while the series accrues.
-            if (wifi.isNotEmpty()) {
+            if (wifiByCam.isNotEmpty()) {
                 item {
                     Spacer(Modifier.height(6.dp))
                     HealthSectionHeader(stringResource(R.string.health_wifi_section))
                 }
-                item { WifiTrendCard(wifi) }
+                wifiByCam.forEach { (cam, samples) ->
+                    if (wifiByCam.size > 1 && cam.isNotEmpty()) {
+                        item(key = "wifi_label_$cam") {
+                            Text(
+                                vm.displayName(cam),
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                            )
+                        }
+                    }
+                    item(key = "wifi_$cam") { WifiTrendCard(samples) }
+                }
             }
 
             // Per-service coverage swimlane (24h/7d from events.jsonl, 30d from daily_health.jsonl).
@@ -2957,8 +3001,8 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                     ServiceCoverageSection(
                         horizon = horizon,
                         onHorizonChange = { horizon = it },
-                        events = rawEvents,
-                        daily = daily,
+                        events = events,
+                        daily = dailySel,
                         nowSec = now,
                     )
                 }
@@ -2973,10 +3017,10 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
             item {
                 if (!loading) {
                     WedgeKpiCard(
-                        rawEvents,
-                        daily,
+                        events,
+                        dailySel,
                         now,
-                        vm.cameraHealth.firstOrNull { it.wedgedSince != null }?.wedgedSince,
+                        camHealth.firstOrNull { it.wedgedSince != null }?.wedgedSince,
                     )
                 }
             }
@@ -2987,7 +3031,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                 Spacer(Modifier.height(6.dp))
                 HealthSectionHeader(stringResource(R.string.health_trend_section))
             }
-            item { if (!loading) HealthTrendSection(daily) }
+            item { if (!loading) HealthTrendSection(dailySel) }
 
             // Sync pipeline.
             item {
@@ -3007,7 +3051,7 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                         CircularProgressIndicator()
                     }
                 }
-                timeline.isEmpty() -> item { HealthEmptyText(stringResource(R.string.health_events_empty)) }
+                timelineSel.isEmpty() -> item { HealthEmptyText(stringResource(R.string.health_events_empty)) }
                 else -> byDay.forEach { (day, dayEvents) ->
                     item { HealthDayHeader(prettyDate(context, day)) }
                     items(dayEvents) { entry ->
@@ -3246,6 +3290,23 @@ private fun SyncCard(sync: SyncStatus?, now: Long) {
             if (reason != null && !full) {
                 Spacer(Modifier.height(4.dp))
                 Text(reason, style = MaterialTheme.typography.bodySmall, color = fg)
+            }
+            // The upload queue (all cameras, first finished = first uploaded) and its backstop audit.
+            if (sync.queueLen >= 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (sync.queueLen == 0) stringResource(R.string.health_sync_queue_empty)
+                    else stringResource(R.string.health_sync_queue, sync.queueLen, (sync.queueOldestS / 60).toInt()),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = fg,
+                )
+            }
+            if (sync.backstopTotal > 0) {
+                Text(
+                    stringResource(R.string.health_sync_backstop, sync.backstopTotal),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = fg,
+                )
             }
         }
     }

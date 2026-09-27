@@ -111,6 +111,11 @@
     <string name="camera_live_section">Live view (optional)</string>
     <string name="live_tile_disabled">Switched off</string>
     <string name="camera_switch_help">Switch a camera off before unplugging it: the NVR stops it and no alarms fire. Its clips stay available.</string>
+    <string name="camera_filter_all">All</string>
+    <string name="nvr_name">NVR phone</string>
+    <string name="health_sync_queue">Upload queue: %1$d clip(s), the oldest waiting %2$d min</string>
+    <string name="health_sync_queue_empty">Upload queue empty — everything is on Drive</string>
+    <string name="health_sync_backstop">The backup scans had to upload %d clip(s) the queue missed (since the uploader last started)</string>
     <string name="notif_unplug_title">Did you unplug %s?</string>
     <string name="notif_unplug_text">No recording for %d h while the NVR itself is fine. If you removed it on purpose, switch it off so it stops alerting. If it is still installed, check on it — it could be a cut cable or a theft.</string>
     <string name="action_disable_camera">Switch off</string>
