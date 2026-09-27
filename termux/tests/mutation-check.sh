@@ -32,6 +32,16 @@ mutate(){ # $1=name  $2=source file  $3=test script  $4=perl expression re-intro
   fi
 }
 
+# Baseline: every suite must PASS on the unmutated code. A suite that fails anyway "kills" every mutant
+# and proves nothing (2026-09-26: an unbound variable aborted test-cloud-sync.sh and every queue mutant
+# read as killed).
+for suite in run-tests.sh test-watchdog.sh test-cloud-sync.sh; do
+  if ! bash "$HERE/$suite" >/dev/null 2>&1; then
+    printf '\033[1;31mBASELINE FAILS: %s does not pass unmutated — fix it before trusting any mutant.\033[0m\n' "$suite"
+    exit 1
+  fi
+done
+
 printf '\033[1mSegmenter — re-introducing each 2026-08-16 bug\033[0m\n'
 
 mutate "unreadable ring segment → 0-length" record-preroll.sh run-tests.sh \
@@ -148,6 +158,13 @@ mutate "backstop: a race is not a miss" cloud-sync.sh test-cloud-sync.sh \
 # Without the excludes a scan uploads queued clips out of FIFO order and the queue waits behind it.
 mutate "scan: queued clips are left to the queue" cloud-sync.sh test-cloud-sync.sh \
   's/  \{ queue_names \| sed [^\n]*\n    printf/  { printf/s'
+
+# Status only at the end of the cycle: a long drain reads as a dead uploader.
+mutate "queue: each batch publishes sync health" cloud-sync.sh test-cloud-sync.sh \
+  's/      last_fast_ok=\$\(date \+%s\); write_sync_status\n//s'
+
+mutate "queue: time budget per cycle" cloud-sync.sh test-cloud-sync.sh \
+  's/ && \[ "\$\(\( \$\(date \+%s\) - t0 \)\)" -lt "\$QUEUE_CYCLE_SECS" \]//s'
 
 # Without the time prefix the order is by camera name, not by who finished first.
 mutate "producer: marker leads with finish time" record-preroll.sh run-tests.sh \

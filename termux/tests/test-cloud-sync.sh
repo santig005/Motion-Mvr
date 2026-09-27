@@ -58,6 +58,9 @@ describe "drain_queue — first finished, first uploaded, across cameras (multi-
 # =================================================================================================
 export UPLOAD_QUEUE="$SANDBOX/queue"
 log(){ :; }; log_event(){ :; }
+# The sync loop's globals (set before its first cycle in production), which write_sync_status reads.
+last_fast_ok=0; last_heal_ok=0; last_retention_ok=0; last_error=""; last_error_ts=0
+drive_pct=-1; drive_free_mb=0; drive_total_mb=0; drive_checked=0
 # rclone stub: records the upload order it was handed, and fails on demand.
 RCLONE_RC=0; RCLONE_OUT=""; CALLS=0; SENT=""
 rclone(){
@@ -113,7 +116,29 @@ for i in 1 2 3 4 5; do touch "$day/mt_20260926_10000${i}_Camara1.mp4"; mark "179
 drain_queue
 eq "a backlog drains in batches"                "3" "$CALLS"
 eq "…all of it within the cycle's cap"          "0" "$(qlen)"
-QUEUE_BATCH=20
+
+# A long drain must not freeze the loop: past QUEUE_CYCLE_SECS no NEW batch starts.
+reset_q; QUEUE_CYCLE_SECS=0
+mark 1790000001000000000 "$day/mt_20260926_100001_Camara1.mp4"
+drain_queue
+eq "the time budget stops new batches"          "0" "$CALLS"
+eq "…leaving the clip queued for next cycle"    "1" "$(qlen)"
+QUEUE_CYCLE_SECS=120
+
+# Every successful batch refreshes sync_status.json: a slow drain is NOT "sync down" (keeper and app
+# read a stale last_fast_ok as a dead uploader after 15 min).
+reset_q
+mark 1790000001000000000 "$day/mt_20260926_100001_Camara1.mp4"
+mark 1790000002000000000 "$day/mt_20260926_100002_Camara1.mp4"
+mark 1790000003000000000 "$day/mt_20260926_100003_Camara1.mp4"
+QUEUE_BATCH=2; QUEUE_MAX_BATCHES=1                    # one batch now, one clip left for later
+rm -f "$SYNC_STATUS"; drain_queue
+st=$(cat "$SYNC_STATUS" 2>/dev/null)
+case "$st" in *'"last_fast_ok":0,'*|"") no "a successful batch publishes sync health at once" "last_fast_ok=now" "$st" ;;
+              *) ok "a successful batch publishes sync health at once" ;; esac
+case "$st" in *'"queue_len":1,'*) ok "…including what is still queued" ;;
+              *) no "…including what is still queued" '"queue_len":1' "$st" ;; esac
+QUEUE_BATCH=20; QUEUE_MAX_BATCHES=6
 
 # =================================================================================================
 describe "scan_filter — the scans leave queued clips to the queue"

@@ -56,8 +56,9 @@ LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 SYNC_STATUS="${SYNC_STATUS:-$CAMERAS_DIR/sync_status.json}"   # per-cycle sync health (depth 1; uploaded by the refresh lane); app infers "sync caído" from a stale 'updated'
 EVENTS_LOG="${EVENTS_LOG:-$CAMERAS_DIR/events.jsonl}"         # SYSTEM event log (sync/quota; only cloud-sync writes it). Per-camera logs live at <cam>/events.jsonl
 UPLOAD_QUEUE="${UPLOAD_QUEUE:-$HOME/.upload_queue}"        # FIFO of finalized clips; record-preroll.sh enqueue_upload is the producer
-QUEUE_BATCH="${QUEUE_BATCH:-20}"                            # markers per rclone call
+QUEUE_BATCH="${QUEUE_BATCH:-5}"                             # markers per rclone call (~2 min of 2K clips at the ~200 KiB/s uplink measured 2026-09-26)
 QUEUE_MAX_BATCHES="${QUEUE_MAX_BATCHES:-6}"                 # per cycle, so the refresh/heal lanes still get their turn under a backlog
+QUEUE_CYCLE_SECS="${QUEUE_CYCLE_SECS:-120}"                 # no NEW batch starts after this long in one drain: a backlog must not freeze the loop
 QUEUE_MAX_TRIES="${QUEUE_MAX_TRIES:-5}"                     # NON-transient failures before a marker is set aside (the scans still upload the file)
 FAST_EVERY="${FAST_EVERY:-300}"                             # today-folder scan, now only the backstop behind the queue
 EVENTS_MAX_KB="${EVENTS_MAX_KB:-256}"                         # trim each events.jsonl to its newest half past this (line boundaries)
@@ -91,10 +92,10 @@ log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
 # Returns 0 when the queue ended empty (or capped) without error, 1 when a batch failed.
 queue_names(){ ls -1 "$UPLOAD_QUEUE" 2>/dev/null | grep -v '^\.' | sort; }
 drain_queue(){
-  local q="$UPLOAD_QUEUE" list err batch m f rel n=0 rc reason tries
+  local q="$UPLOAD_QUEUE" list err batch m f rel n=0 rc reason tries t0
   [ -d "$q" ] || return 0
-  list="$q/.batch.$$"; err="$q/.err.$$"
-  while [ "$n" -lt "$QUEUE_MAX_BATCHES" ]; do
+  list="$q/.batch.$$"; err="$q/.err.$$"; t0=$(date +%s)
+  while [ "$n" -lt "$QUEUE_MAX_BATCHES" ] && [ "$(( $(date +%s) - t0 ))" -lt "$QUEUE_CYCLE_SECS" ]; do
     batch=$(queue_names | head -n "$QUEUE_BATCH")
     [ -n "$batch" ] || { rm -f "$list" "$err"; return 0; }
     n=$((n + 1))                                             # counts stale-only batches too, so the loop is always bounded
@@ -116,6 +117,9 @@ drain_queue(){
     cat "$err" >>"$LOG" 2>/dev/null                         # keeps the "Copied (new)" lines latency-report needs
     if [ "$rc" -eq 0 ]; then
       for m in $batch; do rm -f "$q/$m"; done
+      # Uploads ARE flowing: say so now, not only at the end of the cycle. A long drain used to leave
+      # sync_status.json frozen, which the keeper and the app read as "sync down" after 15 min.
+      last_fast_ok=$(date +%s); write_sync_status
     else
       reason=$(classify_sync_err "$err")
       log "!! upload queue batch failed ($reason); $(printf '%s\n' "$batch" | grep -c .) clip(s) stay queued"
