@@ -145,6 +145,10 @@ mutate "queue: a stuck clip is set aside" cloud-sync.sh test-cloud-sync.sh \
 mutate "backstop: a race is not a miss" cloud-sync.sh test-cloud-sync.sh \
   's/\n[^\n]*grep -q[^\n]*&& continue//s'
 
+# Without the excludes a scan uploads queued clips out of FIFO order and the queue waits behind it.
+mutate "scan: queued clips are left to the queue" cloud-sync.sh test-cloud-sync.sh \
+  's/  \{ queue_names \| sed [^\n]*\n    printf/  { printf/s'
+
 # Without the time prefix the order is by camera name, not by who finished first.
 mutate "producer: marker leads with finish time" record-preroll.sh run-tests.sh \
   's/m="\$\(date \+%s%N\)\.\$\{CLIP_TAG\}\./m="\${CLIP_TAG}./s'

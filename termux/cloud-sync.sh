@@ -137,6 +137,15 @@ drain_queue(){
   rm -f "$list" "$err"; return 0
 }
 
+# Filter rules for the directory scans: every clip that still has a marker is EXCLUDED, so a scan only
+# ever uploads what the queue does not know about. Otherwise a scan grabs queued clips out of FIFO
+# order and, while it chews through a backlog, the queue waits behind it (seen on the first deploy,
+# 2026-09-26). Excludes come first (first match wins), then the usual mp4/jpg includes.
+scan_filter(){ # $1 = rules file to write
+  { queue_names | sed 's/^[0-9]*\.[^.]*\.//; s/^/- /; s/$/.*/'
+    printf '+ *.mp4\n+ *.jpg\n- **\n'; } > "$1" 2>/dev/null
+}
+
 # BACKSTOP AUDIT. A camera-tagged clip (mt_<date>_<time>_<camera>.mp4) always comes from a keeper that
 # enqueues it, so when a directory scan has to upload one that has NO marker in the queue, the queue
 # missed it (keeper died between finalize and enqueue, marker lost, ...). Those are logged, counted in
@@ -266,7 +275,9 @@ trim_log(){
 [ "${CLOUD_SYNC_LIB:-0}" = 1 ] && return 0
 
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | fast lane (today) every ${INTERVAL}s, self-heal every ${HEAL_EVERY}s, retention every ${RETENTION_EVERY}s ==="
-last_heal=0
+# First full-tree heal (and the retention that rides on it) 5 min after start, not in the very first
+# cycle: on a restart the queue should get going first; the scan + queue cover the gap meanwhile.
+last_heal=$(( $(date +%s) - HEAL_EVERY + 300 ))
 last_fast=0
 last_retention=0
 last_quota=0
@@ -300,7 +311,8 @@ while true; do
       cam=$(basename "$camdir")
       for day in $today $extra_day; do
         [ -d "$camdir$day" ] || continue
-        rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
+        scan_filter "$LOG.filter.$$"
+        rclone copy "$camdir$day" "$REMOTE/$cam/$day" --filter-from "$LOG.filter.$$" \
           --min-age 10s --transfers 3 -v --stats-one-line >"$tmperr" 2>&1; rc=$?
         cat "$tmperr" >>"$LOG" 2>/dev/null              # keep the -v "Copied (new)" lines latency-report needs
         backstop_audit "$tmperr" "fast scan"
@@ -325,7 +337,8 @@ while true; do
   #    --fast-list: one recursive listing call instead of one LIST per directory (quota-friendly).
   if [ "$((now - last_heal))" -ge "$HEAL_EVERY" ]; then
     uploaded_ok=0
-    rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s \
+    scan_filter "$LOG.filter.$$"
+    rclone copy "$CAMERAS_DIR" "$REMOTE" --filter-from "$LOG.filter.$$" --min-age 10s \
          --transfers 3 --fast-list -v --stats-one-line >"$tmperr" 2>&1; rc=$?
     cat "$tmperr" >>"$LOG" 2>/dev/null
     backstop_audit "$tmperr" "self-heal"
@@ -376,6 +389,9 @@ while true; do
     fi
   fi
 
+  # Clips that finished while a heal/retention pass ran should not wait a whole extra cycle.
+  drain_queue || fast_ok=0
+
   # 4) QUOTA PROBE (every QUOTA_EVERY) — independent of the heal/retention timers so the headroom
   #    reading stays fresh even during a long offline spell (it just fails and keeps the old value).
   #    Runs AFTER retention in the same pass, so a purge that frees space re-measures immediately.
@@ -387,6 +403,6 @@ while true; do
   write_sync_status                                   # once per cycle: 'updated' + per-lane ok epochs + last error + quota
   trim_log
   trim_events
-  rm -f "$tmperr" 2>/dev/null                          # this cycle's captured rclone output
+  rm -f "$tmperr" "$LOG.filter.$$" 2>/dev/null        # this cycle's captured rclone output + scan filter
   sleep "$INTERVAL"
 done

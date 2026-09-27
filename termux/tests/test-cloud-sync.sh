@@ -116,6 +116,19 @@ eq "…all of it within the cycle's cap"          "0" "$(qlen)"
 QUEUE_BATCH=20
 
 # =================================================================================================
+describe "scan_filter — the scans leave queued clips to the queue"
+# =================================================================================================
+reset_q
+mark 1790000001000000000 "$day/mt_20260926_120001_Camara1.mp4"
+mark 1790000002000000000 "$day2/mt_20260926_120002_Camara2.mp4"
+scan_filter "$SANDBOX/rules"
+eq "queued clips are excluded first, then the usual includes" \
+   "- mt_20260926_120001_Camara1.* - mt_20260926_120002_Camara2.* + *.mp4 + *.jpg - ** " \
+   "$(tr '\n' ' ' < "$SANDBOX/rules")"
+reset_q; scan_filter "$SANDBOX/rules"
+eq "an empty queue leaves only the includes"  "+ *.mp4 + *.jpg - ** " "$(tr '\n' ' ' < "$SANDBOX/rules")"
+
+# =================================================================================================
 describe "backstop_audit — a clip the queue missed is reported, a race is not"
 # =================================================================================================
 reset_q; mkdir -p "$UPLOAD_QUEUE/.deadletter"
