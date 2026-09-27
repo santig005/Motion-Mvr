@@ -114,6 +114,7 @@ CAM_LABEL="${CAM_LABEL:-$(basename "$OUT_DIR")}"             # canonical camera 
 # bare timestamp would make them collide. Filename-safe form of CAM_LABEL. Clips from before 2026-09-26
 # have no suffix; every parser (app, cloud-sync favourites) reads only the leading mt_<date>_<time>.
 CLIP_TAG="${CLIP_TAG:-$(printf '%s' "$CAM_LABEL" | tr -c 'A-Za-z0-9-' '_')}"
+UPLOAD_QUEUE="${UPLOAD_QUEUE:-$HOME/.upload_queue}"          # shared FIFO of finalized clips, drained by cloud-sync (all cameras)
 STALE_SECS="${STALE_SECS:-75}"                   # no new segment for > this => recording down (segments ~12s)
 # Camera-level recovery. The segmenter can reconnect ffmpeg forever, but if the CAMERA's own RTSP
 # service is wedged (accepts TCP yet returns "Invalid data" on BOTH channels) no reconnect helps —
@@ -458,6 +459,19 @@ write_status(){ # $1=recording_ok(1/0)  $2=heartbeat(1/0, default 0)
   printf '{"camera":"%s","ok":%s,"recording_ok":%s,"updated":%d%s}\n' \
     "$CAM_LABEL" "$rec" "$rec" "$now" "$extra" \
     > "$HEALTH_FILE.tmp" 2>/dev/null && mv -f "$HEALTH_FILE.tmp" "$HEALTH_FILE" 2>/dev/null
+}
+
+# Hand a finalized clip to cloud-sync's upload queue (cloud-sync.sh drain_queue). One marker per clip,
+# created atomically (tmp + rename) so the consumer never reads a half-written one. The name leads with
+# the finalize time in ns, so sorting ALL cameras' markers by name IS finalize order: first finished,
+# first uploaded, whichever camera it came from. Best-effort: the directory scans in cloud-sync remain
+# the backstop for a clip whose marker never got written.
+enqueue_upload(){ # $1 = final mp4 path
+  mkdir -p "$UPLOAD_QUEUE" 2>/dev/null || return 0
+  local m; m="$(date +%s%N).${CLIP_TAG}.$(basename "$1" .mp4)"
+  printf '%s\n' "$1" > "$UPLOAD_QUEUE/.tmp.$m" 2>/dev/null \
+    && mv -f "$UPLOAD_QUEUE/.tmp.$m" "$UPLOAD_QUEUE/$m" 2>/dev/null
+  return 0
 }
 
 clip_base(){ # $1=YYYYMMDD_HHMMSS -> clip base name (no extension)
@@ -892,6 +906,7 @@ render_clip(){ # $1=list  $2=first_start  $3=clip_start  $4=clip_end  $5=segcoun
        -c:v libx264 -preset veryfast -crf 23 -threads 2 -pix_fmt yuv420p -c:a aac -movflags +faststart -f mp4 "$part" 2>>"$LOG"; then
     mv -f "$part" "$dst"
     make_thumb "$dst" "$final_dur"
+    enqueue_upload "$dst"                              # after the thumb exists: the queue uploads both
     rm -f "$list"; write_metrics_row "$dst" "$mx" "$mean" "$n"
     log "✂️ $name (offset=${offset}s window=${dur}s -> trimmed=${final_dur}s, motion_end=${m1}s, $segcount seg)"
   else

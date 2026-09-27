@@ -55,6 +55,11 @@ LOG="${SYNC_LOG:-$HOME/logs/cloud-sync.log}"
 LOG_MAX_KB="${LOG_MAX_KB:-2048}"
 SYNC_STATUS="${SYNC_STATUS:-$CAMERAS_DIR/sync_status.json}"   # per-cycle sync health (depth 1; uploaded by the refresh lane); app infers "sync caído" from a stale 'updated'
 EVENTS_LOG="${EVENTS_LOG:-$CAMERAS_DIR/events.jsonl}"         # SYSTEM event log (sync/quota; only cloud-sync writes it). Per-camera logs live at <cam>/events.jsonl
+UPLOAD_QUEUE="${UPLOAD_QUEUE:-$HOME/.upload_queue}"        # FIFO of finalized clips; record-preroll.sh enqueue_upload is the producer
+QUEUE_BATCH="${QUEUE_BATCH:-20}"                            # markers per rclone call
+QUEUE_MAX_BATCHES="${QUEUE_MAX_BATCHES:-6}"                 # per cycle, so the refresh/heal lanes still get their turn under a backlog
+QUEUE_MAX_TRIES="${QUEUE_MAX_TRIES:-5}"                     # NON-transient failures before a marker is set aside (the scans still upload the file)
+FAST_EVERY="${FAST_EVERY:-300}"                             # today-folder scan, now only the backstop behind the queue
 EVENTS_MAX_KB="${EVENTS_MAX_KB:-256}"                         # trim each events.jsonl to its newest half past this (line boundaries)
 mkdir -p "$(dirname "$LOG")" "$CAMERAS_DIR"
 log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
@@ -68,6 +73,102 @@ log_event(){ # $1=cam(empty=null)  $2=svc  $3=ev  $4=msg  $5=dur_s (optional)
   [ -n "${5:-}" ] && d=",\"dur_s\":$5"
   printf '{"ts":%d,"cam":%s,"svc":"%s","ev":"%s"%s,"msg":"%s"}\n' \
     "$(date +%s)" "$camf" "$2" "$3" "$d" "$4" >> "$EVENTS_LOG" 2>/dev/null || true
+}
+
+# UPLOAD QUEUE (multi-camera B1, 2026-09-26). Each finalized clip leaves a marker in $UPLOAD_QUEUE named
+# <finalize-ns>.<camera>.<clip> whose content is the mp4's path. Draining oldest-name-first uploads clips
+# in the order they FINISHED, across every camera: first come, first served. Before this, the fast lane
+# walked camera folders one after another, so a fresh clip of one camera waited behind the other
+# camera's whole folder.
+#   - Batches of QUEUE_BATCH through ONE rclone call (--files-from-raw + --no-traverse: per-file checks,
+#     no folder listings -> gentle on the Drive query quota that caused the 2026-07-16 403 cascade).
+#   - Success removes the batch's markers. Failure keeps them; only a NON-transient error (not network /
+#     rate limit / auth / Drive full) counts a try, and after QUEUE_MAX_TRIES the marker moves to
+#     .deadletter/ so one bad file cannot block the head of the queue forever. A Drive outage never
+#     dead-letters anything.
+#   - The queue is an optimisation, never the only record: the FAST_EVERY scan and the hourly self-heal
+#     still upload anything a marker missed (crash before enqueue, dead-lettered, pre-queue keeper).
+# Returns 0 when the queue ended empty (or capped) without error, 1 when a batch failed.
+queue_names(){ ls -1 "$UPLOAD_QUEUE" 2>/dev/null | grep -v '^\.' | sort; }
+drain_queue(){
+  local q="$UPLOAD_QUEUE" list err batch m f rel n=0 rc reason tries
+  [ -d "$q" ] || return 0
+  list="$q/.batch.$$"; err="$q/.err.$$"
+  while [ "$n" -lt "$QUEUE_MAX_BATCHES" ]; do
+    batch=$(queue_names | head -n "$QUEUE_BATCH")
+    [ -n "$batch" ] || { rm -f "$list" "$err"; return 0; }
+    n=$((n + 1))                                             # counts stale-only batches too, so the loop is always bounded
+    : > "$list"
+    for m in $batch; do
+      f=$(head -n 1 "$q/$m" 2>/dev/null)
+      case "$f" in
+        "$CAMERAS_DIR"/*.mp4) ;;
+        *) log "queue: dropping malformed marker $m"; rm -f "$q/$m"; continue ;;
+      esac
+      [ -f "$f" ] || { rm -f "$q/$m"; continue; }          # purged or never finished: nothing to upload
+      rel=${f#"$CAMERAS_DIR"/}
+      printf '%s\n' "$rel" >> "$list"
+      [ -f "${f%.mp4}.jpg" ] && printf '%s\n' "${rel%.mp4}.jpg" >> "$list"
+    done
+    [ -s "$list" ] || continue                               # a batch of stale markers: take the next one
+    rclone copy "$CAMERAS_DIR" "$REMOTE" --files-from-raw "$list" --no-traverse \
+      --check-first --order-by modtime,ascending --transfers 3 -v --stats-one-line >"$err" 2>&1; rc=$?
+    cat "$err" >>"$LOG" 2>/dev/null                         # keeps the "Copied (new)" lines latency-report needs
+    if [ "$rc" -eq 0 ]; then
+      for m in $batch; do rm -f "$q/$m"; done
+    else
+      reason=$(classify_sync_err "$err")
+      log "!! upload queue batch failed ($reason); $(printf '%s\n' "$batch" | grep -c .) clip(s) stay queued"
+      log_event "" sync error "upload queue: $reason"
+      last_error="$reason"; last_error_ts=$(date +%s)
+      if [ "$reason" = error ]; then
+        mkdir -p "$q/.deadletter" 2>/dev/null
+        for m in $batch; do
+          [ -f "$q/$m" ] || continue
+          echo try >> "$q/$m"
+          tries=$(( $(wc -l < "$q/$m") - 1 ))
+          [ "$tries" -ge "$QUEUE_MAX_TRIES" ] && mv -f "$q/$m" "$q/.deadletter/$m" \
+            && log "queue: set aside $m after $tries failed tries (the scans will still upload it)"
+        done
+      fi
+      rm -f "$list" "$err"; return 1
+    fi
+  done
+  rm -f "$list" "$err"; return 0
+}
+
+# BACKSTOP AUDIT. A camera-tagged clip (mt_<date>_<time>_<camera>.mp4) always comes from a keeper that
+# enqueues it, so when a directory scan has to upload one that has NO marker in the queue, the queue
+# missed it (keeper died between finalize and enqueue, marker lost, ...). Those are logged, counted in
+# sync_status.json and recorded as a `sync backstop` event, so a leak in the queue is visible instead
+# of silently papered over. NOT flagged: untagged names (pre-queue keepers) and clips whose marker is
+# still queued (the scan merely got there a few seconds before the queue did).
+backstop_total=0
+backstop_audit(){ # $1 = rclone -v output of a scan  $2 = lane name
+  local names b missed="" n=0 where
+  names=$(grep -oE 'mt_[0-9]{8}_[0-9]{6}_[A-Za-z0-9-]+\.mp4: Copied' "$1" 2>/dev/null | sed 's/: Copied$//' | sort -u)
+  for b in $names; do
+    b=${b%.mp4}
+    ls -1 "$UPLOAD_QUEUE" 2>/dev/null | grep -q "\.$b\$" && continue
+    where=""; ls -1 "$UPLOAD_QUEUE/.deadletter" 2>/dev/null | grep -q "\.$b\$" && where=" (set aside)"
+    log "⚠ backstop ($2) uploaded $b$where: it was NOT in the upload queue"
+    missed="$missed${missed:+ }$b$where"; n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] || return 0
+  backstop_total=$((backstop_total + n))
+  log_event "" sync backstop "$2 uploaded $n clip(s) missing from the queue: $(printf '%s' "$missed" | cut -c1-200)"
+}
+
+# Queue depth + age of its oldest marker, for sync_status.json (a growing queue = uploads falling behind).
+queue_stats(){ # sets queue_len, queue_oldest_s
+  local names first ns
+  names=$(queue_names); queue_len=$(printf '%s\n' "$names" | grep -c .)
+  first=$(printf '%s\n' "$names" | head -n 1); ns=${first%%.*}
+  if [ -n "$first" ] && [ "$ns" -gt 0 ] 2>/dev/null; then
+    queue_oldest_s=$(( $(date +%s) - ns / 1000000000 ))
+  else
+    queue_oldest_s=0
+  fi
 }
 
 # Clip base names out of the app's favorites.json (stdin), one per line, deduplicated.
@@ -96,9 +197,10 @@ trim_events(){
 # drive_* are the last successful quota probe (see probe_quota); drive_pct = -1 until the first one
 # lands, so the app can tell "not measured yet" from "measured at 0%".
 write_sync_status(){
-  printf '{"updated":%d,"last_fast_ok":%d,"last_heal_ok":%d,"last_retention_ok":%d,"last_error":"%s","last_error_ts":%d,"drive_pct":%d,"drive_free_mb":%d,"drive_total_mb":%d,"drive_checked":%d}\n' \
+  local queue_len queue_oldest_s; queue_stats
+  printf '{"updated":%d,"last_fast_ok":%d,"last_heal_ok":%d,"last_retention_ok":%d,"last_error":"%s","last_error_ts":%d,"drive_pct":%d,"drive_free_mb":%d,"drive_total_mb":%d,"drive_checked":%d,"queue_len":%d,"queue_oldest_s":%d,"backstop_total":%d}\n' \
     "$(date +%s)" "$last_fast_ok" "$last_heal_ok" "$last_retention_ok" "$last_error" "$last_error_ts" \
-    "$drive_pct" "$drive_free_mb" "$drive_total_mb" "$drive_checked" \
+    "$drive_pct" "$drive_free_mb" "$drive_total_mb" "$drive_checked" "$queue_len" "$queue_oldest_s" "$backstop_total" \
     > "$SYNC_STATUS.tmp" 2>/dev/null && mv -f "$SYNC_STATUS.tmp" "$SYNC_STATUS" 2>/dev/null
 }
 
@@ -165,6 +267,7 @@ trim_log(){
 
 log "=== cloud-sync starts | $CAMERAS_DIR -> $REMOTE | local=${LOCAL_KEEP_DAYS}d cloud=${CLOUD_KEEP_DAYS}d | fast lane (today) every ${INTERVAL}s, self-heal every ${HEAL_EVERY}s, retention every ${RETENTION_EVERY}s ==="
 last_heal=0
+last_fast=0
 last_retention=0
 last_quota=0
 last_fast_ok=0; last_heal_ok=0; last_retention_ok=0    # epochs of the last successful pass of each lane (for sync_status.json)
@@ -173,9 +276,13 @@ drive_pct=-1; drive_free_mb=0; drive_total_mb=0; drive_checked=0   # last quota 
 quota_bucket=0                                          # highest 90/95/100 step already warned about
 while true; do
   now=$(date +%s)
-  fast_ok=1                                             # cleared if any fast-lane copy fails this cycle
+  fast_ok=1                                             # cleared if the queue or the fast scan fails this cycle
+  tmperr="$LOG.err.$$"                                # this cycle's captured rclone output (for reason classification)
 
-  # 1) FAST LANE — upload ONLY each camera's TODAY folder (plus yesterday's during the first 30
+  # 0) UPLOAD QUEUE (every cycle) — every camera's finalized clips, oldest-finished first. See drain_queue.
+  drain_queue || fast_ok=0
+
+  # 1) FAST SCAN (every FAST_EVERY; was every cycle until the queue existed) — upload ONLY each camera's TODAY folder (plus yesterday's during the first 30
   #    minutes of the day: a clip whose motion started at 23:59 finalizes past midnight into the
   #    OLD date's folder). One Drive LIST per camera per cycle instead of re-listing every dated
   #    dir of the retention window (see QUOTA note in the header). WITHOUT --ignore-existing:
@@ -187,23 +294,26 @@ while true; do
   today=$(date +%Y/%m/%d)
   extra_day=""
   [ "$(date +%H%M | sed 's/^0*//;s/^$/0/')" -lt 30 ] && extra_day=$(date -d "yesterday" +%Y/%m/%d 2>/dev/null)
-  tmperr="$LOG.err.$$"                                # this cycle's captured rclone output (for reason classification)
-  for camdir in "$CAMERAS_DIR"/*/; do
-    [ -d "$camdir" ] || continue
-    cam=$(basename "$camdir")
-    for day in $today $extra_day; do
-      [ -d "$camdir$day" ] || continue
-      rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
-        --min-age 10s --transfers 3 -v --stats-one-line >"$tmperr" 2>&1; rc=$?
-      cat "$tmperr" >>"$LOG" 2>/dev/null              # keep the -v "Copied (new)" lines latency-report needs
-      if [ "$rc" -ne 0 ]; then
-        reason=$(classify_sync_err "$tmperr")
-        log "!! fast lane failed for $cam/$day ($reason)"
-        log_event "$cam" sync error "fast lane $day: $reason"
-        fast_ok=0; last_error="$reason"; last_error_ts=$now
-      fi
+  if [ "$((now - last_fast))" -ge "$FAST_EVERY" ]; then
+    for camdir in "$CAMERAS_DIR"/*/; do
+      [ -d "$camdir" ] || continue
+      cam=$(basename "$camdir")
+      for day in $today $extra_day; do
+        [ -d "$camdir$day" ] || continue
+        rclone copy "$camdir$day" "$REMOTE/$cam/$day" --include "*.mp4" --include "*.jpg" \
+          --min-age 10s --transfers 3 -v --stats-one-line >"$tmperr" 2>&1; rc=$?
+        cat "$tmperr" >>"$LOG" 2>/dev/null              # keep the -v "Copied (new)" lines latency-report needs
+        backstop_audit "$tmperr" "fast scan"
+        if [ "$rc" -ne 0 ]; then
+          reason=$(classify_sync_err "$tmperr")
+          log "!! fast lane failed for $cam/$day ($reason)"
+          log_event "$cam" sync error "fast lane $day: $reason"
+          fast_ok=0; last_error="$reason"; last_error_ts=$now
+        fi
+      done
     done
-  done
+    last_fast=$now
+  fi
   [ "$fast_ok" = 1 ] && last_fast_ok=$now
   # Health/metrics refresh: status.json, metrics.csv, events.jsonl & sync_status.json live at (or
   # near) each camera's ROOT (depth 1-2 from CAMERAS_DIR); --max-depth keeps this from re-walking the
@@ -218,6 +328,7 @@ while true; do
     rclone copy "$CAMERAS_DIR" "$REMOTE" --include "*.mp4" --include "*.jpg" --min-age 10s \
          --transfers 3 --fast-list -v --stats-one-line >"$tmperr" 2>&1; rc=$?
     cat "$tmperr" >>"$LOG" 2>/dev/null
+    backstop_audit "$tmperr" "self-heal"
     if [ "$rc" -eq 0 ]; then
       uploaded_ok=1; last_heal_ok=$now
     else

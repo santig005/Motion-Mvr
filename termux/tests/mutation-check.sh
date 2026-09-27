@@ -127,6 +127,28 @@ mutate "metrics datetime carries the tag" record-preroll.sh run-tests.sh \
 mutate "favourites drop the camera tag" cloud-sync.sh test-cloud-sync.sh \
   's/\(_\[A-Za-z0-9-\]\+\)\?//s'
 
+printf '\n\033[1mUpload queue (multi-camera B1, 2026-09-26)\033[0m\n'
+
+# Markers never removed: every cycle re-uploads the whole history of the queue.
+mutate "queue: success removes the markers" cloud-sync.sh test-cloud-sync.sh \
+  's/      for m in \$batch; do rm -f "\$q\/\$m"; done\n//s'
+
+# Counting transient failures: one Drive outage would dead-letter the whole queue.
+mutate "queue: outages never dead-letter" cloud-sync.sh test-cloud-sync.sh \
+  's/if \[ "\$reason" = error \]; then/if true; then/s'
+
+# No dead-letter: one permanently failing clip blocks the head of the queue forever.
+mutate "queue: a stuck clip is set aside" cloud-sync.sh test-cloud-sync.sh \
+  's/\[ "\$tries" -ge "\$QUEUE_MAX_TRIES" \]/[ "\$tries" -ge 999999 ]/s'
+
+# Without the queue check every scan/queue race is reported as a leak: an audit nobody can trust.
+mutate "backstop: a race is not a miss" cloud-sync.sh test-cloud-sync.sh \
+  's/\n[^\n]*grep -q[^\n]*&& continue//s'
+
+# Without the time prefix the order is by camera name, not by who finished first.
+mutate "producer: marker leads with finish time" record-preroll.sh run-tests.sh \
+  's/m="\$\(date \+%s%N\)\.\$\{CLIP_TAG\}\./m="\${CLIP_TAG}./s'
+
 echo
 if [ "$SURVIVED" -eq 0 ]; then
   printf '\033[1mAll mutants killed — every fix and every guard is covered by a test that fails without it.\033[0m\n'

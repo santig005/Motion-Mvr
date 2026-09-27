@@ -517,5 +517,19 @@ eq "metrics row: clip = full name"            "mt_20260926_125715_out" "${row%%,
 eq "metrics row: datetime = timestamp only"   "20260926_125715" "$(printf '%s' "$row" | cut -d, -f2)"
 
 # =============================================================================================
+describe "enqueue_upload — every finalized clip joins the shared FIFO (multi-camera B1)"
+# =============================================================================================
+export UPLOAD_QUEUE="$SANDBOX/queue"; rm -rf "$UPLOAD_QUEUE"
+enqueue_upload "$SANDBOX/out/2026/09/26/mt_20260926_125715_out.mp4"
+enqueue_upload "$SANDBOX/out/2026/09/26/mt_20260926_125731_out.mp4"
+markers=$(ls -1 "$UPLOAD_QUEUE" | grep -v '^\.')
+eq "one marker per clip"                     "2" "$(printf '%s\n' "$markers" | grep -c .)"
+eq "nothing half-written is left behind"     "0" "$(ls -1A "$UPLOAD_QUEUE" | grep -c '^\.tmp')"
+first=$(printf '%s\n' "$markers" | sort | head -1)
+eq "sorted by name = enqueue order"          "$SANDBOX/out/2026/09/26/mt_20260926_125715_out.mp4" "$(head -1 "$UPLOAD_QUEUE/$first")"
+case "$first" in [0-9]*.out.mt_20260926_125715_out) ok "marker name = <ns>.<camera>.<clip>" ;;
+                 *) no "marker name = <ns>.<camera>.<clip>" "<ns>.out.mt_20260926_125715_out" "$first" ;; esac
+
+# =============================================================================================
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

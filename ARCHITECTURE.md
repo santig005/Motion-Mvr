@@ -72,9 +72,19 @@ Cameras/<cam>/status.json
 
 ## Upload & retention
 
-`cloud-sync.sh` runs `rclone` on its own loop, in **three lanes**:
+`cloud-sync.sh` runs `rclone` on its own loop, in **four lanes**:
 
-- **Fast lane** (every `SYNC_INTERVAL`, ~25 s): uploads only each camera's **today** folder
+- **Upload queue** (every `SYNC_INTERVAL`, ~25 s; since 2026-09-26): each finalized clip leaves a
+  marker `<finish-ns>.<camera>.<clip>` in `~/.upload_queue/`; cloud-sync drains it oldest-first in
+  batches (`--files-from-raw --no-traverse`, no folder listings), so clips upload in the order they
+  **finished, across all cameras** — first come, first served. Transient failures (network, rate
+  limit, Drive full) keep a clip queued indefinitely; a clip failing for any other reason is set
+  aside to `.deadletter/` after `QUEUE_MAX_TRIES` so it cannot block the head. `sync_status.json`
+  carries `queue_len` / `queue_oldest_s`. The queue is an optimisation, never the only record: the
+  two scans below still upload anything it missed, and **every camera-tagged clip a scan has to
+  upload without a marker is logged as a `sync backstop` event** (`backstop_total`), so a leak in the
+  queue is visible rather than silently repaired.
+- **Fast scan** (every `FAST_EVERY`, 5 min; was the per-cycle fast lane before the queue): uploads only each camera's **today** folder
   (plus yesterday's during the first 30 min after midnight, for clips that finalize across the
   boundary). One Drive listing per camera per cycle — important because rclone's default shared
   `client_id` has a tiny per-minute query quota, and re-listing the whole tree every cycle trips
