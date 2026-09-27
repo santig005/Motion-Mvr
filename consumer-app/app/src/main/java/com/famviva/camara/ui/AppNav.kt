@@ -676,6 +676,7 @@ private fun DaysScreen(vm: MainViewModel, nav: NavHostController) {
                     Spacer(Modifier.width(8.dp))
                 }
             }
+            CameraFilterChips(vm)
 
             AwayModeChip(awayStore, awayRefresh) { nav.navigate("away_settings") }
 
@@ -847,6 +848,7 @@ private fun StorageScreen(vm: MainViewModel, nav: NavHostController) {
         Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)) {
             Spacer(Modifier.height(8.dp))
             StorageSectionSelector(section) { section = it }
+            CameraFilterChips(vm)
             Spacer(Modifier.height(8.dp))
             Text(
                 stringResource(
@@ -1436,6 +1438,7 @@ private fun ClipsScreen(
                     total = info.progress.getInt(com.famviva.camara.notify.LabelBackfillWorker.KEY_TOTAL, 0),
                 )
             }
+            CameraFilterChips(vm)
             ChipsRow {
                 FilterChip(
                     selected = selectedPeriod == null,
@@ -1634,9 +1637,11 @@ private fun FavoritesScreen(
             )
         },
     ) { pad ->
+      Column(Modifier.fillMaxSize().padding(pad)) {
+        CameraFilterChips(vm)
         if (clips.isEmpty()) {
             Column(
-                Modifier.fillMaxSize().padding(pad).padding(32.dp),
+                Modifier.fillMaxSize().padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
@@ -1655,7 +1660,7 @@ private fun FavoritesScreen(
             }
         } else {
             LazyColumn(
-                Modifier.fillMaxSize().padding(pad),
+                Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -1674,6 +1679,7 @@ private fun FavoritesScreen(
                 }
             }
         }
+      }
     }
 
     actionClip?.let { clip ->
@@ -1741,6 +1747,7 @@ private fun HistoryScreen(
         },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
+            CameraFilterChips(vm)
             if (days.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(

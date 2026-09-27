@@ -111,6 +111,14 @@ class MainViewModel(
     /** The filter in effect: a remembered camera that is no longer known falls back to "All". */
     val effectiveCameraFilter: String? get() = cameraFilter?.takeIf { it in knownCameraIds() }
 
+    /** Does an item of [camera] pass the camera filter? An item whose camera is unknown (e.g. a very
+     *  old favorite whose Drive original is gone) passes every filter: history is never hidden for
+     *  lack of metadata. */
+    fun passesCameraFilter(camera: String?): Boolean {
+        val sel = effectiveCameraFilter ?: return true
+        return camera == null || camera == sel
+    }
+
     fun setCameraEnabled(id: String, enabled: Boolean) = editRegistry(id) { it.copy(enabled = enabled) }
 
     fun setCameraLabel(id: String, label: String) =
@@ -166,7 +174,7 @@ class MainViewModel(
     fun offlineTotalBytes(): Long { offlineVersion; return offline.totalSizeBytes() }
 
     /** Total bytes stored on Drive across every clip (the full cloud footprint). */
-    fun driveTotalBytes(): Long = clips.sumOf { it.sizeBytes }
+    fun driveTotalBytes(): Long = clips.filter { passesCameraFilter(it.camera) }.sumOf { it.sizeBytes }
 
     /** Average "recording ended -> visible on Drive" latency across clips that have both timestamps —
      *  the "how long until footage is safe in the cloud" margin. Null if no clip has the data yet.
@@ -184,6 +192,7 @@ class MainViewModel(
         val live = clips.associateBy { it.id }
         return favorites.favorites()
             .map { stored -> live[stored.id] ?: stored }
+            .filter { passesCameraFilter(it.camera) }
             .sortedByDescending { it.name }
     }
 
@@ -352,7 +361,7 @@ class MainViewModel(
     /** Every catalog day (YYYYMMDD) -> that day's records, most recent first. The whole timeline,
      *  including metadata-only entries whose video is gone everywhere. */
     fun catalogByDay(): List<Pair<String, List<ClipRecord>>> =
-        catalog.filter { it.dateKey != null }
+        catalog.filter { it.dateKey != null && passesCameraFilter(it.camera) }
             .groupBy { it.dateKey!! }
             .toSortedMap(compareByDescending { it })
             .map { it.key to it.value.sortedByDescending { r -> r.name } }
@@ -385,7 +394,7 @@ class MainViewModel(
 
     /** Every clip that has a day, grouped and sorted most-recent-first — unfiltered by [dateFilter]. */
     private fun allClipsGroupedByDay(): List<Pair<String, List<Clip>>> =
-        clips.filter { it.dateKey != null }
+        clips.filter { it.dateKey != null && passesCameraFilter(it.camera) }
             .groupBy { it.dateKey!! }
             .toSortedMap(compareByDescending { it })
             .map { it.key to it.value }
@@ -397,7 +406,7 @@ class MainViewModel(
             .filter { it.second.isNotEmpty() }
 
     fun clipsOf(dateKey: String): List<Clip> =
-        clips.filter { it.dateKey == dateKey }
+        clips.filter { it.dateKey == dateKey && passesCameraFilter(it.camera) }
 
     fun find(id: String): Clip? =
         clips.firstOrNull { it.id == id }
