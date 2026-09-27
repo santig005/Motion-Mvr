@@ -439,12 +439,20 @@ data class BlipClusterEntry(val cluster: BlipCluster) : HealthEvent {
  * [BlipEntry]s. A down with no following up is an ongoing outage; an up with no matching down is
  * ignored. Result is newest-first, ready to group by day.
  */
+/** svc of the NVR's ring (fallback) detector — see [buildHealthTimeline] for its inverted up/down. */
+const val RING_DETECTOR_SVC = "ring_detector"
+
 fun buildHealthTimeline(events: List<OutageEvent>): List<HealthEvent> {
     val sorted = events.sortedBy { it.ts }
     val open = HashMap<String, OutageEvent>()   // "svc|cam" -> the still-unmatched down
     val out = mutableListOf<HealthEvent>()
     for (e in sorted) {
         val key = "${e.svc}|${e.cam ?: ""}"
+        // The ring (fallback) detector logs INVERTED semantics: "up" = it ENGAGED because the RTSP
+        // detector died, "down" = it stood down because the RTSP detector came back. Pairing them as
+        // an outage painted a phantom "happening now" outage every time things got BETTER (seen
+        // 2026-09-27 on Camara2). They are state notes, not outages.
+        if (e.svc == RING_DETECTOR_SVC) { out += BlipEntry(e); continue }
         when (e.ev) {
             "down" -> if (!open.containsKey(key)) open[key] = e   // keep the earliest open down
             "up" -> open.remove(key)?.let { down ->

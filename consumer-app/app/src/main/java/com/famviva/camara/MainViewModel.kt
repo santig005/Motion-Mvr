@@ -29,7 +29,9 @@ import com.famviva.camara.data.SeenStore
 import com.famviva.camara.data.ThumbArchive
 import java.io.File
 import java.time.LocalDate
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Quick date-range filter on the Days screen. */
 enum class DateFilter(@StringRes val labelRes: Int) {
@@ -328,9 +330,14 @@ class MainViewModel(
      *  background thumbnail archive so the history stays visual after Drive purges the jpg. */
     private suspend fun refreshCatalog() {
         val metricRows = runCatching { drive.fetchAllMetrics() }.getOrDefault(emptyMap())
-        val merged = CatalogStore.merge(clips, metricRows, offline, favorites, thumbs)
+        // Off the main thread: the merge stats a local file for EVERY catalog record (thousands with two
+        // cameras) and the save rewrites the whole JSON — on Main that froze the UI past the 5 s ANR
+        // limit (2026-09-27, main thread in OfflineStore.downloadedPathForName -> File.length).
+        val snapshot = clips
+        val merged = withContext(Dispatchers.IO) {
+            CatalogStore.merge(snapshot, metricRows, offline, favorites, thumbs).also { catalogStore.save(it) }
+        }
         catalog = merged
-        catalogStore.save(merged)
         archiveThumbnails(merged)
     }
 

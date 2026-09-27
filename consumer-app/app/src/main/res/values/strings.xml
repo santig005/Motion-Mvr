@@ -111,7 +111,7 @@
     <string name="camera_live_section">Live view (optional)</string>
     <string name="live_tile_disabled">Switched off</string>
     <string name="camera_switch_help">Switch a camera off before unplugging it: the NVR stops it and no alarms fire. Its clips stay available.</string>
-    <string name="camera_filter_all">All</string>
+    <string name="camera_filter_all">All cameras</string>
     <string name="nvr_name">NVR phone</string>
     <string name="health_sync_queue">Upload queue: %1$d clip(s), the oldest waiting %2$d min</string>
     <string name="health_sync_queue_empty">Upload queue empty — everything is on Drive</string>

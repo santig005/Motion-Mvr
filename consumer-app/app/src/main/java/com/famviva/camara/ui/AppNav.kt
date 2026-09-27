@@ -3063,9 +3063,9 @@ private fun HealthScreen(vm: MainViewModel, nav: NavHostController, drive: com.f
                     item { HealthDayHeader(prettyDate(context, day)) }
                     items(dayEvents) { entry ->
                         when (entry) {
-                            is OutageEntry -> OutageCard(entry.outage)
-                            is BlipEntry -> BlipRow(entry.event)
-                            is BlipClusterEntry -> BlipClusterRow(entry.cluster)
+                            is OutageEntry -> OutageCard(entry.outage, vm::displayName)
+                            is BlipEntry -> BlipRow(entry.event, vm::displayName)
+                            is BlipClusterEntry -> BlipClusterRow(entry.cluster, vm::displayName)
                         }
                     }
                 }
@@ -3322,7 +3322,7 @@ private fun SyncCard(sync: SyncStatus?, now: Long) {
 /** A paired outage span. Ongoing outages are critical (red); a resolved one still reads as notable
  *  (amber), and the title says what happened ("Stopped recording") rather than just the service. */
 @Composable
-private fun OutageCard(outage: Outage) {
+private fun OutageCard(outage: Outage, labelOf: (String) -> String = { it }) {
     val context = LocalContext.current
     val ongoing = outage.ongoing
     val sev = if (ongoing) Sev.CRITICAL else Sev.WARNING
@@ -3332,7 +3332,7 @@ private fun OutageCard(outage: Outage) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    outageTitle(outage.svc, ongoing) + (outage.cam?.let { " · $it" } ?: ""),
+                    outageTitle(outage.svc, ongoing) + (outage.cam?.let { " · ${labelOf(it)}" } ?: ""),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = fg,
@@ -3369,7 +3369,7 @@ private fun OutageCard(outage: Outage) {
 
 /** A minor blip (short 2K drop or a logged error) — smaller than an outage card. */
 @Composable
-private fun BlipRow(event: OutageEvent) {
+private fun BlipRow(event: OutageEvent, labelOf: (String) -> String = { it }) {
     val label = when (event.ev) {
         "drop" -> stringResource(R.string.health_ev_drop)
         "error" -> stringResource(R.string.health_ev_error)
@@ -3388,7 +3388,7 @@ private fun BlipRow(event: OutageEvent) {
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                "${serviceName(event.svc)}${event.cam?.let { " · $it" } ?: ""} · $label",
+                "${serviceName(event.svc)}${event.cam?.let { " · ${labelOf(it)}" } ?: ""} · $label",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
             )
@@ -3406,7 +3406,7 @@ private fun BlipRow(event: OutageEvent) {
 /** A collapsed reconnect storm: one card standing in for many same-kind blips ("87 detector drops ·
  *  10:46–12:49"), so a flapping link doesn't bury the real outages. */
 @Composable
-private fun BlipClusterRow(cluster: BlipCluster) {
+private fun BlipClusterRow(cluster: BlipCluster, labelOf: (String) -> String = { it }) {
     val isError = cluster.ev == "error"
     val label = when (cluster.ev) {
         "drop" -> stringResource(R.string.health_cluster_drops, cluster.count, serviceName(cluster.svc))
@@ -3421,7 +3421,7 @@ private fun BlipClusterRow(cluster: BlipCluster) {
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Text(
-                label + (cluster.cam?.let { " · $it" } ?: ""),
+                label + (cluster.cam?.let { " · ${labelOf(it)}" } ?: ""),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,

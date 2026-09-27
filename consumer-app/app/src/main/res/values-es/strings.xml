@@ -111,7 +111,7 @@
     <string name="camera_live_section">Vista en vivo (opcional)</string>
     <string name="live_tile_disabled">Desactivada</string>
     <string name="camera_switch_help">Desactiva una cámara antes de desenchufarla: el NVR la detiene y no salta ninguna alarma. Sus clips siguen disponibles.</string>
-    <string name="camera_filter_all">Todas</string>
+    <string name="camera_filter_all">Todas las cámaras</string>
     <string name="nvr_name">Teléfono NVR</string>
     <string name="health_sync_queue">Cola de subida: %1$d clip(s), el más antiguo espera %2$d min</string>
     <string name="health_sync_queue_empty">Cola de subida vacía: todo está en Drive</string>
